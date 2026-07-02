@@ -57,7 +57,10 @@ Dependencies are tracked in `environment.yml` (reproduce with
 **Phase 1 — Core Mathpix pipeline.** Scope: given a single PDF path, submit to
 Mathpix, poll to completion, retrieve Markdown + figures, write to `_cache/`.
 No discovery loop, no `state.db`, no LLM stage, no vault writing yet — those
-arrive in later phases (see full spec discussion for the 7-phase roadmap).
+arrive in later phases (see `docs/spec.md` for the full 7-phase roadmap and
+stage-by-stage detail — state.db schema, LLM prompt structure, error handling
+table, CLI flags, etc. Note: follow this file (AGENTS.md), not spec.md, where
+they disagree — see "Mathpix API notes" below for known corrections).
 
 ## Mathpix API notes
 
@@ -95,6 +98,8 @@ section, when implementing `src/mathpix.py`:
 notex/                      ← repo root
 ├── .env                    ← secrets (gitignored), see .env.example
 ├── environment.yml         ← conda env spec (reproduce with `conda env create -f environment.yml`)
+├── docs/
+│   └── spec.md             ← original full spec (historical reference, see note at top of file)
 ├── src/
 │   ├── config.py           ← env/config loading
 │   └── mathpix.py          ← Mathpix API client
