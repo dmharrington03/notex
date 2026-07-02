@@ -1,0 +1,20 @@
+# Reproduce with: conda env create -f environment.yml
+# Update after changes with: conda env export --from-history > environment.yml
+#
+# Phase 1 dependencies only. Additional packages (PyYAML, litellm, click, etc.)
+# get added in later phases as their stages are implemented.
+#
+# requests is included for manual Mathpix API key verification; the pipeline
+# itself is built on httpx (see src/mathpix.py).
+
+name: notex
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.11
+  - httpx
+  - python-dotenv
+  - pytest
+  - requests
+  - conda-forge::respx

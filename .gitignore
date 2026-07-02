@@ -1,0 +1,22 @@
+# Secrets
+.env
+
+# Machine-specific config (real paths); see config.example.yaml for the template
+config.yaml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Pipeline runtime data (never committed)
+_cache/
+state.db
+*.log
+
+# OS
+.DS_Store
