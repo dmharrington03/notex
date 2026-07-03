@@ -10,11 +10,15 @@ Covered here (issue #1 — submit()):
     - submit() raises httpx.HTTPStatusError on a non-2xx response
     - submit() raises FileNotFoundError for a missing pdf_path
 
+Covered here (issue #2 — poll_until_complete()):
+    - walks received -> loaded -> split -> completed, returns final payload
+    - raises MathpixProcessingError on status == "error"
+    - raises MathpixTimeoutError after max_poll_attempts exhausted
+    - raises httpx.HTTPStatusError on a non-2xx (non-429) response
+    - HTTP 429 responses are retried (honoring Retry-After) without
+      counting against max_poll_attempts
+
 Still TODO (later issues):
-    - poll_until_complete() walks received -> loaded -> split -> completed
-    - poll_until_complete() raises on status == "error"
-    - poll_until_complete() raises/times out after max_poll_attempts
-    - HTTP 429 respects Retry-After header
     - fetch_and_extract() against tests/fixtures/sample_result.md.zip:
       figures renamed sequentially, markdown image refs rewritten to match
 """
@@ -25,7 +29,13 @@ import httpx
 import pytest
 import respx
 
-from src.mathpix import DEFAULT_SUBMIT_OPTIONS, MathpixClient, MathpixError
+from src.mathpix import (
+    DEFAULT_SUBMIT_OPTIONS,
+    MathpixClient,
+    MathpixError,
+    MathpixProcessingError,
+    MathpixTimeoutError,
+)
 
 MATHPIX_BASE_URL = "https://api.mathpix.com"
 
@@ -41,6 +51,29 @@ def fake_pdf(tmp_path):
 def client():
     with MathpixClient(app_id="test_app_id", app_key="test_app_key") as c:
         yield c
+
+
+@pytest.fixture
+def sleep_calls():
+    """Records sleep_fn calls in place of a real time.sleep()."""
+    calls: list[float] = []
+    return calls
+
+
+@pytest.fixture
+def polling_client(sleep_calls):
+    """A MathpixClient with a no-op, call-recording sleep_fn injected so
+    poll_until_complete() tests never actually wait."""
+    with MathpixClient(
+        app_id="test_app_id",
+        app_key="test_app_key",
+        sleep_fn=sleep_calls.append,
+    ) as c:
+        yield c
+
+
+def _status_response(status: str, **extra):
+    return httpx.Response(200, json={"status": status, **extra})
 
 
 @respx.mock
@@ -130,3 +163,132 @@ def test_submit_raises_filenotfounderror_for_missing_pdf(client, tmp_path):
 
     with pytest.raises(FileNotFoundError):
         client.submit(missing_path)
+
+
+# --- poll_until_complete() -----------------------------------------------
+
+
+@respx.mock
+def test_poll_walks_statuses_to_completed(polling_client, sleep_calls):
+    route = respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123")
+    route.side_effect = [
+        _status_response("received"),
+        _status_response("loaded"),
+        _status_response("split"),
+        _status_response("completed", md="# Lecture"),
+    ]
+
+    payload = polling_client.poll_until_complete(
+        "abc123", poll_interval_seconds=1, max_poll_attempts=10
+    )
+
+    assert payload == {"status": "completed", "md": "# Lecture"}
+    assert route.call_count == 4
+    # Slept between each non-terminal poll, but not after the final
+    # (completed) response.
+    assert sleep_calls == [1, 1, 1]
+
+    request = route.calls.last.request
+    assert request.headers["app_id"] == "test_app_id"
+    assert request.headers["app_key"] == "test_app_key"
+
+
+@respx.mock
+def test_poll_raises_on_error_status(polling_client, sleep_calls):
+    respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123").mock(
+        return_value=_status_response(
+            "error", error="bad scan", error_info={"id": "image_error"}
+        )
+    )
+
+    with pytest.raises(MathpixProcessingError, match="bad scan"):
+        polling_client.poll_until_complete(
+            "abc123", poll_interval_seconds=1, max_poll_attempts=10
+        )
+
+    assert sleep_calls == []
+
+
+@respx.mock
+def test_poll_raises_timeout_after_max_attempts(polling_client, sleep_calls):
+    route = respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123").mock(
+        return_value=_status_response("split")
+    )
+
+    with pytest.raises(MathpixTimeoutError, match="3 attempts"):
+        polling_client.poll_until_complete(
+            "abc123", poll_interval_seconds=1, max_poll_attempts=3
+        )
+
+    assert route.call_count == 3
+    # Slept between attempts only (2 sleeps for 3 attempts), not after the
+    # final failed attempt before giving up.
+    assert sleep_calls == [1, 1]
+
+
+@respx.mock
+def test_poll_raises_on_http_error_status(polling_client):
+    respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123").mock(
+        return_value=httpx.Response(500, json={"error": "server error"})
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        polling_client.poll_until_complete(
+            "abc123", poll_interval_seconds=1, max_poll_attempts=3
+        )
+
+
+@respx.mock
+def test_poll_retries_on_429_honoring_retry_after(polling_client, sleep_calls):
+    route = respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123")
+    route.side_effect = [
+        httpx.Response(429, headers={"Retry-After": "2"}, json={}),
+        _status_response("completed", md="# Lecture"),
+    ]
+
+    payload = polling_client.poll_until_complete(
+        "abc123", poll_interval_seconds=1, max_poll_attempts=3
+    )
+
+    assert payload == {"status": "completed", "md": "# Lecture"}
+    assert route.call_count == 2
+    # The 429 backoff used Retry-After (2), not poll_interval_seconds (1),
+    # and did not count against max_poll_attempts.
+    assert sleep_calls == [2]
+
+
+@respx.mock
+def test_poll_429_without_retry_after_uses_poll_interval(polling_client, sleep_calls):
+    route = respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123")
+    route.side_effect = [
+        httpx.Response(429, json={}),
+        _status_response("completed"),
+    ]
+
+    polling_client.poll_until_complete(
+        "abc123", poll_interval_seconds=1, max_poll_attempts=3
+    )
+
+    assert sleep_calls == [1]
+
+
+def test_poll_uses_config_defaults_when_args_omitted(monkeypatch, polling_client, sleep_calls):
+    import src.mathpix as mathpix_module
+    from src.config import MathpixPollingConfig
+
+    monkeypatch.setattr(
+        mathpix_module,
+        "load_mathpix_polling_config",
+        lambda: MathpixPollingConfig(poll_interval_seconds=1, max_poll_attempts=2),
+    )
+
+    with respx.mock:
+        route = respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123").mock(
+            return_value=_status_response("split")
+        )
+
+        with pytest.raises(MathpixTimeoutError, match="2 attempts"):
+            polling_client.poll_until_complete("abc123")
+
+        assert route.call_count == 2
+        assert sleep_calls == [1]

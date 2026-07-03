@@ -1,10 +1,14 @@
 # Copy this file to config.yaml and fill in real paths for your machine.
 # config.yaml is gitignored since these paths are machine-specific.
 #
-# Additional sections (mathpix:, llm:, output:, naming:) are added in later
-# phases as the code that consumes them is implemented — see AGENTS.md for
-# current phase status.
+# Additional sections (llm:, output:, naming:) are added in later phases as
+# the code that consumes them is implemented — see AGENTS.md for current
+# phase status.
 
 paths:
   input_root: "/path/to/notes_raw"
   vault_root: "/path/to/vault"
+
+mathpix:
+  poll_interval_seconds: 5
+  max_poll_attempts: 60

@@ -78,31 +78,68 @@ they disagree — see "Mathpix API notes" below for known corrections).
     Mathpix-specific failures (currently: a 2xx response body containing an
     `error` field, or a 2xx body missing `pdf_id`). Non-2xx HTTP responses
     raise `httpx.HTTPStatusError` via `response.raise_for_status()`.
-    **Issue #2 still needs to decide/add** its own dedicated exception
-    type(s) for poll `status == "error"` vs. poll timeout — the issue text
-    requires these to be distinguishable from each other (both need to map
-    to `mathpix_failed` in the future state log).
   - `submit()`'s Phase 1 options are intentionally minimal:
     `DEFAULT_SUBMIT_OPTIONS = {"conversion_formats": {"md.zip": True}}`.
     `include_page_breaks`, `rm_spaces`, math delimiter options, etc. are
     deliberately deferred — delimiter options only affect the `text` format
     anyway, not `md`/`mmd` (see "Mathpix API notes" below).
-  - `poll_until_complete(pdf_id)` and `fetch_and_extract(pdf_id, dest_dir)`
-    are stubbed on `MathpixClient` as `raise NotImplementedError(...)`,
-    pointing at issues #2 and #3 respectively. Module-level `process_pdf()`
-    is stubbed the same way, pointing at issue #4. Fill these in rather than
-    changing the established method signatures/shape unless a real blocker
-    comes up.
+  - `fetch_and_extract(pdf_id, dest_dir)` is still stubbed on `MathpixClient`
+    as `raise NotImplementedError(...)`, pointing at issue #3. Module-level
+    `process_pdf()` is stubbed the same way, pointing at issue #4. Fill these
+    in rather than changing the established method signatures/shape unless a
+    real blocker comes up.
   - Credentials: `src/config.py` → `load_mathpix_credentials()` reads
     `MATHPIX_APP_ID`/`MATHPIX_APP_KEY` from `.env` (via `python-dotenv`),
     returns a frozen `MathpixCredentials` dataclass, raises `ConfigError` if
-    either is missing/blank. Poll-interval / max-poll-attempts defaults are
-    **not yet** in `config.py` — issue #2 should add them there (or decide
-    otherwise).
+    either is missing/blank.
   - `.env` exists locally now (gitignored, real path present in working
     tree per usual). Real Mathpix credentials go there when available, but
     are not required to implement/test issue #2 — all unit tests mock HTTP
     and never touch the real API or a real key.
+
+- **Issue #2 (`MathpixClient.poll_until_complete()`) — done.** Implemented
+  in `src/mathpix.py` / `src/config.py`, tested in `tests/test_mathpix.py`
+  and `tests/test_config.py` (7 new respx-mocked poll cases + 4 config
+  cases, all passing). Conventions established/extended here:
+  - Two dedicated exception types, both subclassing `MathpixError`:
+    `MathpixProcessingError` (poll `status == "error"`) and
+    `MathpixTimeoutError` (`max_poll_attempts` exhausted without reaching a
+    terminal status) — distinguishable from each other per the issue's
+    requirement, even though both currently map to `mathpix_failed` in the
+    future state log.
+  - `sleep_fn` is a **constructor** param on `MathpixClient` (defaults to
+    `time.sleep`), matching the existing `http_client=` injection pattern —
+    not a per-call param on `poll_until_complete()`. Tests inject a
+    list-`.append`-based recorder so nothing actually sleeps.
+  - HTTP `429` responses during polling are retried honoring `Retry-After`
+    (parsed as a plain float/int of seconds — Mathpix doesn't use HTTP-date
+    `Retry-After` values) and **do not** count against `max_poll_attempts`;
+    only real status polls (received/loaded/split) consume an attempt.
+  - `percent_done` / `num_pages_completed`: **stay internal for Phase 1** —
+    `poll_until_complete()` just returns the full JSON payload dict on
+    `status == "completed"`; no logging/printing infra exists yet in this
+    phase.
+  - `config.yaml` now has a `mathpix:` section (`poll_interval_seconds: 5`,
+    `max_poll_attempts: 60`) — added to both `config.yaml` (real,
+    gitignored) and `config.example.yaml` (template, tracked). This is
+    ahead of the Phase 6 full config.yaml wiring, scoped narrowly to just
+    these two polling keys for issue #2.
+  - `src/config.py` → new `load_mathpix_polling_config(config_path=None)`
+    reads `mathpix.poll_interval_seconds` / `mathpix.max_poll_attempts` from
+    `config.yaml` (default path: `config.yaml` in the cwd, matching the
+    `.env` convention of running the CLI from the repo root), returning a
+    frozen `MathpixPollingConfig` dataclass. Missing file / missing section
+    / missing individual keys all fall back to the hardcoded
+    `DEFAULT_POLL_INTERVAL_SECONDS` (5) / `DEFAULT_MAX_POLL_ATTEMPTS` (60)
+    module constants — config.yaml's mathpix: section is optional, not
+    required.
+  - `poll_until_complete(pdf_id, poll_interval_seconds=None,
+    max_poll_attempts=None)` only calls `load_mathpix_polling_config()` when
+    either arg is omitted (`None`) — tests always pass both explicitly so
+    they never touch the filesystem/depend on cwd.
+  - `pyyaml` added as a new conda dependency (`environment.yml`) to parse
+    `config.yaml`; installed via `conda install -n notex pyyaml` per
+    AGENTS.md's "conda, never pip" rule.
 
 ## Mathpix API notes
 

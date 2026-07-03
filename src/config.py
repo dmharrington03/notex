@@ -1,19 +1,33 @@
 """
 Phase 1 config loading.
 
-Responsible for loading MATHPIX_APP_ID / MATHPIX_APP_KEY from .env, plus a
-couple of hardcoded polling defaults (poll_interval_seconds, max_poll_attempts).
+Responsible for loading MATHPIX_APP_ID / MATHPIX_APP_KEY from .env, plus the
+mathpix: poll_interval_seconds / max_poll_attempts settings from config.yaml
+(falling back to hardcoded defaults if config.yaml or the section/keys are
+absent).
 
-Full config.yaml wiring (paths, LLM settings, per-course tags, etc.) arrives
-in Phase 6 — kept out of scope here intentionally.
+Full config.yaml wiring for the remaining sections (paths, LLM settings,
+per-course tags, etc.) arrives in Phase 6 — kept out of scope here
+intentionally.
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
+import yaml
 from dotenv import load_dotenv
+
+# Matches the project convention of running the CLI from the repo root
+# (config.yaml lives at the repo root, is gitignored/machine-specific — see
+# config.example.yaml for the template and AGENTS.md for details).
+DEFAULT_CONFIG_PATH = Path("config.yaml")
+
+DEFAULT_POLL_INTERVAL_SECONDS: float = 5
+DEFAULT_MAX_POLL_ATTEMPTS: int = 60
 
 
 class ConfigError(Exception):
@@ -24,6 +38,12 @@ class ConfigError(Exception):
 class MathpixCredentials:
     app_id: str
     app_key: str
+
+
+@dataclass(frozen=True)
+class MathpixPollingConfig:
+    poll_interval_seconds: float
+    max_poll_attempts: int
 
 
 def load_mathpix_credentials(env_file: str | None = None) -> MathpixCredentials:
@@ -56,3 +76,41 @@ def load_mathpix_credentials(env_file: str | None = None) -> MathpixCredentials:
         )
 
     return MathpixCredentials(app_id=app_id, app_key=app_key)
+
+
+def load_mathpix_polling_config(
+    config_path: str | Path | None = None,
+) -> MathpixPollingConfig:
+    """
+    Load the mathpix: poll_interval_seconds / max_poll_attempts settings from
+    config.yaml.
+
+    Args:
+        config_path: optional explicit path to config.yaml. If not given,
+            defaults to DEFAULT_CONFIG_PATH (config.yaml in the current
+            working directory), matching the project convention of running
+            the CLI from the repo root.
+
+    config.yaml (and the mathpix: section/keys within it) is optional here —
+    if the file doesn't exist, or the section/keys are missing, the
+    corresponding hardcoded default (DEFAULT_POLL_INTERVAL_SECONDS /
+    DEFAULT_MAX_POLL_ATTEMPTS) is used instead.
+    """
+    path = Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
+
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS
+    max_poll_attempts: int = DEFAULT_MAX_POLL_ATTEMPTS
+
+    if path.is_file():
+        with path.open("r") as fh:
+            data: dict[str, Any] = yaml.safe_load(fh) or {}
+        mathpix_section = data.get("mathpix") or {}
+        poll_interval_seconds = mathpix_section.get(
+            "poll_interval_seconds", poll_interval_seconds
+        )
+        max_poll_attempts = mathpix_section.get("max_poll_attempts", max_poll_attempts)
+
+    return MathpixPollingConfig(
+        poll_interval_seconds=poll_interval_seconds,
+        max_poll_attempts=max_poll_attempts,
+    )
