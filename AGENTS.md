@@ -62,6 +62,48 @@ stage-by-stage detail — state.db schema, LLM prompt structure, error handling
 table, CLI flags, etc. Note: follow this file (AGENTS.md), not spec.md, where
 they disagree — see "Mathpix API notes" below for known corrections).
 
+### Phase 1 progress
+
+- **Issue #1 (`MathpixClient.submit()`) — done.** Implemented in
+  `src/mathpix.py` / `src/config.py`, tested in `tests/test_mathpix.py`
+  (6 respx-mocked cases, all passing). Conventions established here that
+  later Phase 1 issues should follow:
+  - `MathpixClient` wraps a **synchronous** `httpx.Client` (not async) —
+    matches `respx`'s sync mocking. It's a context manager
+    (`with MathpixClient(app_id, app_key) as client:`) and accepts an
+    optional `http_client=` param so tests can inject one wired to a
+    respx-mocked transport; otherwise it creates and owns (and closes) its
+    own `httpx.Client`.
+  - `MathpixError` (in `src/mathpix.py`) is the base exception for
+    Mathpix-specific failures (currently: a 2xx response body containing an
+    `error` field, or a 2xx body missing `pdf_id`). Non-2xx HTTP responses
+    raise `httpx.HTTPStatusError` via `response.raise_for_status()`.
+    **Issue #2 still needs to decide/add** its own dedicated exception
+    type(s) for poll `status == "error"` vs. poll timeout — the issue text
+    requires these to be distinguishable from each other (both need to map
+    to `mathpix_failed` in the future state log).
+  - `submit()`'s Phase 1 options are intentionally minimal:
+    `DEFAULT_SUBMIT_OPTIONS = {"conversion_formats": {"md.zip": True}}`.
+    `include_page_breaks`, `rm_spaces`, math delimiter options, etc. are
+    deliberately deferred — delimiter options only affect the `text` format
+    anyway, not `md`/`mmd` (see "Mathpix API notes" below).
+  - `poll_until_complete(pdf_id)` and `fetch_and_extract(pdf_id, dest_dir)`
+    are stubbed on `MathpixClient` as `raise NotImplementedError(...)`,
+    pointing at issues #2 and #3 respectively. Module-level `process_pdf()`
+    is stubbed the same way, pointing at issue #4. Fill these in rather than
+    changing the established method signatures/shape unless a real blocker
+    comes up.
+  - Credentials: `src/config.py` → `load_mathpix_credentials()` reads
+    `MATHPIX_APP_ID`/`MATHPIX_APP_KEY` from `.env` (via `python-dotenv`),
+    returns a frozen `MathpixCredentials` dataclass, raises `ConfigError` if
+    either is missing/blank. Poll-interval / max-poll-attempts defaults are
+    **not yet** in `config.py` — issue #2 should add them there (or decide
+    otherwise).
+  - `.env` exists locally now (gitignored, real path present in working
+    tree per usual). Real Mathpix credentials go there when available, but
+    are not required to implement/test issue #2 — all unit tests mock HTTP
+    and never touch the real API or a real key.
+
 ## Mathpix API notes
 
 These correct assumptions in the original planning spec, verified against
