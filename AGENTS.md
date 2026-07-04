@@ -143,6 +143,59 @@ Tracked in issues #7-#12 (`phase-2` label).
     a missing row; otherwise parses the three timestamp columns back to
     `datetime` via `datetime.fromisoformat()`.
 
+- **Issue #8 (`src/discovery.py` two-tier per-file classification) — done.**
+  Implemented in `src/discovery.py`, tested in `tests/test_discovery.py`
+  (8 sqlite-backed cases using `tmp_path`, no mocking, all passing — one
+  per row of docs/spec.md's Reprocessing logic table plus the failed-retry
+  rule). Conventions established/extended here that later Phase 2 issues
+  (#9, #11) should follow:
+  - `classify_pdf(pdf_path, conn) -> ClassificationResult` is the per-file
+    primitive; the recursive, multi-course directory walk that calls it
+    per file is `discover_pdfs()` (issue #9, not yet implemented).
+  - `Classification` is a 4-value enum: `NEW`, `UNCHANGED`, `CHANGED`,
+    `RETRY`. `RETRY` (stored `mathpix_status == "failed"`, content
+    otherwise unchanged) is kept distinct from `CHANGED` (content actually
+    differs) rather than collapsed together, so callers can log/handle
+    "reprocessing a previously-failed file" differently from "reprocessing
+    because content changed" even though both currently mean "queue for
+    the Mathpix stage." An actual hash change always wins: if content
+    differs, the result is `CHANGED` even when `mathpix_status` was also
+    `"failed"` on that row.
+  - `ClassificationResult` is a frozen dataclass carrying not just the
+    enum but the current `source_path` (resolved absolute path string),
+    `source_mtime`, `source_size`, and `source_hash` — so a caller that
+    proceeds to reprocess (`main.py`, issue #11) can reuse the
+    already-computed hash/metadata when writing the final state.db row
+    instead of re-reading/re-hashing the file. `source_hash` is `None`
+    only when tier 1 short-circuited without ever computing a hash (a
+    plain `UNCHANGED` with no metadata drift).
+  - `compute_sha256(path)` lives in `discovery.py`, not `state.py` —
+    `state.py` stays a thin, schema-agnostic CRUD layer per its own
+    docstring; change-detection logic (hashing included) belongs to
+    discovery. Reads the file in fixed 64KB chunks rather than loading it
+    into memory at once.
+  - Tier 1 (mtime + size vs. `state.db`) short-circuits before any file
+    read happens; tier 2 (SHA-256) only runs when tier 1 can't rule out a
+    change (no entry, or mtime/size differ) — verified directly in
+    `test_unchanged_mtime_and_size_skips_hash_computation` by deliberately
+    storing a wrong hash and confirming it's never consulted.
+  - `classify_pdf()` persists exactly one thing itself: when tier 2 finds
+    the hash unchanged despite drifted mtime/size, it writes the refreshed
+    metadata immediately via a partial `upsert_entry(conn, source_path,
+    source_mtime=..., source_size=...)` — since a skipped/unchanged file
+    has no other pipeline stage that would ever perform this write. It
+    does **not** write anything for `NEW`/`CHANGED`/`RETRY` results; that's
+    left to the caller (`main.py`, issue #11) once the actual Mathpix
+    stage has run, consistent with `state.py`'s "callers own what their
+    stage writes" convention.
+  - The failed-retry check compares against the literal stored string
+    `"failed"` (docs/spec.md's State Management schema:
+    `mathpix_status`: `success`, `failed`, `pending`) — not the informal
+    `mathpix_failed` phrasing used elsewhere in spec.md's prose.
+  - `pdf_path` is resolved via `Path(pdf_path).resolve()` before being
+    used as (or looked up as) `source_path`, matching `state.py`'s
+    "absolute path string" convention for that column.
+
 ### Phase 1 progress
 
 **Phase 1 status: VALIDATED — complete.** All core-pipeline issues (#1-#6)
@@ -542,13 +595,15 @@ notex/                      ← repo root
 ├── src/
 │   ├── config.py           ← env/config loading
 │   ├── mathpix.py          ← Mathpix API client
-│   └── state.py            ← state.db schema + CRUD (StateEntry, init_db, get_entry, upsert_entry)
+│   ├── state.py            ← state.db schema + CRUD (StateEntry, init_db, get_entry, upsert_entry)
+│   └── discovery.py        ← per-file two-tier change classification (Classification, ClassificationResult, classify_pdf, compute_sha256)
 ├── scripts/
 │   └── smoke_test_mathpix.py   ← manual, real-API validation
 ├── tests/
 │   ├── fixtures/           ← fixture data for mocked tests
 │   ├── test_mathpix.py
-│   └── test_state.py
+│   ├── test_state.py
+│   └── test_discovery.py
 ├── state.db                ← SQLite state log, gitignored, created at runtime
 └── _cache/                 ← gitignored, created at runtime
 ```
