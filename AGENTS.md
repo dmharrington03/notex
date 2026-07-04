@@ -141,9 +141,9 @@ Tracked in issues #13-#20 (`phase-3` label).
 
 ### Phase 3 progress
 
-**Phase 3 status: PLANNING COMPLETE — implementation starting.** Issues
-#13-#20 are filed; none are implemented yet. Design decisions made during
-planning, recorded here so they aren't lost before the code lands:
+**Phase 3 status: IN PROGRESS.** Issue #13 is implemented; #14-#20 are filed
+but not yet implemented. Design decisions made during planning, recorded
+here so they aren't lost before the rest of the code lands:
 
 - **Heading-count validation is relaxed, not exact-match.** docs/spec.md
   calls for an exact heading-count match; this phase instead fails
@@ -169,7 +169,7 @@ planning, recorded here so they aren't lost before the code lands:
   chunking logic now would be untested speculative logic with no real
   document to validate it against — revisit as its own future issue once an
   actual long lecture is encountered.
-- **Default model: Claude 3.5 Haiku** (`claude-3-5-haiku-20241022` via
+- **Default model: Claude Haiku 4.5** (`claude-haiku-4-5-20251001` via
   `litellm`, requires `ANTHROPIC_API_KEY`). Chosen over docs/spec.md's
   primary suggestion (GPT-4o-mini) because the Phase 1 smoke test's hardest
   OCR-cleanup cases are subtle, context-dependent misreads (systematic
@@ -179,7 +179,10 @@ planning, recorded here so they aren't lost before the code lands:
   instruction-following, and cost is negligible either way at this note
   volume (a few pages per lecture). `config.yaml`'s `llm.model` makes this
   trivially swappable (e.g. to Sonnet) if Haiku's output quality doesn't
-  hold up during #19's prompt-iteration smoke testing.
+  hold up during #19's prompt-iteration smoke testing. (Updated during
+  issue #13's implementation from the originally-planned Claude 3.5 Haiku
+  to Claude Haiku 4.5, per user direction — same rationale, newer model
+  generation.)
 - **`needs_llm_reprocessing()` deliberately ignores `llm_prompt_version`.**
   See the "Deliberate correction to docs/spec.md's Reprocessing logic
   table" note above (Current Phase section) — this is the phase's most
@@ -197,6 +200,41 @@ planning, recorded here so they aren't lost before the code lands:
   code path land now, alongside `force_llm`, so both pieces of Phase 7
   infrastructure are built and tested together rather than retrofitted
   later.
+
+- **Issue #13 (`src/config.py`: `load_llm_config()` + `llm:` config wiring)
+  — done.** Implemented in `src/config.py`, tested in `tests/test_config.py`
+  (6 new tmp_path-backed cases, all passing — same fully-optional
+  file/section/key fallback shape as `load_mathpix_polling_config`'s
+  existing tests). Conventions established/extended here:
+  - `load_llm_config(config_path=None) -> LLMConfig` mirrors
+    `load_mathpix_polling_config()`'s fully-optional fallback pattern, not
+    `load_paths_config()`'s required/raising one — every field here
+    (`model`, `prompt_version`, `min_length_ratio`, `max_length_ratio`) has
+    a sensible hardcoded default, so a missing `config.yaml`, missing
+    `llm:` section, missing `validation:` subsection, or missing individual
+    keys never raises `ConfigError`; each falls back independently.
+  - `LLMConfig` is a new frozen dataclass (`model`, `prompt_version`,
+    `min_length_ratio`, `max_length_ratio`), matching the
+    `MathpixPollingConfig`/`PathsConfig` convention already in the module.
+  - New module constants: `DEFAULT_LLM_MODEL`
+    (`claude-haiku-4-5-20251001`), `DEFAULT_PROMPT_VERSION`
+    (`cleanup_v1`), `DEFAULT_MIN_LENGTH_RATIO` (0.70),
+    `DEFAULT_MAX_LENGTH_RATIO` (1.30).
+  - `config.yaml` and `config.example.yaml` both gained a new `llm:`
+    section (`model`, `prompt_version`, nested `validation:` with
+    `min_length_ratio`/`max_length_ratio`) matching these defaults.
+  - `environment.yml` gained `conda-forge::litellm`, installed for real via
+    `conda install -n notex -c conda-forge litellm` (v1.90.2) per AGENTS.md's
+    conda-only rule.
+  - `.env.example` and the real (gitignored) `.env` both gained an
+    `ANTHROPIC_API_KEY=` line, matching the existing
+    `MATHPIX_APP_ID`/`MATHPIX_APP_KEY` template convention — the real `.env`
+    entry is left blank for the user to fill in once a key is available.
+  - **Deliberately no credential-loading logic here** (e.g. no
+    `load_llm_credentials()` reading `ANTHROPIC_API_KEY`) — `litellm` reads
+    `ANTHROPIC_API_KEY` from the environment itself when invoked, and
+    wiring/validating that key is `LLMClient`'s concern (issue #15), not
+    this config-loading module's.
 
 ### Phase 2 progress
 

@@ -1,12 +1,13 @@
 # Reproduce with: conda env create -f environment.yml
 # Update after changes with: conda env export --from-history > environment.yml
 #
-# Phase 1 dependencies only. Additional packages (litellm, click, etc.) get
-# added in later phases as their stages are implemented.
+# Phase 1/2/3 dependencies. Additional packages (click, etc.) get added in
+# later phases as their stages are implemented.
 #
 # requests is included for manual Mathpix API key verification; the pipeline
 # itself is built on httpx (see src/mathpix.py). pyyaml parses config.yaml
-# (see src/config.py).
+# (see src/config.py). litellm is the LLM API abstraction used by the Phase 3
+# cleanup stage (see src/llm.py, ANTHROPIC_API_KEY in .env).
 
 name: notex
 channels:
@@ -20,3 +21,4 @@ dependencies:
   - requests
   - pyyaml
   - conda-forge::respx
+  - conda-forge::litellm

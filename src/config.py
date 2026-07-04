@@ -1,17 +1,20 @@
 """
-Phase 1/2 config loading.
+Phase 1/2/3 config loading.
 
 Responsible for loading MATHPIX_APP_ID / MATHPIX_APP_KEY from .env, the
 mathpix: poll_interval_seconds / max_poll_attempts settings from config.yaml
 (falling back to hardcoded defaults if config.yaml or the section/keys are
-absent), and the paths: input_root / cache_dir / state_db settings from
+absent), the paths: input_root / cache_dir / state_db settings from
 config.yaml (input_root is required, cache_dir/state_db fall back to
-hardcoded defaults).
+hardcoded defaults), and the llm: model / prompt_version /
+validation.min_length_ratio / validation.max_length_ratio settings from
+config.yaml (all optional, same fully-optional fallback pattern as the
+mathpix: section).
 
 paths.vault_root (already present in config.yaml/config.example.yaml) stays
 unread until Phase 4/5. Full config.yaml wiring for the remaining sections
-(LLM settings, per-course tags, etc.) arrives in Phase 6 — kept out of scope
-here intentionally.
+(per-course tags, etc.) arrives in Phase 6 — kept out of scope here
+intentionally.
 """
 
 from __future__ import annotations
@@ -37,6 +40,14 @@ DEFAULT_MAX_POLL_ATTEMPTS: int = 60
 DEFAULT_CACHE_DIR = Path("_cache")
 DEFAULT_STATE_DB = Path("state.db")
 
+# Phase 3 — LLM cleanup defaults. See AGENTS.md's Phase 3 "Current Phase"
+# notes for why Claude Haiku 4.5 was chosen over docs/spec.md's GPT-4o-mini
+# suggestion.
+DEFAULT_LLM_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_PROMPT_VERSION = "cleanup_v1"
+DEFAULT_MIN_LENGTH_RATIO: float = 0.70
+DEFAULT_MAX_LENGTH_RATIO: float = 1.30
+
 
 class ConfigError(Exception):
     """Raised when required configuration is missing or invalid."""
@@ -59,6 +70,14 @@ class PathsConfig:
     input_root: Path
     cache_dir: Path
     state_db: Path
+
+
+@dataclass(frozen=True)
+class LLMConfig:
+    model: str
+    prompt_version: str
+    min_length_ratio: float
+    max_length_ratio: float
 
 
 def load_mathpix_credentials(env_file: str | None = None) -> MathpixCredentials:
@@ -176,4 +195,55 @@ def load_paths_config(config_path: str | Path | None = None) -> PathsConfig:
         input_root=Path(input_root),
         cache_dir=Path(cache_dir),
         state_db=Path(state_db),
+    )
+
+
+def load_llm_config(config_path: str | Path | None = None) -> LLMConfig:
+    """
+    Load the llm: model / prompt_version / validation.min_length_ratio /
+    validation.max_length_ratio settings from config.yaml.
+
+    Args:
+        config_path: optional explicit path to config.yaml. If not given,
+            defaults to DEFAULT_CONFIG_PATH (config.yaml in the current
+            working directory), matching the project convention of running
+            the CLI from the repo root.
+
+    config.yaml (and the llm: section/keys within it) is fully optional
+    here, same fallback pattern as load_mathpix_polling_config(): if the
+    file doesn't exist, the llm: section is absent, the validation:
+    subsection is absent, or individual keys are missing, the corresponding
+    hardcoded default (DEFAULT_LLM_MODEL / DEFAULT_PROMPT_VERSION /
+    DEFAULT_MIN_LENGTH_RATIO / DEFAULT_MAX_LENGTH_RATIO) is used instead.
+    Unlike load_paths_config(), nothing here ever raises ConfigError — every
+    value has a sensible default, unlike paths.input_root.
+
+    prompt_version is config-driven (not a hardcoded code constant) so the
+    active cleanup prompt (prompts/{prompt_version}.txt) can be swapped by
+    editing config.yaml alone. Note that this is deliberately never compared
+    against state.db's stored llm_prompt_version by
+    needs_llm_reprocessing() — see AGENTS.md's Phase 3 notes.
+    """
+    path = Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
+
+    model: str = DEFAULT_LLM_MODEL
+    prompt_version: str = DEFAULT_PROMPT_VERSION
+    min_length_ratio: float = DEFAULT_MIN_LENGTH_RATIO
+    max_length_ratio: float = DEFAULT_MAX_LENGTH_RATIO
+
+    if path.is_file():
+        with path.open("r") as fh:
+            data: dict[str, Any] = yaml.safe_load(fh) or {}
+        llm_section = data.get("llm") or {}
+        model = llm_section.get("model", model)
+        prompt_version = llm_section.get("prompt_version", prompt_version)
+        validation_section = llm_section.get("validation") or {}
+        min_length_ratio = validation_section.get("min_length_ratio", min_length_ratio)
+        max_length_ratio = validation_section.get("max_length_ratio", max_length_ratio)
+
+    return LLMConfig(
+        model=model,
+        prompt_version=prompt_version,
+        min_length_ratio=min_length_ratio,
+        max_length_ratio=max_length_ratio,
     )

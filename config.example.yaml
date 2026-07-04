@@ -1,7 +1,7 @@
 # Copy this file to config.yaml and fill in real paths for your machine.
 # config.yaml is gitignored since these paths are machine-specific.
 #
-# Additional sections (llm:, output:, naming:) are added in later phases as
+# Additional sections (output:, naming:) are added in later phases as
 # the code that consumes them is implemented — see AGENTS.md for current
 # phase status.
 
@@ -12,3 +12,10 @@ paths:
 mathpix:
   poll_interval_seconds: 5
   max_poll_attempts: 60
+
+llm:
+  model: "claude-haiku-4-5-20251001"
+  prompt_version: "cleanup_v1"
+  validation:
+    min_length_ratio: 0.70
+    max_length_ratio: 1.30

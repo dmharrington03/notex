@@ -14,6 +14,15 @@ Also covered here (issue #10 — config.yaml paths: settings):
       when absent
     - raises ConfigError when the file is missing, the paths: section is
       missing, or input_root itself is missing/blank
+
+Also covered here (issue #13 — config.yaml llm: settings):
+    - load_llm_config() reads model / prompt_version /
+      validation.min_length_ratio / validation.max_length_ratio from a
+      config.yaml's llm: section
+    - falls back to DEFAULT_LLM_MODEL / DEFAULT_PROMPT_VERSION /
+      DEFAULT_MIN_LENGTH_RATIO / DEFAULT_MAX_LENGTH_RATIO when the file is
+      missing, the llm: section is absent, the validation: subsection is
+      absent, or individual keys are missing — never raises ConfigError
 """
 
 from pathlib import Path
@@ -22,12 +31,18 @@ import pytest
 
 from src.config import (
     DEFAULT_CACHE_DIR,
+    DEFAULT_LLM_MODEL,
+    DEFAULT_MAX_LENGTH_RATIO,
     DEFAULT_MAX_POLL_ATTEMPTS,
+    DEFAULT_MIN_LENGTH_RATIO,
     DEFAULT_POLL_INTERVAL_SECONDS,
+    DEFAULT_PROMPT_VERSION,
     DEFAULT_STATE_DB,
     ConfigError,
+    LLMConfig,
     MathpixPollingConfig,
     PathsConfig,
+    load_llm_config,
     load_mathpix_polling_config,
     load_paths_config,
 )
@@ -131,3 +146,93 @@ def test_paths_config_raises_when_input_root_missing_or_blank(tmp_path):
 
     with pytest.raises(ConfigError):
         load_paths_config(config_path)
+
+
+def test_loads_llm_config_from_yaml(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "llm:\n"
+        '  model: "claude-3-5-sonnet-20241022"\n'
+        '  prompt_version: "cleanup_v2"\n'
+        "  validation:\n"
+        "    min_length_ratio: 0.5\n"
+        "    max_length_ratio: 1.5\n"
+    )
+
+    config = load_llm_config(config_path)
+
+    assert config == LLMConfig(
+        model="claude-3-5-sonnet-20241022",
+        prompt_version="cleanup_v2",
+        min_length_ratio=0.5,
+        max_length_ratio=1.5,
+    )
+
+
+def test_llm_config_falls_back_to_defaults_when_file_missing(tmp_path):
+    missing_path = tmp_path / "does_not_exist.yaml"
+
+    config = load_llm_config(missing_path)
+
+    assert config == LLMConfig(
+        model=DEFAULT_LLM_MODEL,
+        prompt_version=DEFAULT_PROMPT_VERSION,
+        min_length_ratio=DEFAULT_MIN_LENGTH_RATIO,
+        max_length_ratio=DEFAULT_MAX_LENGTH_RATIO,
+    )
+
+
+def test_llm_config_falls_back_to_defaults_when_llm_section_missing(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("paths:\n  input_root: /tmp/notes_raw\n")
+
+    config = load_llm_config(config_path)
+
+    assert config == LLMConfig(
+        model=DEFAULT_LLM_MODEL,
+        prompt_version=DEFAULT_PROMPT_VERSION,
+        min_length_ratio=DEFAULT_MIN_LENGTH_RATIO,
+        max_length_ratio=DEFAULT_MAX_LENGTH_RATIO,
+    )
+
+
+def test_llm_config_falls_back_to_defaults_when_individual_top_level_keys_missing(
+    tmp_path,
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text('llm:\n  model: "claude-3-5-sonnet-20241022"\n')
+
+    config = load_llm_config(config_path)
+
+    assert config == LLMConfig(
+        model="claude-3-5-sonnet-20241022",
+        prompt_version=DEFAULT_PROMPT_VERSION,
+        min_length_ratio=DEFAULT_MIN_LENGTH_RATIO,
+        max_length_ratio=DEFAULT_MAX_LENGTH_RATIO,
+    )
+
+
+def test_llm_config_falls_back_to_defaults_when_validation_section_missing(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text('llm:\n  model: "claude-3-5-sonnet-20241022"\n')
+
+    config = load_llm_config(config_path)
+
+    assert config.min_length_ratio == DEFAULT_MIN_LENGTH_RATIO
+    assert config.max_length_ratio == DEFAULT_MAX_LENGTH_RATIO
+
+
+def test_llm_config_falls_back_to_defaults_when_individual_validation_keys_missing(
+    tmp_path,
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("llm:\n  validation:\n    min_length_ratio: 0.6\n")
+
+    config = load_llm_config(config_path)
+
+    assert config == LLMConfig(
+        model=DEFAULT_LLM_MODEL,
+        prompt_version=DEFAULT_PROMPT_VERSION,
+        min_length_ratio=0.6,
+        max_length_ratio=DEFAULT_MAX_LENGTH_RATIO,
+    )
