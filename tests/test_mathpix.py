@@ -18,12 +18,25 @@ Covered here (issue #2 — poll_until_complete()):
     - HTTP 429 responses are retried (honoring Retry-After) without
       counting against max_poll_attempts
 
-Still TODO (later issues):
-    - fetch_and_extract() against tests/fixtures/sample_result.md.zip:
-      figures renamed sequentially, markdown image refs rewritten to match
+Covered here (issue #3 — fetch_and_extract()), against
+tests/fixtures/sample_result.md.zip:
+    - waits for md.zip conversion_status to be "completed" before
+      downloading, figures renamed sequentially in order of first
+      appearance (with dedup for a repeated reference), markdown image
+      refs rewritten to point at the renamed figures/ files
+    - zero-figure case: no figures/ dir created, figure_count == 0
+    - raises MathpixProcessingError when conversion_status == "error"
+    - raises MathpixTimeoutError when conversion never becomes ready
+    - raises httpx.HTTPStatusError on a non-2xx (non-429) response from
+      either the converter status check or the .md.zip download
+    - raises MathpixError when a referenced image is missing from the
+      bundle
 """
 
+import io
 import json
+import zipfile
+from pathlib import Path
 
 import httpx
 import pytest
@@ -38,6 +51,8 @@ from src.mathpix import (
 )
 
 MATHPIX_BASE_URL = "https://api.mathpix.com"
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
+SAMPLE_MD_ZIP = FIXTURES_DIR / "sample_result.md.zip"
 
 
 @pytest.fixture
@@ -292,3 +307,262 @@ def test_poll_uses_config_defaults_when_args_omitted(monkeypatch, polling_client
 
         assert route.call_count == 2
         assert sleep_calls == [1]
+
+
+# --- fetch_and_extract() ---------------------------------------------------
+
+
+def _converter_status_response(status: str | None, **extra):
+    conversion_status: dict = {}
+    if status is not None:
+        conversion_status["md.zip"] = {"status": status, **extra}
+    return httpx.Response(200, json={"status": "completed", "conversion_status": conversion_status})
+
+
+def _build_zip_bytes(md_content: str, images: dict[str, bytes]) -> bytes:
+    """Build an in-memory md.zip-shaped bundle for tests that need a bundle
+    shape other than the committed tests/fixtures/sample_result.md.zip."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("sample_result.md", md_content)
+        for name, content in images.items():
+            zf.writestr(name, content)
+    return buf.getvalue()
+
+
+@respx.mock
+def test_fetch_and_extract_happy_path(polling_client, sleep_calls, tmp_path):
+    respx.get(f"{MATHPIX_BASE_URL}/v3/converter/abc123").mock(
+        return_value=_converter_status_response("completed")
+    )
+    respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123.md.zip").mock(
+        return_value=httpx.Response(200, content=SAMPLE_MD_ZIP.read_bytes())
+    )
+
+    dest_dir = tmp_path / "out"
+    result = polling_client.fetch_and_extract(
+        "abc123",
+        dest_dir,
+        lecture_stem="lecture_01",
+        poll_interval_seconds=1,
+        max_poll_attempts=5,
+    )
+
+    assert result.markdown_path == dest_dir / "lecture_01.mathpix.md"
+    assert result.markdown_path.is_file()
+    assert result.figures_dir == dest_dir / "figures"
+    assert result.figure_count == 2
+
+    fig1 = dest_dir / "figures" / "lecture_01_fig_001.jpg"
+    fig2 = dest_dir / "figures" / "lecture_01_fig_002.jpg"
+    assert fig1.is_file()
+    assert fig2.is_file()
+
+    with zipfile.ZipFile(SAMPLE_MD_ZIP) as original:
+        assert fig1.read_bytes() == original.read("images/abc123.jpg")
+        assert fig2.read_bytes() == original.read("images/def456.jpg")
+
+    markdown_text = result.markdown_path.read_text()
+    assert markdown_text.count("figures/lecture_01_fig_001.jpg") == 2
+    assert markdown_text.count("figures/lecture_01_fig_002.jpg") == 1
+    assert "images/abc123.jpg" not in markdown_text
+    assert "images/def456.jpg" not in markdown_text
+
+
+@respx.mock
+def test_fetch_and_extract_waits_for_conversion_status(polling_client, sleep_calls, tmp_path):
+    route = respx.get(f"{MATHPIX_BASE_URL}/v3/converter/abc123")
+    route.side_effect = [
+        _converter_status_response(None),
+        _converter_status_response("completed"),
+    ]
+    respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123.md.zip").mock(
+        return_value=httpx.Response(200, content=SAMPLE_MD_ZIP.read_bytes())
+    )
+
+    result = polling_client.fetch_and_extract(
+        "abc123",
+        tmp_path / "out",
+        lecture_stem="lecture_01",
+        poll_interval_seconds=1,
+        max_poll_attempts=5,
+    )
+
+    assert result.figure_count == 2
+    assert route.call_count == 2
+    assert sleep_calls == [1]
+
+
+@respx.mock
+def test_fetch_and_extract_raises_on_conversion_error(polling_client, tmp_path):
+    respx.get(f"{MATHPIX_BASE_URL}/v3/converter/abc123").mock(
+        return_value=_converter_status_response(
+            "error", error="conversion failed", error_info={"id": "convert_error"}
+        )
+    )
+    zip_route = respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123.md.zip")
+
+    with pytest.raises(MathpixProcessingError, match="conversion failed"):
+        polling_client.fetch_and_extract(
+            "abc123",
+            tmp_path / "out",
+            lecture_stem="lecture_01",
+            poll_interval_seconds=1,
+            max_poll_attempts=5,
+        )
+
+    assert not zip_route.called
+
+
+@respx.mock
+def test_fetch_and_extract_raises_timeout_when_conversion_never_ready(
+    polling_client, sleep_calls, tmp_path
+):
+    route = respx.get(f"{MATHPIX_BASE_URL}/v3/converter/abc123").mock(
+        return_value=_converter_status_response("processing")
+    )
+
+    with pytest.raises(MathpixTimeoutError, match="3 attempts"):
+        polling_client.fetch_and_extract(
+            "abc123",
+            tmp_path / "out",
+            lecture_stem="lecture_01",
+            poll_interval_seconds=1,
+            max_poll_attempts=3,
+        )
+
+    assert route.call_count == 3
+    assert sleep_calls == [1, 1]
+
+
+@respx.mock
+def test_fetch_and_extract_raises_on_http_error_from_converter(polling_client, tmp_path):
+    respx.get(f"{MATHPIX_BASE_URL}/v3/converter/abc123").mock(
+        return_value=httpx.Response(500, json={"error": "server error"})
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        polling_client.fetch_and_extract(
+            "abc123",
+            tmp_path / "out",
+            lecture_stem="lecture_01",
+            poll_interval_seconds=1,
+            max_poll_attempts=3,
+        )
+
+
+@respx.mock
+def test_fetch_and_extract_converter_retries_on_429_honoring_retry_after(
+    polling_client, sleep_calls, tmp_path
+):
+    route = respx.get(f"{MATHPIX_BASE_URL}/v3/converter/abc123")
+    route.side_effect = [
+        httpx.Response(429, headers={"Retry-After": "2"}, json={}),
+        _converter_status_response("completed"),
+    ]
+    respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123.md.zip").mock(
+        return_value=httpx.Response(200, content=SAMPLE_MD_ZIP.read_bytes())
+    )
+
+    polling_client.fetch_and_extract(
+        "abc123",
+        tmp_path / "out",
+        lecture_stem="lecture_01",
+        poll_interval_seconds=1,
+        max_poll_attempts=3,
+    )
+
+    assert route.call_count == 2
+    assert sleep_calls == [2]
+
+
+@respx.mock
+def test_fetch_and_extract_raises_on_http_error_from_zip_download(polling_client, tmp_path):
+    respx.get(f"{MATHPIX_BASE_URL}/v3/converter/abc123").mock(
+        return_value=_converter_status_response("completed")
+    )
+    respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123.md.zip").mock(
+        return_value=httpx.Response(500, json={"error": "server error"})
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        polling_client.fetch_and_extract(
+            "abc123",
+            tmp_path / "out",
+            lecture_stem="lecture_01",
+            poll_interval_seconds=1,
+            max_poll_attempts=3,
+        )
+
+
+@respx.mock
+def test_fetch_and_extract_zero_figures(polling_client, tmp_path):
+    zip_bytes = _build_zip_bytes("# No figures here\n\nJust text.\n", images={})
+
+    respx.get(f"{MATHPIX_BASE_URL}/v3/converter/abc123").mock(
+        return_value=_converter_status_response("completed")
+    )
+    respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123.md.zip").mock(
+        return_value=httpx.Response(200, content=zip_bytes)
+    )
+
+    dest_dir = tmp_path / "out"
+    result = polling_client.fetch_and_extract(
+        "abc123",
+        dest_dir,
+        lecture_stem="lecture_02",
+        poll_interval_seconds=1,
+        max_poll_attempts=3,
+    )
+
+    assert result.figure_count == 0
+    assert result.figures_dir is None
+    assert not (dest_dir / "figures").exists()
+    assert result.markdown_path.read_text() == "# No figures here\n\nJust text.\n"
+
+
+@respx.mock
+def test_fetch_and_extract_raises_on_missing_referenced_image(polling_client, tmp_path):
+    zip_bytes = _build_zip_bytes(
+        "# Lecture\n\n![](images/missing.jpg)\n", images={}
+    )
+
+    respx.get(f"{MATHPIX_BASE_URL}/v3/converter/abc123").mock(
+        return_value=_converter_status_response("completed")
+    )
+    respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123.md.zip").mock(
+        return_value=httpx.Response(200, content=zip_bytes)
+    )
+
+    with pytest.raises(MathpixError, match="missing.jpg"):
+        polling_client.fetch_and_extract(
+            "abc123",
+            tmp_path / "out",
+            lecture_stem="lecture_01",
+            poll_interval_seconds=1,
+            max_poll_attempts=3,
+        )
+
+
+@respx.mock
+def test_fetch_and_extract_raises_on_missing_md_file(polling_client, tmp_path):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("images/abc123.jpg", b"fake-bytes")
+    zip_bytes = buf.getvalue()
+
+    respx.get(f"{MATHPIX_BASE_URL}/v3/converter/abc123").mock(
+        return_value=_converter_status_response("completed")
+    )
+    respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123.md.zip").mock(
+        return_value=httpx.Response(200, content=zip_bytes)
+    )
+
+    with pytest.raises(MathpixError, match="no .md file"):
+        polling_client.fetch_and_extract(
+            "abc123",
+            tmp_path / "out",
+            lecture_stem="lecture_01",
+            poll_interval_seconds=1,
+            max_poll_attempts=3,
+        )

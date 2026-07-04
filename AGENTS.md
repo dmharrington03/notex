@@ -141,6 +141,71 @@ they disagree — see "Mathpix API notes" below for known corrections).
     `config.yaml`; installed via `conda install -n notex pyyaml` per
     AGENTS.md's "conda, never pip" rule.
 
+- **Issue #3 (`MathpixClient.fetch_and_extract()`) — done.** Implemented
+  in `src/mathpix.py`, tested in `tests/test_mathpix.py` (16 new
+  respx-mocked cases, all passing). Conventions established/extended
+  here:
+  - **New API behavior discovered, not in the original Mathpix API notes
+    below:** conversion formats requested via `conversion_formats` (e.g.
+    `md.zip`) have their own `conversion_status` that lags behind the
+    main PDF `status` field — `GET /v3/pdf/{pdf_id}.md.zip` isn't
+    guaranteed ready just because `poll_until_complete()` returned
+    `completed`. `fetch_and_extract()` therefore polls
+    `GET /v3/converter/{pdf_id}` first, via a new private
+    `_wait_for_conversion_ready()` helper, until
+    `conversion_status["md.zip"]["status"] == "completed"` — reusing the
+    same `sleep_fn`/429-retry-honoring-`Retry-After` pattern as
+    `poll_until_complete()`, and raising the same
+    `MathpixProcessingError`/`MathpixTimeoutError` types on
+    `"error"`/timeout.
+  - **Signature change from the original stub:** `fetch_and_extract()` now
+    takes an explicit `lecture_stem: str` third parameter (in addition to
+    `pdf_id` and `dest_dir`), since the figure/markdown naming convention
+    needs the lecture's filename stem and there was no other way to
+    derive it from `pdf_id`/`dest_dir` alone. `process_pdf()` (issue #4)
+    is expected to compute `Path(pdf_path).stem` and pass it through.
+  - Returns a new frozen `FetchResult` dataclass (`markdown_path`,
+    `figures_dir: Path | None`, `figure_count`) rather than the
+    still-to-be-designed `ProcessResult` (issue #4) — issue #4 can wrap
+    or reuse this shape once it's defined.
+  - Cache layout inside `dest_dir`: `{lecture_stem}.mathpix.md` plus a
+    `figures/` subdirectory (only created if there's at least one
+    figure) containing `{lecture_stem}_fig_{NNN}.{ext}` files —
+    zero-padded to 3 digits, 1-indexed, matching the vault's `figures/`
+    convention (see Stage 4 in `docs/spec.md`, and the `.jpg` figure
+    format decision in "Mathpix API notes" below). `ext` is taken from
+    whatever extension the actual zip member has rather than hardcoding
+    `.jpg`.
+  - Image references are parsed from the Markdown via a simple
+    `![alt](path)` regex, in order of first appearance; a path
+    referenced more than once is deduped to a single figure number
+    (assigned at first occurrence) and all its occurrences are rewritten
+    together. Alt text is left untouched. A referenced image path that
+    can't be resolved to a real member inside the zip raises
+    `MathpixError` (surfaces bundle-shape mismatches loudly rather than
+    silently dropping the figure).
+  - The `.md` file inside the bundle is located by globbing for any
+    `*.md` member rather than assuming a fixed path/filename, since the
+    exact internal zip layout is unconfirmed until the issue #6 smoke
+    test; image paths are then resolved relative to that `.md` member's
+    directory within the archive.
+  - No temp directory/temp file is used for extraction — the downloaded
+    `.md.zip` response body is read directly into
+    `zipfile.ZipFile(io.BytesIO(response.content))` and only the final
+    renamed files are written to `dest_dir`.
+  - Zero-figure case: no `figures/` directory is created at all;
+    `FetchResult.figures_dir` is `None` and `figure_count` is `0`.
+  - `dest_dir` (and `figures/` within it) is created via
+    `mkdir(parents=True, exist_ok=True)`; re-running overwrites files by
+    their same deterministic names rather than clearing the directory
+    first.
+  - `tests/fixtures/sample_result.md.zip` (issue #5, folded into this
+    issue since #3's tests depend on it) is a hand-built zip: one
+    `sample_result.md` with 3 image references (two distinct paths, one
+    of them — `images/abc123.jpg` — referenced twice, to exercise dedup)
+    plus two tiny placeholder (non-decodable, just distinct byte
+    strings) `.jpg` files under `images/`.
+
 ## Mathpix API notes
 
 These correct assumptions in the original planning spec, verified against

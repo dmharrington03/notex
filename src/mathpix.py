@@ -3,8 +3,8 @@ Mathpix API client — Phase 1.
 
 Given a single PDF path, submits it to Mathpix, polls until processing
 completes, downloads the md.zip conversion bundle, extracts it, renames
-figures to the lecture_N_fig_NNN convention, rewrites the Markdown image
-references to match, and writes the result to _cache/.
+figures to the {lecture_stem}_fig_{NNN} convention, rewrites the Markdown
+image references to match, and writes the result to _cache/.
 
 See AGENTS.md "Mathpix API notes" for the verified API behavior this should
 be built against (status values, multipart upload shape, figure handling via
@@ -13,14 +13,19 @@ md.zip, unconfirmed math delimiter format).
 Implementation status:
     - submit()             implemented (issue #1)
     - poll_until_complete() implemented (issue #2)
-    - fetch_and_extract()   not yet implemented (issue #3)
+    - fetch_and_extract()   implemented (issue #3)
     - process_pdf()         not yet implemented (issue #4)
 """
 
 from __future__ import annotations
 
+import io
 import json
+import posixpath
+import re
 import time
+import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -44,6 +49,20 @@ _TERMINAL_ERROR_STATUS = "error"
 DEFAULT_SUBMIT_OPTIONS: dict[str, Any] = {
     "conversion_formats": {"md.zip": True},
 }
+
+
+@dataclass(frozen=True)
+class FetchResult:
+    """
+    Result of MathpixClient.fetch_and_extract().
+
+    figures_dir is None and figure_count is 0 when the Markdown contains no
+    image references (no figures/ subdirectory is created in that case).
+    """
+
+    markdown_path: Path
+    figures_dir: Path | None
+    figure_count: int
 
 
 class MathpixError(Exception):
@@ -226,12 +245,189 @@ class MathpixClient:
             f"{max_poll_attempts} attempts (last status={last_status!r})"
         )
 
-    def fetch_and_extract(self, pdf_id: str, dest_dir: str | Path) -> Any:
+    def _wait_for_conversion_ready(
+        self,
+        pdf_id: str,
+        conversion_format: str,
+        poll_interval_seconds: float,
+        max_poll_attempts: int,
+    ) -> None:
         """
-        TODO(issue #3): download the md.zip bundle, extract it, rename
-        figures, rewrite Markdown image references, and write to dest_dir.
+        Poll GET /v3/converter/{pdf_id} until
+        conversion_status[conversion_format]["status"] == "completed".
+
+        Conversion formats (e.g. md.zip) have their own readiness status,
+        separate from the main PDF `status` field checked by
+        poll_until_complete() — per docs.mathpix.com, downloading a
+        conversion format result requires that format's own conversion
+        status to be "completed", which can lag behind the main PDF
+        status. This must be checked before downloading the .md.zip
+        result even after poll_until_complete() has already returned.
+
+        Raises:
+            MathpixProcessingError: if the format's status == "error".
+            MathpixTimeoutError: if max_poll_attempts is exhausted without
+                the format reaching a terminal status.
+            httpx.HTTPStatusError: on a non-2xx, non-429 HTTP response.
         """
-        raise NotImplementedError("fetch_and_extract: see issue #3")
+        url = f"{self.base_url}/v3/converter/{pdf_id}"
+        last_status: str | None = None
+        attempt = 0
+
+        while attempt < max_poll_attempts:
+            response = self._http.get(url, headers=self._auth_headers)
+
+            if response.status_code == 429:
+                retry_after = _parse_retry_after(
+                    response.headers.get("Retry-After"), default=poll_interval_seconds
+                )
+                self._sleep_fn(retry_after)
+                continue
+
+            response.raise_for_status()
+            payload = response.json()
+            conversion_status = payload.get("conversion_status") or {}
+            format_status = conversion_status.get(conversion_format) or {}
+            last_status = format_status.get("status")
+
+            if last_status == _TERMINAL_SUCCESS_STATUS:
+                return
+
+            if last_status == _TERMINAL_ERROR_STATUS:
+                raise MathpixProcessingError(
+                    f"Mathpix conversion failed for pdf_id={pdf_id} "
+                    f"format={conversion_format!r}: "
+                    f"error={format_status.get('error')!r} "
+                    f"error_info={format_status.get('error_info')!r}"
+                )
+
+            attempt += 1
+            if attempt < max_poll_attempts:
+                self._sleep_fn(poll_interval_seconds)
+
+        raise MathpixTimeoutError(
+            f"Mathpix conversion polling timed out for pdf_id={pdf_id} "
+            f"format={conversion_format!r} after {max_poll_attempts} attempts "
+            f"(last status={last_status!r})"
+        )
+
+    def fetch_and_extract(
+        self,
+        pdf_id: str,
+        dest_dir: str | Path,
+        lecture_stem: str,
+        poll_interval_seconds: float | None = None,
+        max_poll_attempts: int | None = None,
+    ) -> FetchResult:
+        """
+        Download the md.zip conversion bundle for pdf_id, extract it,
+        rename figures to the {lecture_stem}_fig_{NNN} convention
+        (zero-padded, in order of first appearance in the Markdown),
+        rewrite the Markdown's image references to match, and write both
+        to dest_dir.
+
+        Args:
+            pdf_id: the pdf_id returned by submit().
+            dest_dir: directory to write {lecture_stem}.mathpix.md (and a
+                figures/ subdirectory, if there are any figures) into.
+                Created if it doesn't already exist.
+            lecture_stem: filename stem used for both the output Markdown
+                file and the figure naming convention (e.g. "lecture_01"
+                for a source PDF named lecture_01.pdf). Callers (see
+                process_pdf(), issue #4) are expected to pass
+                Path(pdf_path).stem.
+            poll_interval_seconds: seconds to sleep between conversion
+                readiness polls. Defaults to config.yaml's
+                mathpix.poll_interval_seconds (see poll_until_complete())
+                when not given explicitly.
+            max_poll_attempts: maximum number of conversion readiness polls
+                before giving up. Defaults to config.yaml's
+                mathpix.max_poll_attempts when not given explicitly. HTTP
+                429 responses are retried and do not count against this
+                limit.
+
+        Returns:
+            A FetchResult with the written markdown_path, figures_dir
+            (None if there were no figures), and figure_count.
+
+        Raises:
+            MathpixError: if the md.zip bundle contains no .md file, or a
+                Markdown image reference can't be resolved to a file
+                inside the bundle.
+            MathpixProcessingError: if the md.zip conversion status is
+                "error".
+            MathpixTimeoutError: if conversion readiness polling exhausts
+                max_poll_attempts.
+            httpx.HTTPStatusError: on a non-2xx HTTP response from either
+                the converter status check or the .md.zip download.
+        """
+        if poll_interval_seconds is None or max_poll_attempts is None:
+            polling_config = load_mathpix_polling_config()
+            if poll_interval_seconds is None:
+                poll_interval_seconds = polling_config.poll_interval_seconds
+            if max_poll_attempts is None:
+                max_poll_attempts = polling_config.max_poll_attempts
+
+        conversion_format = "md.zip"
+        self._wait_for_conversion_ready(
+            pdf_id, conversion_format, poll_interval_seconds, max_poll_attempts
+        )
+
+        response = self._http.get(
+            f"{self.base_url}/v3/pdf/{pdf_id}.md.zip", headers=self._auth_headers
+        )
+        response.raise_for_status()
+
+        dest_dir = Path(dest_dir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        with zipfile.ZipFile(io.BytesIO(response.content)) as bundle:
+            names = bundle.namelist()
+            md_members = [name for name in names if name.endswith(".md")]
+            if not md_members:
+                raise MathpixError(
+                    f"md.zip bundle for pdf_id={pdf_id} contains no .md file: "
+                    f"{names}"
+                )
+            md_member_name = md_members[0]
+            markdown_text = bundle.read(md_member_name).decode("utf-8")
+            md_dir = posixpath.dirname(md_member_name)
+
+            image_refs = _extract_image_refs_in_order(markdown_text)
+
+            figures_dir: Path | None = None
+            path_map: dict[str, str] = {}
+
+            if image_refs:
+                figures_dir = dest_dir / "figures"
+                figures_dir.mkdir(parents=True, exist_ok=True)
+
+                for index, image_ref in enumerate(image_refs, start=1):
+                    member_name = posixpath.normpath(
+                        posixpath.join(md_dir, image_ref) if md_dir else image_ref
+                    )
+                    if member_name not in names:
+                        raise MathpixError(
+                            f"md.zip bundle for pdf_id={pdf_id} references "
+                            f"image {image_ref!r} (resolved to "
+                            f"{member_name!r}) not present in bundle: {names}"
+                        )
+
+                    ext = Path(image_ref).suffix or ".jpg"
+                    figure_number = str(index).zfill(_FIGURE_NUMBER_WIDTH)
+                    figure_filename = f"{lecture_stem}_fig_{figure_number}{ext}"
+                    (figures_dir / figure_filename).write_bytes(bundle.read(member_name))
+                    path_map[image_ref] = f"figures/{figure_filename}"
+
+        rewritten_markdown = _rewrite_image_refs(markdown_text, path_map)
+        markdown_path = dest_dir / f"{lecture_stem}.mathpix.md"
+        markdown_path.write_text(rewritten_markdown, encoding="utf-8")
+
+        return FetchResult(
+            markdown_path=markdown_path,
+            figures_dir=figures_dir,
+            figure_count=len(image_refs),
+        )
 
 
 def _parse_retry_after(value: str | None, default: float) -> float:
@@ -246,6 +442,45 @@ def _parse_retry_after(value: str | None, default: float) -> float:
         return float(value)
     except ValueError:
         return default
+
+
+# Number of zero-padded digits in the {lecture_stem}_fig_{NNN} figure naming
+# convention (see AGENTS.md / issue #3).
+_FIGURE_NUMBER_WIDTH = 3
+
+# Matches standard Markdown image syntax: ![alt text](path). Deliberately
+# does not attempt to handle Mathpix's chemistry SMILES alt-text annotations
+# (e.g. ![<smiles>CCC</smiles>](...)) specially -- alt text is treated
+# opaquely and passed through unchanged.
+_IMAGE_REF_PATTERN = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)")
+
+
+def _extract_image_refs_in_order(markdown_text: str) -> list[str]:
+    """
+    Return the list of unique image reference paths in markdown_text, in
+    order of first appearance. A path referenced more than once appears
+    only once, at the position of its first occurrence.
+    """
+    seen: list[str] = []
+    for match in _IMAGE_REF_PATTERN.finditer(markdown_text):
+        path = match.group(2)
+        if path not in seen:
+            seen.append(path)
+    return seen
+
+
+def _rewrite_image_refs(markdown_text: str, path_map: dict[str, str]) -> str:
+    """
+    Replace each image reference's path with its mapped replacement from
+    path_map (leaving alt text untouched). Paths not present in path_map
+    are left as-is.
+    """
+
+    def _replace(match: re.Match[str]) -> str:
+        alt_text, path = match.group(1), match.group(2)
+        return f"![{alt_text}]({path_map.get(path, path)})"
+
+    return _IMAGE_REF_PATTERN.sub(_replace, markdown_text)
 
 
 def process_pdf(pdf_path: str | Path, cache_dir: str | Path) -> Any:
