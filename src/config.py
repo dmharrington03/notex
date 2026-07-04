@@ -1,14 +1,17 @@
 """
-Phase 1 config loading.
+Phase 1/2 config loading.
 
-Responsible for loading MATHPIX_APP_ID / MATHPIX_APP_KEY from .env, plus the
+Responsible for loading MATHPIX_APP_ID / MATHPIX_APP_KEY from .env, the
 mathpix: poll_interval_seconds / max_poll_attempts settings from config.yaml
 (falling back to hardcoded defaults if config.yaml or the section/keys are
-absent).
+absent), and the paths: input_root / cache_dir / state_db settings from
+config.yaml (input_root is required, cache_dir/state_db fall back to
+hardcoded defaults).
 
-Full config.yaml wiring for the remaining sections (paths, LLM settings,
-per-course tags, etc.) arrives in Phase 6 — kept out of scope here
-intentionally.
+paths.vault_root (already present in config.yaml/config.example.yaml) stays
+unread until Phase 4/5. Full config.yaml wiring for the remaining sections
+(LLM settings, per-course tags, etc.) arrives in Phase 6 — kept out of scope
+here intentionally.
 """
 
 from __future__ import annotations
@@ -29,6 +32,11 @@ DEFAULT_CONFIG_PATH = Path("config.yaml")
 DEFAULT_POLL_INTERVAL_SECONDS: float = 5
 DEFAULT_MAX_POLL_ATTEMPTS: int = 60
 
+# Repo-root-relative defaults, matching the project convention of running
+# the CLI from the repo root (same convention as DEFAULT_CONFIG_PATH above).
+DEFAULT_CACHE_DIR = Path("_cache")
+DEFAULT_STATE_DB = Path("state.db")
+
 
 class ConfigError(Exception):
     """Raised when required configuration is missing or invalid."""
@@ -44,6 +52,13 @@ class MathpixCredentials:
 class MathpixPollingConfig:
     poll_interval_seconds: float
     max_poll_attempts: int
+
+
+@dataclass(frozen=True)
+class PathsConfig:
+    input_root: Path
+    cache_dir: Path
+    state_db: Path
 
 
 def load_mathpix_credentials(env_file: str | None = None) -> MathpixCredentials:
@@ -113,4 +128,52 @@ def load_mathpix_polling_config(
     return MathpixPollingConfig(
         poll_interval_seconds=poll_interval_seconds,
         max_poll_attempts=max_poll_attempts,
+    )
+
+
+def load_paths_config(config_path: str | Path | None = None) -> PathsConfig:
+    """
+    Load the paths: input_root / cache_dir / state_db settings from
+    config.yaml.
+
+    Args:
+        config_path: optional explicit path to config.yaml. If not given,
+            defaults to DEFAULT_CONFIG_PATH (config.yaml in the current
+            working directory), matching the project convention of running
+            the CLI from the repo root.
+
+    Unlike load_mathpix_polling_config(), config.yaml itself is *not*
+    optional here: paths.input_root has no sensible default, so a missing
+    file, a missing paths: section, or a missing/blank input_root key all
+    raise ConfigError. cache_dir/state_db are optional and independently
+    fall back to DEFAULT_CACHE_DIR/DEFAULT_STATE_DB when absent.
+
+    paths.vault_root is deliberately not read here (unneeded until
+    Phase 4/5) even though it's already present in config.yaml.
+
+    Raises:
+        ConfigError: if config.yaml is missing, the paths: section is
+            missing, or paths.input_root is missing/blank.
+    """
+    path = Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
+
+    if not path.is_file():
+        raise ConfigError(f"config.yaml not found at {path} (paths.input_root is required)")
+
+    with path.open("r") as fh:
+        data: dict[str, Any] = yaml.safe_load(fh) or {}
+
+    paths_section = data.get("paths") or {}
+
+    input_root = str(paths_section.get("input_root", "")).strip()
+    if not input_root:
+        raise ConfigError(f"Missing required paths.input_root in {path}")
+
+    cache_dir = paths_section.get("cache_dir") or DEFAULT_CACHE_DIR
+    state_db = paths_section.get("state_db") or DEFAULT_STATE_DB
+
+    return PathsConfig(
+        input_root=Path(input_root),
+        cache_dir=Path(cache_dir),
+        state_db=Path(state_db),
     )

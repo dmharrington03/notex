@@ -241,6 +241,45 @@ Tracked in issues #7-#12 (`phase-2` label).
     course's `ClassificationResult` list is sorted by `source_path` —
     needed for reproducible runs/tests per the issue's own requirement.
 
+- **Issue #10 (`src/config.py` `load_paths_config()`) — done.** Implemented
+  in `src/config.py`, tested in `tests/test_config.py` (5 new tmp_path-backed
+  cases, all passing). Conventions established/extended here that later
+  Phase 2 issues (#11) should follow:
+  - `load_paths_config(config_path=None) -> PathsConfig` reads the
+    `paths:` section from `config.yaml`, mirroring
+    `load_mathpix_polling_config()`'s `config_path=` optional-arg/
+    `DEFAULT_CONFIG_PATH` fallback pattern. `PathsConfig` is a frozen
+    dataclass with `input_root`, `cache_dir`, `state_db` — all `Path`
+    objects (not raw `str`), matching how these values get consumed
+    downstream (`Path(input_root)` in `discovery.py`, `path` arg in
+    `state.py`'s `init_db()`).
+  - `paths.input_root` is **required, with no default** —
+    `load_paths_config()` raises `ConfigError` if `config.yaml` doesn't
+    exist at all, if the `paths:` section is missing, or if
+    `input_root` itself is missing/blank. This is a deliberate asymmetry
+    with `load_mathpix_polling_config()`, which silently falls back to
+    hardcoded defaults on a missing file/section — `input_root` has no
+    sensible default the way `poll_interval_seconds`/`max_poll_attempts`
+    do, so a missing config file can't be treated as "use the defaults"
+    here.
+  - `paths.cache_dir`/`paths.state_db` are optional and fall back
+    independently to new `DEFAULT_CACHE_DIR` (`_cache`)/`DEFAULT_STATE_DB`
+    (`state.db`) module constants — both repo-root-relative, matching the
+    existing `DEFAULT_CONFIG_PATH` convention of running the CLI from the
+    repo root — when the file/section exists but those specific keys
+    don't.
+  - `paths.vault_root` (already present in `config.yaml`/
+    `config.example.yaml`) is deliberately **not read** by this function —
+    stays unused until Phase 4/5.
+  - No `.resolve()` or existence-checking of `input_root` against the
+    filesystem happens here — `load_paths_config()` stays a thin,
+    schema-level config loader; validating what's actually on disk is
+    `discovery.py`/`main.py`'s job, not `config.py`'s.
+  - `config.yaml`/`config.example.yaml` were **not** modified — the
+    defaults (`_cache`, `state.db` at the repo root) already match
+    current behavior, so no explicit `cache_dir`/`state_db` keys were
+    added for values nobody's overriding yet.
+
 ### Phase 1 progress
 
 **Phase 1 status: VALIDATED — complete.** All core-pipeline issues (#1-#6)
