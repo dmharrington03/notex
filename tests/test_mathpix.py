@@ -31,11 +31,25 @@ tests/fixtures/sample_result.md.zip:
       either the converter status check or the .md.zip download
     - raises MathpixError when a referenced image is missing from the
       bundle
+
+Covered here (issue #4 — process_pdf()):
+    - happy path: orchestrates submit() -> poll_until_complete() ->
+      fetch_and_extract() and returns a ProcessResult reflecting the
+      fetch_and_extract() output, using Path(pdf_path).stem as
+      lecture_stem
+    - an injected client is used as-is and left open (not closed) by
+      process_pdf()
+    - when no client is injected, process_pdf() builds one from
+      load_mathpix_credentials() and closes it afterward
+    - failures at any stage (submit/poll/fetch) propagate unchanged rather
+      than being caught/translated -- no mathpix_status field exists on
+      ProcessResult (see AGENTS.md issue #4 notes)
 """
 
 import io
 import json
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -48,6 +62,8 @@ from src.mathpix import (
     MathpixError,
     MathpixProcessingError,
     MathpixTimeoutError,
+    ProcessResult,
+    process_pdf,
 )
 
 MATHPIX_BASE_URL = "https://api.mathpix.com"
@@ -565,4 +581,187 @@ def test_fetch_and_extract_raises_on_missing_md_file(polling_client, tmp_path):
             lecture_stem="lecture_01",
             poll_interval_seconds=1,
             max_poll_attempts=3,
+        )
+
+
+# --- process_pdf() ----------------------------------------------------------
+
+
+def _mock_submit_poll_and_fetch_happy_path():
+    """Mocks submit(), poll_until_complete(), and fetch_and_extract() so a
+    full process_pdf() run completes immediately (no polling waits)."""
+    respx.post(f"{MATHPIX_BASE_URL}/v3/pdf").mock(
+        return_value=httpx.Response(200, json={"pdf_id": "abc123"})
+    )
+    respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123").mock(
+        return_value=_status_response("completed", md="# Lecture")
+    )
+    respx.get(f"{MATHPIX_BASE_URL}/v3/converter/abc123").mock(
+        return_value=_converter_status_response("completed")
+    )
+    respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123.md.zip").mock(
+        return_value=httpx.Response(200, content=SAMPLE_MD_ZIP.read_bytes())
+    )
+
+
+@respx.mock
+def test_process_pdf_happy_path(polling_client, sleep_calls, fake_pdf, tmp_path):
+    _mock_submit_poll_and_fetch_happy_path()
+
+    cache_dir = tmp_path / "cache"
+    before = datetime.now(timezone.utc)
+    result = process_pdf(
+        fake_pdf,
+        cache_dir,
+        client=polling_client,
+        poll_interval_seconds=1,
+        max_poll_attempts=5,
+    )
+    after = datetime.now(timezone.utc)
+
+    assert isinstance(result, ProcessResult)
+    assert result.pdf_path == fake_pdf
+    assert result.pdf_id == "abc123"
+    assert result.markdown_path == cache_dir / "lecture_01.mathpix.md"
+    assert result.markdown_path.is_file()
+    assert result.figures_dir == cache_dir / "figures"
+    assert result.figure_count == 2
+    assert before <= result.processed_at <= after
+    # Nothing here should have needed to sleep -- every poll response is
+    # immediately terminal.
+    assert sleep_calls == []
+
+
+@respx.mock
+def test_process_pdf_uses_lecture_stem_from_pdf_path(polling_client, tmp_path):
+    _mock_submit_poll_and_fetch_happy_path()
+
+    pdf_path = tmp_path / "lecture_07.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 fake content for testing\n")
+    cache_dir = tmp_path / "cache"
+
+    result = process_pdf(
+        pdf_path,
+        cache_dir,
+        client=polling_client,
+        poll_interval_seconds=1,
+        max_poll_attempts=5,
+    )
+
+    assert result.markdown_path == cache_dir / "lecture_07.mathpix.md"
+
+
+@respx.mock
+def test_process_pdf_does_not_close_an_injected_client(client, fake_pdf, tmp_path):
+    _mock_submit_poll_and_fetch_happy_path()
+
+    process_pdf(fake_pdf, tmp_path / "cache", client=client, poll_interval_seconds=1, max_poll_attempts=5)
+
+    assert client._http.is_closed is False
+
+
+@respx.mock
+def test_process_pdf_builds_and_closes_own_client_when_none_injected(
+    monkeypatch, fake_pdf, tmp_path
+):
+    import src.mathpix as mathpix_module
+    from src.config import MathpixCredentials
+
+    monkeypatch.setattr(
+        mathpix_module,
+        "load_mathpix_credentials",
+        lambda: MathpixCredentials(app_id="env_app_id", app_key="env_app_key"),
+    )
+
+    created_clients: list[MathpixClient] = []
+    real_client_cls = mathpix_module.MathpixClient
+
+    class RecordingClient(real_client_cls):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            created_clients.append(self)
+
+    monkeypatch.setattr(mathpix_module, "MathpixClient", RecordingClient)
+
+    _mock_submit_poll_and_fetch_happy_path()
+
+    process_pdf(fake_pdf, tmp_path / "cache", poll_interval_seconds=1, max_poll_attempts=5)
+
+    assert len(created_clients) == 1
+    assert created_clients[0].app_id == "env_app_id"
+    assert created_clients[0].app_key == "env_app_key"
+    assert created_clients[0]._http.is_closed is True
+
+
+@respx.mock
+def test_process_pdf_propagates_filenotfounderror_from_submit(polling_client, tmp_path):
+    missing_pdf = tmp_path / "does_not_exist.pdf"
+
+    with pytest.raises(FileNotFoundError):
+        process_pdf(missing_pdf, tmp_path / "cache", client=polling_client)
+
+
+@respx.mock
+def test_process_pdf_propagates_mathpixerror_from_submit(polling_client, fake_pdf, tmp_path):
+    respx.post(f"{MATHPIX_BASE_URL}/v3/pdf").mock(
+        return_value=httpx.Response(200, json={"error": "bad request"})
+    )
+
+    with pytest.raises(MathpixError, match="bad request"):
+        process_pdf(
+            fake_pdf,
+            tmp_path / "cache",
+            client=polling_client,
+            poll_interval_seconds=1,
+            max_poll_attempts=5,
+        )
+
+
+@respx.mock
+def test_process_pdf_propagates_error_from_poll_until_complete(
+    polling_client, fake_pdf, tmp_path
+):
+    respx.post(f"{MATHPIX_BASE_URL}/v3/pdf").mock(
+        return_value=httpx.Response(200, json={"pdf_id": "abc123"})
+    )
+    respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123").mock(
+        return_value=_status_response(
+            "error", error="bad scan", error_info={"id": "image_error"}
+        )
+    )
+    converter_route = respx.get(f"{MATHPIX_BASE_URL}/v3/converter/abc123")
+
+    with pytest.raises(MathpixProcessingError, match="bad scan"):
+        process_pdf(
+            fake_pdf,
+            tmp_path / "cache",
+            client=polling_client,
+            poll_interval_seconds=1,
+            max_poll_attempts=5,
+        )
+
+    assert not converter_route.called
+
+
+@respx.mock
+def test_process_pdf_propagates_timeout_from_fetch_and_extract(
+    polling_client, fake_pdf, tmp_path
+):
+    respx.post(f"{MATHPIX_BASE_URL}/v3/pdf").mock(
+        return_value=httpx.Response(200, json={"pdf_id": "abc123"})
+    )
+    respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123").mock(
+        return_value=_status_response("completed", md="# Lecture")
+    )
+    respx.get(f"{MATHPIX_BASE_URL}/v3/converter/abc123").mock(
+        return_value=_converter_status_response("processing")
+    )
+
+    with pytest.raises(MathpixTimeoutError, match="2 attempts"):
+        process_pdf(
+            fake_pdf,
+            tmp_path / "cache",
+            client=polling_client,
+            poll_interval_seconds=1,
+            max_poll_attempts=2,
         )

@@ -14,7 +14,7 @@ Implementation status:
     - submit()             implemented (issue #1)
     - poll_until_complete() implemented (issue #2)
     - fetch_and_extract()   implemented (issue #3)
-    - process_pdf()         not yet implemented (issue #4)
+    - process_pdf()         implemented (issue #4)
 """
 
 from __future__ import annotations
@@ -26,12 +26,13 @@ import re
 import time
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 import httpx
 
-from src.config import load_mathpix_polling_config
+from src.config import load_mathpix_credentials, load_mathpix_polling_config
 
 DEFAULT_BASE_URL = "https://api.mathpix.com"
 
@@ -63,6 +64,33 @@ class FetchResult:
     markdown_path: Path
     figures_dir: Path | None
     figure_count: int
+
+
+@dataclass(frozen=True)
+class ProcessResult:
+    """
+    Result of process_pdf(): the orchestrated submit -> poll_until_complete
+    -> fetch_and_extract pipeline for a single PDF.
+
+    Only ever returned on success -- any failure at any stage propagates as
+    an exception (FileNotFoundError, MathpixError/MathpixProcessingError/
+    MathpixTimeoutError, or httpx.HTTPStatusError) instead of being encoded
+    here. There is deliberately no mathpix_status field: Phase 2's state log
+    writer is expected to catch process_pdf()'s exceptions (or lack thereof)
+    to decide the mathpix_status ("success"/"failed") column itself.
+
+    Field names anticipate Phase 2's state.db columns (see docs/spec.md
+    State Management / AGENTS.md issue #4 notes): pdf_path -> source_path,
+    pdf_id -> mathpix_pdf_id, figure_count -> figure_count, processed_at ->
+    mathpix_processed_at.
+    """
+
+    pdf_path: Path
+    pdf_id: str
+    markdown_path: Path
+    figures_dir: Path | None
+    figure_count: int
+    processed_at: datetime
 
 
 class MathpixError(Exception):
@@ -483,9 +511,85 @@ def _rewrite_image_refs(markdown_text: str, path_map: dict[str, str]) -> str:
     return _IMAGE_REF_PATTERN.sub(_replace, markdown_text)
 
 
-def process_pdf(pdf_path: str | Path, cache_dir: str | Path) -> Any:
+def process_pdf(
+    pdf_path: str | Path,
+    cache_dir: str | Path,
+    client: MathpixClient | None = None,
+    poll_interval_seconds: float | None = None,
+    max_poll_attempts: int | None = None,
+) -> ProcessResult:
     """
-    TODO(issue #4): orchestrate submit -> poll_until_complete ->
-    fetch_and_extract and return a ProcessResult.
+    Orchestrate submit() -> poll_until_complete() -> fetch_and_extract() for
+    a single PDF and return a ProcessResult.
+
+    Args:
+        pdf_path: path to the local PDF file to process. Its filename stem
+            (Path(pdf_path).stem) is used as fetch_and_extract()'s
+            lecture_stem.
+        cache_dir: directory to write the cached Markdown (and figures/, if
+            any) into -- passed straight through as fetch_and_extract()'s
+            dest_dir. Phase 1 has no discovery loop / course-folder mirroring
+            yet (see AGENTS.md), so no per-course subdirectory logic happens
+            here.
+        client: an already-constructed MathpixClient to use, e.g. one wired
+            to a respx-mocked http_client and a no-op sleep_fn for tests
+            (mirrors the http_client=/sleep_fn= injection pattern on
+            MathpixClient itself). When omitted, process_pdf() loads
+            credentials via load_mathpix_credentials() and constructs, owns,
+            and closes its own MathpixClient.
+        poll_interval_seconds: forwarded untouched to both
+            poll_until_complete() and fetch_and_extract(); each
+            independently falls back to config.yaml's
+            mathpix.poll_interval_seconds when left as None.
+        max_poll_attempts: forwarded untouched to both
+            poll_until_complete() and fetch_and_extract(); each
+            independently falls back to config.yaml's
+            mathpix.max_poll_attempts when left as None.
+
+    Returns:
+        A ProcessResult on success. There is no failure-path return value --
+        see ProcessResult's docstring for why.
+
+    Raises:
+        FileNotFoundError: if pdf_path does not exist (from submit()).
+        MathpixError: on a 2xx-with-error submit response, a missing pdf_id,
+            or an unresolvable/missing figure reference in the md.zip bundle
+            (from submit()/fetch_and_extract()).
+        MathpixProcessingError: if Mathpix reports status == "error" at
+            either the main polling stage or the md.zip conversion-readiness
+            stage.
+        MathpixTimeoutError: if either polling stage exhausts
+            max_poll_attempts without reaching a terminal status.
+        httpx.HTTPStatusError: on any non-2xx, non-429 HTTP response.
     """
-    raise NotImplementedError("process_pdf: see issue #4")
+    owns_client = client is None
+    if client is None:
+        credentials = load_mathpix_credentials()
+        client = MathpixClient(credentials.app_id, credentials.app_key)
+
+    try:
+        pdf_id = client.submit(pdf_path)
+        client.poll_until_complete(
+            pdf_id,
+            poll_interval_seconds=poll_interval_seconds,
+            max_poll_attempts=max_poll_attempts,
+        )
+        fetch_result = client.fetch_and_extract(
+            pdf_id,
+            cache_dir,
+            Path(pdf_path).stem,
+            poll_interval_seconds=poll_interval_seconds,
+            max_poll_attempts=max_poll_attempts,
+        )
+    finally:
+        if owns_client:
+            client.close()
+
+    return ProcessResult(
+        pdf_path=Path(pdf_path),
+        pdf_id=pdf_id,
+        markdown_path=fetch_result.markdown_path,
+        figures_dir=fetch_result.figures_dir,
+        figure_count=fetch_result.figure_count,
+        processed_at=datetime.now(timezone.utc),
+    )

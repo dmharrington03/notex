@@ -206,6 +206,40 @@ they disagree — see "Mathpix API notes" below for known corrections).
     plus two tiny placeholder (non-decodable, just distinct byte
     strings) `.jpg` files under `images/`.
 
+- **Issue #4 (`process_pdf()` / `ProcessResult`) — done.** Implemented in
+  `src/mathpix.py`, tested in `tests/test_mathpix.py` (8 new respx-mocked
+  cases, all passing). Conventions established/extended here:
+  - `ProcessResult` is a new frozen dataclass (`pdf_path`, `pdf_id`,
+    `markdown_path`, `figures_dir: Path | None`, `figure_count`,
+    `processed_at: datetime`, UTC) living inline in `src/mathpix.py` next
+    to `FetchResult` — no separate `src/models.py` yet. Field names
+    anticipate Phase 2's `state.db` columns per `docs/spec.md`
+    (`source_path`, `mathpix_pdf_id`, `figure_count`,
+    `mathpix_processed_at`).
+  - **Deliberately no `mathpix_status` field.** Every other method in this
+    module signals failure by raising rather than returning a status
+    string (`MathpixError`/`MathpixProcessingError`/`MathpixTimeoutError`/
+    `httpx.HTTPStatusError`/`FileNotFoundError`); `process_pdf()` stays
+    consistent — it only ever returns a `ProcessResult` on success, and
+    Phase 2's state-log writer is expected to catch its exceptions to
+    decide `mathpix_status` itself.
+  - `process_pdf(pdf_path, cache_dir, client=None,
+    poll_interval_seconds=None, max_poll_attempts=None)`: orchestrates
+    `submit()` -> `poll_until_complete()` -> `fetch_and_extract()`,
+    deriving `lecture_stem` as `Path(pdf_path).stem` and passing
+    `cache_dir` straight through as `fetch_and_extract()`'s `dest_dir`
+    (no per-course subdirectory logic — that's discovery.py's concern in
+    a later phase; Phase 1 scope is a single PDF path). Polling params are
+    forwarded untouched to both downstream calls rather than resolved
+    once up-front, so each independently falls back to its own
+    `config.yaml` default when omitted.
+  - `client: MathpixClient | None = None` mirrors the existing
+    `http_client=`/`sleep_fn=` constructor-injection pattern:
+    when omitted, `process_pdf()` builds its own client via
+    `load_mathpix_credentials()` and owns/closes it in a `finally` block;
+    when injected (as tests do, alongside a no-op recording `sleep_fn`),
+    it's used as-is and left open for the caller to manage.
+
 ## Mathpix API notes
 
 These correct assumptions in the original planning spec, verified against
