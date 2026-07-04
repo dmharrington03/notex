@@ -240,6 +240,49 @@ they disagree — see "Mathpix API notes" below for known corrections).
     when injected (as tests do, alongside a no-op recording `sleep_fn`),
     it's used as-is and left open for the caller to manage.
 
+- **Issue #6 (`scripts/smoke_test_mathpix.py`) — done.** Implemented in
+  `scripts/smoke_test_mathpix.py`, plus a new `on_status` observability
+  hook added to `src/mathpix.py` (2 new respx-mocked cases in
+  `tests/test_mathpix.py` covering the hook itself; the script is
+  intentionally *not* under `pytest` — see Testing Conventions). Run for
+  real against a live Mathpix key on a real one-page, no-figures
+  handwritten lecture PDF (`notes_raw/class_1/lecture_01.pdf`) — see
+  "Smoke test findings" below for OCR/formatting observations, including
+  the now-confirmed math delimiter answer.
+  - `poll_until_complete()`, `_wait_for_conversion_ready()`,
+    `fetch_and_extract()`, and `process_pdf()` all gained a new optional,
+    keyword-only `on_status` param (`OnStatusCallback`, a module-level type
+    alias in `src/mathpix.py`), defaulting to `None` — purely an
+    observability hook, never affects control flow, and fully backward
+    compatible with all existing (issue #1-#4) call sites/tests.
+  - Callback shape: `on_status(stage, attempt, max_poll_attempts, status,
+    payload)`, invoked once per **real** status poll (HTTP 429 retries are
+    not reported — they aren't a "real" poll and don't count against
+    `max_poll_attempts` either, per issue #2). `stage` is `"pdf"` for
+    `poll_until_complete()`'s main status poll, or
+    `"conversion:{conversion_format}"` (e.g. `"conversion:md.zip"`) for
+    `_wait_for_conversion_ready()`. Called on every poll including the
+    final terminal one — both on `"completed"` (before returning) and on
+    `"error"` (before raising `MathpixProcessingError`) — so callers get a
+    complete transition log.
+  - `process_pdf()` forwards the same `on_status` value to both
+    `poll_until_complete()` and `fetch_and_extract()` untouched (same
+    pattern as `poll_interval_seconds`/`max_poll_attempts` forwarding).
+  - The script itself is a thin `argparse` CLI: positional `pdf_path` +
+    `--out` (default `_cache/smoke_test/`, flat — no per-run
+    subdirectory), calling `process_pdf()` directly (no duplicated
+    submit/poll/fetch orchestration) with `on_status` wired to a print
+    function (`[stage poll N/M] status=...`). No `--poll-interval`/
+    `--max-poll-attempts`/`--verbose` flags, no raw JSON payload dumps to
+    disk — deliberately out of scope per the issue discussion. On any
+    failure (`ConfigError`/`MathpixError`/`httpx.HTTPStatusError`/
+    `FileNotFoundError`), prints `ERROR: {exc}` to stderr and exits 1
+    rather than a traceback.
+  - The script inserts the repo root onto `sys.path` at the top (since
+    `sys.path[0]` for a directly-executed script is `scripts/`, not the
+    repo root) so `from src.mathpix import ...` resolves without needing
+    the project installed as a package or invoked via `python -m`.
+
 ## Mathpix API notes
 
 These correct assumptions in the original planning spec, verified against
@@ -256,10 +299,137 @@ section, when implementing `src/mathpix.py`:
   `cdn.mathpix.com` image URLs staying valid long-term (30-day retention).
 - **Figure format:** images inside the zip are `.jpg`. Decision: keep as
   `.jpg` in the vault, no PNG conversion.
-- **Math delimiters:** whether Mathpix emits `$...$` or `\(...\)`/`\[...\]`
-  by default in `md`/`mmd` output is **unconfirmed**. Verify empirically
-  against real API output during the Phase 1 smoke test before building the
-  Phase 3 (LLM validation) or Phase 5 (delimiter pass) logic around it.
+- **Math delimiters — CONFIRMED (issue #6 smoke test):** the `md.zip`
+  bundle's Markdown uses `$...$` for inline math and a `$$` fence on its
+  own line before/after the expression for display math (i.e.:
+  ```
+  $$
+  <latex>
+  $$
+  ```
+  ), never `\(...\)`/`\[...\]`. This already matches the target vault
+  convention in `docs/spec.md`/AGENTS.md, so Phase 5's "delimiter pass" can
+  be a pure validation/lint step (checking balance) rather than needing to
+  convert between delimiter styles.
+
+## Smoke test findings
+
+Observations from running `scripts/smoke_test_mathpix.py` for real against
+sample lecture PDFs. These inform the Phase 3 LLM cleanup prompt and Phase 5
+delimiter/validation pass.
+
+### `notes_raw/class_1/lecture_01.pdf` (one page, cursive handwritten physics
+notes, no figures) — see `_cache/smoke_test/lecture_01.mathpix.md`
+
+- **Math delimiters confirmed** as `$...$` / `$$ ... $$` — see above.
+- **Stray heading artifact:** Mathpix emitted a Markdown heading
+  (`## Lecture 21-4/14`) from what was just the student's handwritten
+  date/title line at the top of the page, not a semantically-structured
+  section header. The LLM cleanup pass (Phase 3) and/or frontmatter
+  injection (Phase 5) will need to handle this — e.g. deciding whether to
+  keep, strip, or repurpose Mathpix-generated headings rather than
+  assuming they reflect real document structure.
+- **Word-level OCR errors on cursive handwriting**, roughly one every few
+  lines even though overall structure/LaTeX came through readably —
+  observed examples: "potentral" → potential, "betore" → before, "initrally
+  mstate i" → initially in state i, "encegy" → energy, "regnore" → ignore,
+  "Persubation" → Perturbation, "turned an at" → turned on. Confirms Phase
+  3's LLM cleanup pass is doing real, necessary work here, not just
+  formatting touch-up.
+- **Occasional malformed/mismatched LaTeX in complex nested expressions:**
+  a few equations have `\left`/`\right` pairs that don't actually balance
+  once nested inside other constructs, e.g.
+  `\overrightarrow{\left.V_{n i}\right|^{2}}` (a lone `\left.`/`\right|`
+  pair inside `\overrightarrow{}`) and an unusual
+  `\left\lvert\, ... \right.` construction. Top-level `$`/`$$` delimiters
+  were always balanced in this sample, but internal `\left`/`\right`
+  balance was not guaranteed — see the consolidated recommendation below.
+- **Zero-figure path confirmed working end-to-end against the real API:**
+  only `lecture_01.mathpix.md` was written to `_cache/smoke_test/`, no
+  `figures/` directory created, matching the `fetch_and_extract()`
+  zero-figure behavior established in issue #3.
+
+### `notes_raw/class_1/lecture_02.pdf` (one page, cursive handwritten physics
+notes, one hand-drawn figure) — see `_cache/smoke_test/lecture_02.mathpix.md`
+/ `_cache/smoke_test/figures/lecture_02_fig_001.jpg`
+
+- **Figure path confirmed working end-to-end against the real API:** the
+  one hand-drawn diagram on the page (a double-well potential sketch with
+  labeled `|S⟩`/`|A⟩` wavefunctions) was correctly detected, cropped
+  cleanly (no surrounding handwritten text bled into the crop), downloaded
+  as a 383×251 baseline JPEG (~10 KB), renamed to
+  `lecture_02_fig_001.jpg` under `figures/`, and the Markdown reference
+  rewritten to `![](figures/lecture_02_fig_001.jpg)` — matching the
+  `fetch_and_extract()` figure-handling behavior established in issue #3.
+  Mathpix supplied no alt text for the figure (empty `![]()`); Phase 4/5
+  may want to decide whether to inject a placeholder caption (e.g.
+  "Figure 1") when rewriting these as Obsidian wikilinks, since empty alt
+  text isn't very useful on its own.
+- **Systematic domain-vocabulary misreads, not just random noise:** the
+  word "parity" was misread as "party" *consistently*, every single time
+  it appeared (9 occurrences: "party ergenstate", "party odd", "party
+  even", "not party ergensinte", "opposite party", "porty", etc.) — i.e.
+  Mathpix's language model is substituting a common English word for an
+  unfamiliar physics term rather than making independent per-occurrence
+  errors. Other domain-term misreads in the same sample: "ergenstate"
+  /"ergensinte"/"e.jerstate" → eigenstate, "degensate"/"degreesate" →
+  degenerate, "Ingencoal" → In general, "Selecton mles" → Selection rules,
+  "Transtion" → Transition. **Implication for Phase 3's LLM prompt:**
+  since these are systematic/predictable substitutions rather than random
+  noise, it may be worth seeding the cleanup prompt with a short course-
+  specific glossary/context hint (e.g. "this is a quantum mechanics
+  course; common OCR misreadings include party→parity, ergenstate
+  →eigenstate") rather than relying on the LLM to infer domain vocabulary
+  from context alone every time.
+- **A quietly dangerous misread inside otherwise-valid LaTeX:** handwritten
+  ket notation `|n⟩` was OCR'd as the literal LaTeX command `\ln` (natural
+  log) in `g.s. $\ln |x\rangle=|1,00\rangle$` — this produces
+  *syntactically valid* LaTeX that renders fine, so no delimiter-balance
+  or length-ratio check would ever catch it; only a content-aware pass
+  (the LLM cleanup step, ideally with the course context above) has any
+  chance of catching this class of error.
+- **A near-total OCR failure on one dense equation**, garbling a
+  hydrogen-atom wavefunction expression badly enough that it's not
+  reasonably recoverable without the source image: `R_{1,0}(r)` →
+  `R_{1.0}(6)`, `Y_0^0(\theta,\phi)` → `y_{0}^{0}(\theta, 4)`, and
+  `e^{-r/a_0}` → `e^{-2 \%}` — note the last one emits a literal, unescaped
+  `%` inside math mode, which is the real LaTeX comment character and could
+  break naive line-based LaTeX tooling even though Obsidian's renderer
+  doesn't treat it specially. Confirms Mathpix OCR quality on cursive
+  handwriting can occasionally fail outright on complex nested notation,
+  not just introduce minor typos — Phase 3's validation step should be
+  prepared for "this equation is unrecoverable" as an outcome, not just
+  "this equation has small errors."
+- **A real (not just same-type) `\left`/`\right` type mismatch:** confirms
+  and sharpens the lecture_01 finding — `\left(\beta\left|\varepsilon_{\beta}
+  (-x) \varepsilon_{\alpha}\right| \alpha\right\rangle` opens with `\left(`
+  but closes with `\right\rangle` (a paren opened, an angle bracket
+  closed). **Consolidated recommendation for Phase 3/5's validation step:**
+  a `\left`/`\right` balance check needs to verify not just that counts of
+  `\left` and `\right` match, but that each `\left`/`\right` pair's
+  delimiter *types* correspond to a valid pairing (or fall back to the LLM
+  pass to repair mismatches like this) — a naive count-only check would
+  pass both of the malformed examples found so far (lecture_01's and this
+  one).
+
+### Phase 3 prompt design notes
+
+- **Dirac/bra-ket notation formatting is inconsistent and should be
+  normalized by the LLM cleanup pass.** `lecture_02.mathpix.md` renders
+  every ket/bra/inner-product by hand with raw `\langle`/`\rangle`/`|`
+  (e.g. `|n\rangle`, `\langle\vec{x} \mid 100\rangle`,
+  `\left\langle\psi_{f}\right|`) rather than using the semantic
+  `\ket{}`/`\bra{}`/`\braket{}` macros — plausibly part of why the
+  `\left`/`\right` mismatches above happen in the first place (hand-built
+  angle-bracket delimiters are easy for Mathpix to mis-nest; a single
+  macro call isn't). The Phase 3 system prompt should instruct the LLM to
+  rewrite bra-ket expressions into `\ket{}`, `\bra{}`, and `\braket{}`
+  form for consistency (e.g. `|n\rangle` → `\ket{n}`,
+  `\langle\vec{x} \mid 100\rangle` → `\braket{\vec{x}}{100}`), rather than
+  leaving Mathpix's raw angle-bracket output as-is. Note this requires the
+  vault's Obsidian math renderer (or a MathJax/KaTeX macro config) to
+  actually define `\ket`/`\bra`/`\braket`, which aren't standard LaTeX
+  primitives — worth confirming as part of Phase 3/5 setup.
 
 ## Testing Conventions
 

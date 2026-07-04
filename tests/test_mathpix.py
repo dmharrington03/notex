@@ -44,6 +44,16 @@ Covered here (issue #4 — process_pdf()):
     - failures at any stage (submit/poll/fetch) propagate unchanged rather
       than being caught/translated -- no mathpix_status field exists on
       ProcessResult (see AGENTS.md issue #4 notes)
+
+Covered here (issue #6 — on_status observability callback):
+    - poll_until_complete() invokes on_status("pdf", attempt,
+      max_poll_attempts, status, payload) for every real poll (not 429
+      retries), including the final terminal poll
+    - _wait_for_conversion_ready() (via fetch_and_extract()) invokes
+      on_status("conversion:md.zip", attempt, max_poll_attempts, status,
+      payload) the same way
+    - on_status defaults to None (no-op) and is optional everywhere it's
+      threaded through
 """
 
 import io
@@ -325,6 +335,55 @@ def test_poll_uses_config_defaults_when_args_omitted(monkeypatch, polling_client
         assert sleep_calls == [1]
 
 
+@respx.mock
+def test_poll_invokes_on_status_for_every_real_poll(polling_client, sleep_calls):
+    route = respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123")
+    route.side_effect = [
+        httpx.Response(429, headers={"Retry-After": "2"}, json={}),
+        _status_response("received"),
+        _status_response("split"),
+        _status_response("completed", md="# Lecture"),
+    ]
+
+    calls: list[tuple] = []
+    payload = polling_client.poll_until_complete(
+        "abc123",
+        poll_interval_seconds=1,
+        max_poll_attempts=10,
+        on_status=lambda *args: calls.append(args),
+    )
+
+    assert payload == {"status": "completed", "md": "# Lecture"}
+    # The 429 retry is not reported to on_status -- only the 3 real polls.
+    assert calls == [
+        ("pdf", 1, 10, "received", {"status": "received"}),
+        ("pdf", 2, 10, "split", {"status": "split"}),
+        ("pdf", 3, 10, "completed", {"status": "completed", "md": "# Lecture"}),
+    ]
+
+
+@respx.mock
+def test_poll_invokes_on_status_before_raising_on_error(polling_client):
+    respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123").mock(
+        return_value=_status_response(
+            "error", error="bad scan", error_info={"id": "image_error"}
+        )
+    )
+
+    calls: list[tuple] = []
+    with pytest.raises(MathpixProcessingError):
+        polling_client.poll_until_complete(
+            "abc123",
+            poll_interval_seconds=1,
+            max_poll_attempts=10,
+            on_status=lambda *args: calls.append(args),
+        )
+
+    assert len(calls) == 1
+    stage, attempt, max_attempts, status, payload = calls[0]
+    assert (stage, attempt, max_attempts, status) == ("pdf", 1, 10, "error")
+
+
 # --- fetch_and_extract() ---------------------------------------------------
 
 
@@ -407,6 +466,35 @@ def test_fetch_and_extract_waits_for_conversion_status(polling_client, sleep_cal
     assert result.figure_count == 2
     assert route.call_count == 2
     assert sleep_calls == [1]
+
+
+@respx.mock
+def test_fetch_and_extract_invokes_on_status_for_conversion_polls(
+    polling_client, sleep_calls, tmp_path
+):
+    route = respx.get(f"{MATHPIX_BASE_URL}/v3/converter/abc123")
+    route.side_effect = [
+        _converter_status_response(None),
+        _converter_status_response("completed"),
+    ]
+    respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123.md.zip").mock(
+        return_value=httpx.Response(200, content=SAMPLE_MD_ZIP.read_bytes())
+    )
+
+    calls: list[tuple] = []
+    polling_client.fetch_and_extract(
+        "abc123",
+        tmp_path / "out",
+        lecture_stem="lecture_01",
+        poll_interval_seconds=1,
+        max_poll_attempts=5,
+        on_status=lambda *args: calls.append(args),
+    )
+
+    assert [(c[0], c[1], c[2], c[3]) for c in calls] == [
+        ("conversion:md.zip", 1, 5, None),
+        ("conversion:md.zip", 2, 5, "completed"),
+    ]
 
 
 @respx.mock

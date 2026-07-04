@@ -15,6 +15,7 @@ Implementation status:
     - poll_until_complete() implemented (issue #2)
     - fetch_and_extract()   implemented (issue #3)
     - process_pdf()         implemented (issue #4)
+    - on_status callback    implemented (issue #6, for scripts/smoke_test_mathpix.py)
 """
 
 from __future__ import annotations
@@ -50,6 +51,15 @@ _TERMINAL_ERROR_STATUS = "error"
 DEFAULT_SUBMIT_OPTIONS: dict[str, Any] = {
     "conversion_formats": {"md.zip": True},
 }
+
+# Observability hook shared by poll_until_complete(), _wait_for_conversion_ready(),
+# fetch_and_extract(), and process_pdf() (see issue #6): called as
+# on_status(stage, attempt, max_poll_attempts, status, payload) after every
+# real status poll. `stage` is "pdf" for poll_until_complete()'s main status
+# poll, or "conversion:{conversion_format}" (e.g. "conversion:md.zip") for
+# _wait_for_conversion_ready(). Purely for observability (e.g. the manual
+# smoke test script printing progress) -- never affects control flow.
+OnStatusCallback = Callable[[str, int, int, str | None, dict[str, Any]], None]
 
 
 @dataclass(frozen=True)
@@ -200,6 +210,7 @@ class MathpixClient:
         pdf_id: str,
         poll_interval_seconds: float | None = None,
         max_poll_attempts: int | None = None,
+        on_status: OnStatusCallback | None = None,
     ) -> dict[str, Any]:
         """
         Poll GET /v3/pdf/{pdf_id} until status == "completed", returning the
@@ -216,12 +227,19 @@ class MathpixClient:
                 config.yaml (or DEFAULT_MAX_POLL_ATTEMPTS if unset/absent)
                 when not given explicitly. HTTP 429 responses are retried
                 (honoring Retry-After) and do not count against this limit.
+            on_status: optional callback invoked as
+                on_status("pdf", attempt, max_poll_attempts, status, payload)
+                after every real status poll (429 retries are not reported),
+                including the final terminal poll (whether "completed" or
+                right before raising on "error"). Purely an observability
+                hook for callers like the manual smoke test script (issue
+                #6) — has no effect on control flow, and percent_done /
+                num_pages_completed etc. still stay internal to the payload
+                otherwise (no logging/printing infra here beyond this hook).
 
         Returns:
             The full JSON payload from the poll response once
-            status == "completed" (percent_done/num_pages_completed etc.
-            stay internal to the payload for Phase 1 — no logging/printing
-            here; see issue #2 discussion in AGENTS.md).
+            status == "completed".
 
         Raises:
             MathpixProcessingError: if status == "error".
@@ -254,6 +272,9 @@ class MathpixClient:
             payload = response.json()
             last_status = payload.get("status")
 
+            if on_status is not None:
+                on_status("pdf", attempt + 1, max_poll_attempts, last_status, payload)
+
             if last_status == _TERMINAL_SUCCESS_STATUS:
                 return payload
 
@@ -279,6 +300,7 @@ class MathpixClient:
         conversion_format: str,
         poll_interval_seconds: float,
         max_poll_attempts: int,
+        on_status: OnStatusCallback | None = None,
     ) -> None:
         """
         Poll GET /v3/converter/{pdf_id} until
@@ -291,6 +313,12 @@ class MathpixClient:
         status to be "completed", which can lag behind the main PDF
         status. This must be checked before downloading the .md.zip
         result even after poll_until_complete() has already returned.
+
+        Args:
+            on_status: optional callback invoked as
+                on_status(f"conversion:{conversion_format}", attempt,
+                max_poll_attempts, status, payload) after every real poll
+                (see OnStatusCallback / issue #6). Observability only.
 
         Raises:
             MathpixProcessingError: if the format's status == "error".
@@ -317,6 +345,15 @@ class MathpixClient:
             conversion_status = payload.get("conversion_status") or {}
             format_status = conversion_status.get(conversion_format) or {}
             last_status = format_status.get("status")
+
+            if on_status is not None:
+                on_status(
+                    f"conversion:{conversion_format}",
+                    attempt + 1,
+                    max_poll_attempts,
+                    last_status,
+                    payload,
+                )
 
             if last_status == _TERMINAL_SUCCESS_STATUS:
                 return
@@ -346,6 +383,7 @@ class MathpixClient:
         lecture_stem: str,
         poll_interval_seconds: float | None = None,
         max_poll_attempts: int | None = None,
+        on_status: OnStatusCallback | None = None,
     ) -> FetchResult:
         """
         Download the md.zip conversion bundle for pdf_id, extract it,
@@ -373,6 +411,9 @@ class MathpixClient:
                 mathpix.max_poll_attempts when not given explicitly. HTTP
                 429 responses are retried and do not count against this
                 limit.
+            on_status: optional callback forwarded to
+                _wait_for_conversion_ready() (see OnStatusCallback / issue
+                #6). Observability only.
 
         Returns:
             A FetchResult with the written markdown_path, figures_dir
@@ -398,7 +439,11 @@ class MathpixClient:
 
         conversion_format = "md.zip"
         self._wait_for_conversion_ready(
-            pdf_id, conversion_format, poll_interval_seconds, max_poll_attempts
+            pdf_id,
+            conversion_format,
+            poll_interval_seconds,
+            max_poll_attempts,
+            on_status=on_status,
         )
 
         response = self._http.get(
@@ -517,6 +562,7 @@ def process_pdf(
     client: MathpixClient | None = None,
     poll_interval_seconds: float | None = None,
     max_poll_attempts: int | None = None,
+    on_status: OnStatusCallback | None = None,
 ) -> ProcessResult:
     """
     Orchestrate submit() -> poll_until_complete() -> fetch_and_extract() for
@@ -545,6 +591,10 @@ def process_pdf(
             poll_until_complete() and fetch_and_extract(); each
             independently falls back to config.yaml's
             mathpix.max_poll_attempts when left as None.
+        on_status: optional callback forwarded to both
+            poll_until_complete() and fetch_and_extract() (see
+            OnStatusCallback / issue #6). Observability only, e.g. for the
+            manual smoke test script to print live status transitions.
 
     Returns:
         A ProcessResult on success. There is no failure-path return value --
@@ -573,6 +623,7 @@ def process_pdf(
             pdf_id,
             poll_interval_seconds=poll_interval_seconds,
             max_poll_attempts=max_poll_attempts,
+            on_status=on_status,
         )
         fetch_result = client.fetch_and_extract(
             pdf_id,
@@ -580,6 +631,7 @@ def process_pdf(
             Path(pdf_path).stem,
             poll_interval_seconds=poll_interval_seconds,
             max_poll_attempts=max_poll_attempts,
+            on_status=on_status,
         )
     finally:
         if owns_client:
