@@ -64,6 +64,16 @@ they disagree — see "Mathpix API notes" below for known corrections).
 
 ### Phase 1 progress
 
+**Phase 1 status: VALIDATED — complete.** All core-pipeline issues (#1-#6)
+are implemented and unit-tested (respx-mocked, no real API calls), and the
+pipeline has additionally been run for real against the live Mathpix API via
+`scripts/smoke_test_mathpix.py` on two real handwritten lecture PDFs
+(`notes_raw/class_1/lecture_01.pdf`, no figures; `lecture_02.pdf`, one
+figure) — see "Smoke test findings" below. Both the zero-figure and
+one-figure code paths were confirmed working end-to-end, submit → poll →
+fetch/extract → cache-write. Per "Git / Issue Tracking" below, this
+validation is what unblocks pushing to `origin`.
+
 - **Issue #1 (`MathpixClient.submit()`) — done.** Implemented in
   `src/mathpix.py` / `src/config.py`, tested in `tests/test_mathpix.py`
   (6 respx-mocked cases, all passing). Conventions established here that
@@ -461,6 +471,7 @@ notex/                      ← repo root
 
 ## Git / Issue Tracking
 
-Issues are tracked on GitHub from the start of the project. Code is being
-developed locally and will not be pushed to the `origin` remote until Phase 1
-is validated against real Mathpix output.
+Issues are tracked on GitHub from the start of the project. Code was
+developed locally and held back from the `origin` remote until Phase 1 was
+validated against real Mathpix output (see "Phase 1 status" above). Phase 1
+is now validated, so local commits are pushed to `origin` going forward.
