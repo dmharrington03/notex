@@ -1,0 +1,197 @@
+"""
+Unit tests for src/state.py.
+
+Covered here (issue #7 — state.db schema + CRUD):
+    - init_db() creates the pdf_state table and is idempotent
+    - get_entry() returns None for a missing source_path
+    - upsert_entry() inserts a new row, round-tripping all field types
+      (including datetime <-> ISO 8601 string)
+    - upsert_entry() partial updates leave previously-set columns intact
+    - upsert_entry() rejects unknown field names
+
+No respx/mocking needed - all sqlite, using tmp_path files.
+"""
+
+from datetime import datetime, timezone
+
+import pytest
+
+from src.state import StateEntry, get_entry, init_db, upsert_entry
+
+
+def test_init_db_creates_table(tmp_path):
+    db_path = tmp_path / "state.db"
+
+    conn = init_db(db_path)
+
+    assert db_path.is_file()
+    tables = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='pdf_state'"
+    ).fetchall()
+    assert len(tables) == 1
+
+
+def test_init_db_is_idempotent(tmp_path):
+    db_path = tmp_path / "state.db"
+
+    conn1 = init_db(db_path)
+    upsert_entry(conn1, "/notes_raw/class_1/lecture_01.pdf", mathpix_status="success")
+    conn1.close()
+
+    # Re-init against the same path should not wipe existing data or error.
+    conn2 = init_db(db_path)
+    entry = get_entry(conn2, "/notes_raw/class_1/lecture_01.pdf")
+
+    assert entry is not None
+    assert entry.mathpix_status == "success"
+
+
+def test_init_db_creates_parent_dirs(tmp_path):
+    db_path = tmp_path / "nested" / "dir" / "state.db"
+
+    conn = init_db(db_path)
+
+    assert db_path.is_file()
+    conn.execute(f"SELECT 1 FROM pdf_state")  # table exists, no error
+
+
+def test_get_entry_returns_none_for_missing_path(tmp_path):
+    conn = init_db(tmp_path / "state.db")
+
+    entry = get_entry(conn, "/notes_raw/class_1/does_not_exist.pdf")
+
+    assert entry is None
+
+
+def test_upsert_entry_inserts_and_round_trips_all_fields(tmp_path):
+    conn = init_db(tmp_path / "state.db")
+    source_path = "/notes_raw/class_1/lecture_01.pdf"
+    processed_at = datetime(2026, 7, 4, 12, 30, 0, tzinfo=timezone.utc)
+
+    upsert_entry(
+        conn,
+        source_path,
+        source_hash="abc123",
+        source_mtime=1234.5,
+        source_size=4096,
+        mathpix_pdf_id="pdf_xyz",
+        mathpix_status="success",
+        llm_model="gpt-4o-mini",
+        llm_prompt_version="cleanup_v1",
+        llm_status="success",
+        llm_validation_result="ok",
+        figure_count=2,
+        output_path="/vault/class_1/Lecture 01.md",
+        mathpix_processed_at=processed_at,
+        llm_processed_at=processed_at,
+        vault_written_at=processed_at,
+    )
+
+    entry = get_entry(conn, source_path)
+
+    assert entry == StateEntry(
+        source_path=source_path,
+        source_hash="abc123",
+        source_mtime=1234.5,
+        source_size=4096,
+        mathpix_pdf_id="pdf_xyz",
+        mathpix_status="success",
+        llm_model="gpt-4o-mini",
+        llm_prompt_version="cleanup_v1",
+        llm_status="success",
+        llm_validation_result="ok",
+        figure_count=2,
+        output_path="/vault/class_1/Lecture 01.md",
+        mathpix_processed_at=processed_at,
+        llm_processed_at=processed_at,
+        vault_written_at=processed_at,
+    )
+
+
+def test_upsert_entry_insert_with_no_optional_fields(tmp_path):
+    conn = init_db(tmp_path / "state.db")
+    source_path = "/notes_raw/class_1/lecture_02.pdf"
+
+    upsert_entry(conn, source_path)
+
+    entry = get_entry(conn, source_path)
+
+    assert entry == StateEntry(
+        source_path=source_path,
+        source_hash=None,
+        source_mtime=None,
+        source_size=None,
+        mathpix_pdf_id=None,
+        mathpix_status=None,
+        llm_model=None,
+        llm_prompt_version=None,
+        llm_status=None,
+        llm_validation_result=None,
+        figure_count=None,
+        output_path=None,
+        mathpix_processed_at=None,
+        llm_processed_at=None,
+        vault_written_at=None,
+    )
+
+
+def test_upsert_entry_partial_update_preserves_other_columns(tmp_path):
+    conn = init_db(tmp_path / "state.db")
+    source_path = "/notes_raw/class_1/lecture_01.pdf"
+    mathpix_processed_at = datetime(2026, 7, 4, 12, 0, 0, tzinfo=timezone.utc)
+
+    upsert_entry(
+        conn,
+        source_path,
+        source_hash="abc123",
+        source_mtime=1234.5,
+        source_size=4096,
+        mathpix_pdf_id="pdf_xyz",
+        mathpix_status="success",
+        figure_count=1,
+        mathpix_processed_at=mathpix_processed_at,
+    )
+
+    # A later, unrelated stage (e.g. LLM cleanup) only writes its own
+    # columns - the earlier Mathpix fields must survive untouched.
+    upsert_entry(conn, source_path, llm_status="success", llm_model="gpt-4o-mini")
+
+    entry = get_entry(conn, source_path)
+
+    assert entry.source_hash == "abc123"
+    assert entry.source_mtime == 1234.5
+    assert entry.source_size == 4096
+    assert entry.mathpix_pdf_id == "pdf_xyz"
+    assert entry.mathpix_status == "success"
+    assert entry.figure_count == 1
+    assert entry.mathpix_processed_at == mathpix_processed_at
+    assert entry.llm_status == "success"
+    assert entry.llm_model == "gpt-4o-mini"
+
+
+def test_upsert_entry_update_overwrites_previous_value(tmp_path):
+    conn = init_db(tmp_path / "state.db")
+    source_path = "/notes_raw/class_1/lecture_01.pdf"
+
+    upsert_entry(conn, source_path, mathpix_status="failed")
+    upsert_entry(conn, source_path, mathpix_status="success", mathpix_pdf_id="pdf_xyz")
+
+    entry = get_entry(conn, source_path)
+
+    assert entry.mathpix_status == "success"
+    assert entry.mathpix_pdf_id == "pdf_xyz"
+
+
+def test_upsert_entry_rejects_unknown_field(tmp_path):
+    conn = init_db(tmp_path / "state.db")
+
+    with pytest.raises(ValueError):
+        upsert_entry(conn, "/notes_raw/class_1/lecture_01.pdf", bogus_field="x")
+
+
+def test_upsert_entry_returns_none(tmp_path):
+    conn = init_db(tmp_path / "state.db")
+
+    result = upsert_entry(conn, "/notes_raw/class_1/lecture_01.pdf", mathpix_status="success")
+
+    assert result is None

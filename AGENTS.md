@@ -91,6 +91,58 @@ writing, course index generation, and CLI flags beyond the bare entry point
 
 Tracked in issues #7-#12 (`phase-2` label).
 
+### Phase 2 progress
+
+- **Issue #7 (`src/state.py` schema + CRUD) — done.** Implemented in
+  `src/state.py`, tested in `tests/test_state.py` (10 sqlite-backed cases
+  using `tmp_path`, no mocking, all passing). Conventions
+  established/extended here that later Phase 2 issues should follow:
+  - Single table, `pdf_state`, primary-keyed on `source_path` (absolute
+    path string), with the full column list from docs/spec.md's State
+    Management section created upfront: `source_hash`, `source_mtime`
+    (`REAL`, raw `os.stat().st_mtime`), `source_size` (`INTEGER`),
+    `mathpix_pdf_id`, `mathpix_status`, `llm_model`, `llm_prompt_version`,
+    `llm_status`, `llm_validation_result`, `figure_count` (`INTEGER`),
+    `output_path`, `mathpix_processed_at`, `llm_processed_at`,
+    `vault_written_at`. `llm_*`/`output_path`/`vault_written_at` stay NULL
+    until Phases 3-5 populate them.
+  - `StateEntry` is a frozen dataclass mirroring the table 1:1 — same
+    convention as `MathpixCredentials`/`ProcessResult` in `src/config.py`
+    / `src/mathpix.py`.
+  - `init_db(path)` takes **no default path** — resolving the pipeline's
+    actual default `state.db` location (repo root, overridable) is
+    issue #10's (`load_paths_config()`) job, not this module's. `init_db()`
+    creates parent directories if missing, runs
+    `CREATE TABLE IF NOT EXISTS` (idempotent — safe to call repeatedly
+    against the same path, including across process restarts), and
+    returns the open `sqlite3.Connection` for the caller (`discovery.py`,
+    `main.py`) to reuse.
+  - The three timestamp columns (`mathpix_processed_at`, `llm_processed_at`,
+    `vault_written_at`) are `datetime` in Python but persisted as ISO 8601
+    strings in SQLite, converted explicitly in `state.py` rather than
+    relying on sqlite3's built-in datetime adapters (deprecated as of
+    Python 3.12) — matches the `datetime.now(timezone.utc)` convention
+    already established in `src/mathpix.py`'s `ProcessResult`.
+  - `upsert_entry(conn, source_path, **fields)` is a **partial** upsert:
+    a single `INSERT ... ON CONFLICT(source_path) DO UPDATE SET` that only
+    writes the columns actually passed as kwargs. This means a later,
+    unrelated call (e.g. Phase 3's LLM stage writing just `llm_status`/
+    `llm_model`) never nulls out earlier columns (e.g. Mathpix-stage
+    fields) on the same row — verified directly in
+    `test_upsert_entry_partial_update_preserves_other_columns`. Unknown
+    kwarg names raise `ValueError` (typo guardrail, no ORM layer to catch
+    it otherwise). Commits internally after every call (per-file
+    durability if a run crashes partway through) and returns `None` —
+    callers call `get_entry()` if they need the row back.
+  - **Deliberately no validation of `mathpix_status`/`llm_status` values**
+    (e.g. no enforced `{"success", "failed", "pending"}` set) —
+    `state.py` stays a thin, schema-agnostic CRUD layer; the *meaning* of
+    status strings is owned by the callers that write them (`main.py` for
+    `mathpix_status`, later Phase 3 code for `llm_status`).
+  - `get_entry(conn, source_path) -> StateEntry | None` returns `None` for
+    a missing row; otherwise parses the three timestamp columns back to
+    `datetime` via `datetime.fromisoformat()`.
+
 ### Phase 1 progress
 
 **Phase 1 status: VALIDATED — complete.** All core-pipeline issues (#1-#6)
@@ -489,12 +541,15 @@ notex/                      ← repo root
 │   └── spec.md             ← original full spec (historical reference, see note at top of file)
 ├── src/
 │   ├── config.py           ← env/config loading
-│   └── mathpix.py          ← Mathpix API client
+│   ├── mathpix.py          ← Mathpix API client
+│   └── state.py            ← state.db schema + CRUD (StateEntry, init_db, get_entry, upsert_entry)
 ├── scripts/
 │   └── smoke_test_mathpix.py   ← manual, real-API validation
 ├── tests/
 │   ├── fixtures/           ← fixture data for mocked tests
-│   └── test_mathpix.py
+│   ├── test_mathpix.py
+│   └── test_state.py
+├── state.db                ← SQLite state log, gitignored, created at runtime
 └── _cache/                 ← gitignored, created at runtime
 ```
 
