@@ -151,7 +151,7 @@ Tracked in issues #7-#12 (`phase-2` label).
   (#9, #11) should follow:
   - `classify_pdf(pdf_path, conn) -> ClassificationResult` is the per-file
     primitive; the recursive, multi-course directory walk that calls it
-    per file is `discover_pdfs()` (issue #9, not yet implemented).
+    per file is `discover_pdfs()` (issue #9, done — see below).
   - `Classification` is a 4-value enum: `NEW`, `UNCHANGED`, `CHANGED`,
     `RETRY`. `RETRY` (stored `mathpix_status == "failed"`, content
     otherwise unchanged) is kept distinct from `CHANGED` (content actually
@@ -195,6 +195,51 @@ Tracked in issues #7-#12 (`phase-2` label).
   - `pdf_path` is resolved via `Path(pdf_path).resolve()` before being
     used as (or looked up as) `source_path`, matching `state.py`'s
     "absolute path string" convention for that column.
+
+- **Issue #9 (`src/discovery.py` recursive directory scan across courses)
+  — done.** Implemented in `src/discovery.py`, tested in
+  `tests/test_discovery.py` (7 new tmp_path-backed cases, all passing).
+  Conventions established/extended here that later Phase 2 issues (#11)
+  should follow:
+  - `discover_pdfs(input_root, conn) -> dict[str, list[ClassificationResult]]`
+    walks `input_root` and classifies every PDF found via `classify_pdf()`
+    (issue #8), grouping results by course. A "course" is an immediate
+    (non-hidden) subdirectory of `input_root`; each course's PDFs are then
+    found via a **recursive** walk within that subdirectory (hidden
+    files/dirs skipped at any depth), so nested structure underneath a
+    course folder is discovered even though today's real `notes_raw/` data
+    is flat (`{course}/{lecture}.pdf}`).
+  - **Every** classification is included per course — `NEW`, `CHANGED`,
+    `RETRY`, and `UNCHANGED` alike — not just the actionable ones. This is
+    deliberate: `main.py` (issue #11) needs full processed/skipped counts
+    for its end-of-run summary, and re-deriving a skip count would mean
+    re-invoking `classify_pdf()` a second time per file. Callers filter on
+    `.classification` themselves to decide what to actually process vs.
+    just count.
+  - A course subdirectory with zero PDFs still appears as a key mapping to
+    `[]`, so course enumeration from `discover_pdfs()`'s return value alone
+    is complete — useful later for Phase 6's course index generation.
+  - PDFs sitting directly under `input_root`, outside any course
+    subdirectory, are still run through `classify_pdf()` (cheap and
+    course-agnostic) but are grouped under a reserved sentinel key,
+    `UNGROUPED_COURSE_KEY` (`""`, the empty string) — not a real course
+    name — deliberately kept as a plain `dict[str, list[ClassificationResult]]`
+    entry rather than introducing a wrapper dataclass, so `main.py` can
+    special-case that one key (e.g. warn/log about stray files) without a
+    type change to the function's return value.
+  - Non-`.pdf` files are ignored silently at every level (matching
+    `state.py`/`discovery.py`'s existing "no logging infrastructure exists
+    yet in this phase" precedent — nothing in the codebase does
+    print/logging output before `main.py`, issue #11).
+  - Hidden directories/files (names starting with `.`) are ignored both as
+    course candidates and as PDFs at any depth — verified directly in
+    `test_discover_pdfs_ignores_hidden_dirs_and_files` (guards against
+    e.g. `.DS_Store`-adjacent hidden dirs or stray dotfiles being picked
+    up as real courses/PDFs).
+  - Ordering is fully deterministic: course keys are sorted alphabetically
+    (`UNGROUPED_COURSE_KEY` sorts first, being the empty string), and each
+    course's `ClassificationResult` list is sorted by `source_path` —
+    needed for reproducible runs/tests per the issue's own requirement.
 
 ### Phase 1 progress
 
@@ -596,7 +641,7 @@ notex/                      ← repo root
 │   ├── config.py           ← env/config loading
 │   ├── mathpix.py          ← Mathpix API client
 │   ├── state.py            ← state.db schema + CRUD (StateEntry, init_db, get_entry, upsert_entry)
-│   └── discovery.py        ← per-file two-tier change classification (Classification, ClassificationResult, classify_pdf, compute_sha256)
+│   └── discovery.py        ← per-file two-tier change classification + recursive multi-course walk (Classification, ClassificationResult, classify_pdf, compute_sha256, discover_pdfs, UNGROUPED_COURSE_KEY)
 ├── scripts/
 │   └── smoke_test_mathpix.py   ← manual, real-API validation
 ├── tests/

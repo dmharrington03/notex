@@ -1,5 +1,6 @@
 """
-Phase 2 discovery: per-file two-tier change classification.
+Phase 2 discovery: per-file two-tier change classification, plus the
+recursive multi-course directory walk built on top of it.
 
 `classify_pdf()` is the per-file primitive behind Stage 1 / State Management
 in docs/spec.md: a filesystem mtime+size pre-check against `state.db`
@@ -8,9 +9,9 @@ only when the pre-check can't rule out a change. It also folds in the
 "`mathpix_status == failed` -> retry" rule from the Reprocessing logic
 table, independent of whether the file's contents actually changed.
 
-Scope of this module (issue #8) is the single-file primitive only. The
-recursive, multi-course directory walk that calls this per file is
-`discover_pdfs()` (issue #9, not yet implemented).
+`discover_pdfs()` (issue #9) walks `input_root` recursively, grouping
+results by course (the immediate subdirectory of `input_root`), by calling
+`classify_pdf()` once per PDF found.
 """
 
 from __future__ import annotations
@@ -30,6 +31,12 @@ _HASH_CHUNK_SIZE = 65536
 # `mathpix_status` value written on Mathpix submit/poll/fetch failure (see
 # docs/spec.md's State Management schema: "success", "failed", "pending").
 _MATHPIX_STATUS_FAILED = "failed"
+
+# Reserved dict key in discover_pdfs()'s return value for PDFs found
+# directly under `input_root` with no course subfolder to group them under.
+# Not a real course name - callers (main.py) should treat this key specially
+# (e.g. log/warn) rather than processing these files as part of a course.
+UNGROUPED_COURSE_KEY = ""
 
 
 class Classification(Enum):
@@ -171,3 +178,100 @@ def classify_pdf(pdf_path: str | Path, conn: sqlite3.Connection) -> Classificati
         source_size=current_size,
         source_hash=source_hash,
     )
+
+
+def _is_pdf(path: Path) -> bool:
+    return path.is_file() and path.suffix.lower() == ".pdf"
+
+
+def _find_pdfs(directory: Path) -> list[Path]:
+    """Recursively find all PDFs under `directory`, ignoring hidden files/dirs."""
+    result = []
+    for path in directory.rglob("*"):
+        if not _is_pdf(path):
+            continue
+        relative_parts = path.relative_to(directory).parts
+        if any(part.startswith(".") for part in relative_parts):
+            continue
+        result.append(path)
+    return result
+
+
+def discover_pdfs(
+    input_root: str | Path, conn: sqlite3.Connection
+) -> dict[str, list[ClassificationResult]]:
+    """
+    Recursively walk `input_root`, classifying every PDF found against
+    `state.db` via `classify_pdf()`, and group the results by course.
+
+    A "course" is an immediate subdirectory of `input_root` (hidden
+    directories - names starting with "." - are ignored as course
+    candidates). Each course's PDFs are found by a recursive walk *within*
+    that subdirectory, so nested structure underneath a course folder is
+    still discovered even though today's real data is flat
+    (`{course}/{lecture}.pdf`).
+
+    PDFs found directly under `input_root` (not inside any course
+    subdirectory) are still classified, but are placed under the reserved
+    `UNGROUPED_COURSE_KEY` ("") rather than a real course name, since
+    there's no course to group them under. Callers (`main.py`) are expected
+    to treat that key specially - e.g. log/warn about it - rather than
+    processing those files as part of a course. Non-PDF files (at any
+    level) are ignored silently; no logging infrastructure exists yet in
+    this phase.
+
+    The returned dict includes every classification result, not just
+    actionable ones (NEW/CHANGED/RETRY) - UNCHANGED files are included too,
+    so callers can compute full summary counts (e.g. "N processed, M
+    skipped") without re-invoking `classify_pdf()` a second time. A course
+    subdirectory with zero PDFs still appears as a key with an empty list,
+    so course enumeration is complete/predictable.
+
+    Ordering is deterministic: course keys are sorted alphabetically
+    (`UNGROUPED_COURSE_KEY` is the empty string, so it sorts first), and
+    each course's results are sorted by `source_path`.
+
+    Args:
+        input_root: root directory to recursively scan (e.g.
+            `paths.input_root` from config.yaml).
+        conn: an open connection from `state.init_db()`.
+
+    Returns:
+        A dict mapping course name (or `UNGROUPED_COURSE_KEY`) to a sorted
+        list of `ClassificationResult`.
+    """
+    root = Path(input_root)
+
+    course_dirs = sorted(
+        (
+            entry
+            for entry in root.iterdir()
+            if entry.is_dir() and not entry.name.startswith(".")
+        ),
+        key=lambda p: p.name,
+    )
+
+    results: dict[str, list[ClassificationResult]] = {}
+
+    # Every non-hidden subdirectory of `root` is a course dir (see above),
+    # so "ungrouped" PDFs are exactly the direct, non-hidden file children
+    # of `root` itself - no need to walk recursively to find these.
+    ungrouped_pdfs = [
+        entry
+        for entry in root.iterdir()
+        if _is_pdf(entry) and not entry.name.startswith(".")
+    ]
+    if ungrouped_pdfs:
+        results[UNGROUPED_COURSE_KEY] = sorted(
+            (classify_pdf(path, conn) for path in ungrouped_pdfs),
+            key=lambda r: r.source_path,
+        )
+
+    for course_dir in course_dirs:
+        pdfs = _find_pdfs(course_dir)
+        results[course_dir.name] = sorted(
+            (classify_pdf(path, conn) for path in pdfs),
+            key=lambda r: r.source_path,
+        )
+
+    return dict(sorted(results.items(), key=lambda item: item[0]))
