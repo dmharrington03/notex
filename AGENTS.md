@@ -54,42 +54,149 @@ Dependencies are tracked in `environment.yml` (reproduce with
 
 ## Current Phase
 
-**Phase 2 — State management.** Scope: SQLite state log (`state.db`),
-two-tier change detection (filesystem mtime+size pre-check, SHA-256 fallback
-per docs/spec.md Stage 1 / State Management), and idempotent rerun behavior
-across all course subfolders in `notes_raw/`. See `docs/spec.md` for the full
-7-phase roadmap and stage-by-stage detail (note: follow this file, AGENTS.md,
-not spec.md, where they disagree).
+**Phase 3 — LLM cleanup.** Scope: a single-call LLM pass over each cached
+Mathpix Markdown file (`src/llm.py`), with post-cleanup validation and a
+fallback-to-raw-output path on any failure, per docs/spec.md Stage 3 / LLM
+Cleanup. See `docs/spec.md` for the full 7-phase roadmap and stage-by-stage
+detail (note: follow this file, AGENTS.md, not spec.md, where they disagree
+— see below for a concrete correction this phase makes to spec.md's
+Reprocessing logic table).
 
 Concretely, this phase covers:
-- `src/state.py`: `state.db` schema/init + CRUD, matching docs/spec.md's full
-  State Management column list (`mathpix_*`, `llm_*`, `output_path`,
-  `vault_written_at`, etc.) created upfront even though only the
-  `mathpix_*`/discovery-related columns are populated until Phases 3-5.
-- `src/discovery.py`: per-file two-tier classification (new/unchanged/changed,
-  including the "previously `mathpix_failed` -> retry" rule from the
-  Reprocessing logic table) plus a full recursive walk of `paths.input_root`
-  across all course subfolders. Note: docs/spec.md nominally assigns
-  "generalize discovery across all courses" to Phase 6, but that work is
-  being pulled forward into this phase since it's simple on top of the
-  per-file primitive and is needed to prove idempotency for real.
-- `src/config.py`: new narrowly-scoped `load_paths_config()`
-  (`paths.input_root`, `paths.cache_dir`, `paths.state_db`) ahead of Phase
-  6's full `config.yaml` wiring, mirroring the `mathpix:` polling precedent
-  from Phase 1 issue #2. `paths.vault_root` (already present in
-  `config.yaml`/`config.example.yaml`) stays unread until Phase 4/5.
-- `src/main.py`: new, permanent CLI entry point (no flags yet — those are
-  Phase 7) that discovers new/changed PDFs, runs them through Phase 1's
-  `process_pdf()`, and records results (or failures) to `state.db`,
-  continuing past per-file errors rather than aborting the run. Hits the
-  real, paid Mathpix API when run for real — same caution as
-  `scripts/smoke_test_mathpix.py`.
+- `src/config.py`: new `load_llm_config()` reading a new `llm:` section from
+  `config.yaml` (`model`, `prompt_version`, `validation.min_length_ratio`/
+  `max_length_ratio`), mirroring the `mathpix:` polling config precedent from
+  Phase 1 issue #2. **`prompt_version` is config-driven, not a hardcoded code
+  constant** — this is what lets the active prompt be swapped by editing
+  `config.yaml` alone, no code change required.
+- `prompts/cleanup_v1.txt`: the versioned system prompt (hard constraints,
+  bra-ket normalization guidance, a generic domain-vocabulary-misread hint,
+  and explicit permission to drop a single stray non-structural heading —
+  see "Smoke test findings" / "Phase 3 prompt design notes" below for what
+  motivates each of these).
+- `src/llm.py`: `LLMClient` (thin `litellm` wrapper, injectable for tests),
+  `validate_cleanup()` (length ratio, `$`/`$$` balance, `\left`/`\right`
+  count balance, a relaxed heading-count check), and `cleanup_pdf()`
+  (orchestrates cleanup + validation + fallback-to-raw-Mathpix-output on any
+  failure — unlike Phase 1's `process_pdf()`, this stage's fallback behavior
+  is intrinsic to it and does not raise on failure, per docs/spec.md).
+- `src/main.py`: `run()` extended to drive the LLM stage after Mathpix for
+  freshly-processed files, plus a separate staleness check
+  (`needs_llm_reprocessing()`) for files whose Mathpix stage is skipped
+  (UNCHANGED) but whose LLM stage has never succeeded. Also adds a
+  `force_llm` parameter to `run()` as forward-looking infrastructure for a
+  future forced-reprocessing CLI flag (see below), and a
+  `target_source_path` parameter as forward-looking infrastructure for a
+  future single-file rerun CLI flag (see below).
+- `scripts/smoke_test_llm.py`: manual real-API prompt-iteration script
+  against already-cached `.mathpix.md` output (no new Mathpix calls needed).
 
-Still out of scope: LLM cleanup, figure copy-to-vault, frontmatter/vault
+**Deliberate correction to docs/spec.md's Reprocessing logic table:** spec.md
+lists "PDF unchanged, prompt version updated → Re-run LLM stage only" as
+automatic behavior. This phase does **not** implement it that way — confirmed
+with the user. `needs_llm_reprocessing()` checks only `llm_status` (never-run
+or failed), never comparing the stored `llm_prompt_version` against the
+currently configured one. Switching `config.yaml`'s `llm.prompt_version` must
+never silently trigger mass reprocessing (and its associated LLM API cost) on
+the next ordinary run. Instead, `run()` gains a `force_llm: bool = False`
+parameter: when `True`, every eligible file's LLM stage is rerun with the
+currently configured prompt regardless of stored status/version. This is the
+infrastructure for an eventual CLI flag (planned name: `--refresh-llm-prompt`,
+still Phase 7 scope — `main()` hardcodes `force_llm=False` and does not parse
+it from `argv` yet). `state.db`'s `llm_prompt_version` column always records
+whichever version actually produced that row's currently-stored output,
+regardless of what `config.yaml` currently says.
+
+**Single-file rerun infrastructure:** confirmed use case — process a lecture
+PDF, notice an LLM cleanup error, manually tweak `prompts/cleanup_v1.txt` (or
+bump `llm.prompt_version`), and want to rerun *just that one file's* LLM
+stage rather than the whole corpus. `run()` gains a
+`target_source_path: str | Path | None = None` parameter: when given, it
+resolves the file's course, classifies just that one PDF directly (skipping
+the full `discover_pdfs()` walk), and runs it through the same per-file
+mathpix+LLM logic as an ordinary run — combined with `force_llm=True`, this
+gives exactly the single-file-reprocess workflow above. Like `force_llm`,
+this is infrastructure only: `main()` doesn't parse a `--file`-style flag
+yet (still Phase 7), but the parameter and code path are implemented and
+tested now.
+
+Still out of scope: chunking for long documents (deferred — real lecture
+PDFs observed so far are 1-2 pages, well under any token threshold; revisit
+once a real long document is actually encountered rather than building
+untested speculative logic now), figure copy-to-vault, frontmatter/vault
 writing, course index generation, and CLI flags beyond the bare entry point
-— those arrive in Phases 3-7.
+— those arrive in Phases 4-7.
 
-Tracked in issues #7-#12 (`phase-2` label).
+**Also worth noting for validation design:** the Phase 1 smoke-test-derived
+idea of a "`\left`/`\right` *type*-matching balance check" turned out not to
+be mechanically checkable — `\left(...\right]` is syntactically valid LaTeX
+regardless of whether the delimiter shapes correspond, so there's no static
+rule distinguishing a real OCR mismatch from intentional mixed delimiters.
+This phase's `validate_cleanup()` implements a **count**-balance check for
+`\left`/`\right` (same shape as the `$`/`$$` check), not a semantic pairing
+check, and relies on the cleanup prompt itself (with bra-ket normalization
+guidance) to actually fix mismatched pairs on a best-effort basis.
+
+Tracked in issues #13-#20 (`phase-3` label).
+
+### Phase 3 progress
+
+**Phase 3 status: PLANNING COMPLETE — implementation starting.** Issues
+#13-#20 are filed; none are implemented yet. Design decisions made during
+planning, recorded here so they aren't lost before the code lands:
+
+- **Heading-count validation is relaxed, not exact-match.** docs/spec.md
+  calls for an exact heading-count match; this phase instead fails
+  validation only if the cleaned output has *more* headings than the
+  original (a hallucinated new heading). Equal or fewer passes. This is
+  deliberate: the Phase 1 smoke test found Mathpix emitting a stray heading
+  from a handwritten date/title line (`## Lecture 21-4/14`) that isn't real
+  document structure, and `prompts/cleanup_v1.txt` (#14) is expected to
+  instruct the LLM to drop exactly that kind of artifact. An exact-match
+  check would make that cleanup impossible to pass validation.
+- **The LLM-staleness check lives in `src/llm.py`, not `src/discovery.py`.**
+  `needs_llm_reprocessing(entry) -> bool` is a new, separate function from
+  `discovery.py`'s `classify_pdf()` — `discovery.py`'s docstring already
+  scopes it to Mathpix-stage change detection only, so LLM-stage staleness
+  (a different question: "has this file's cached Mathpix output ever been
+  successfully cleaned by the LLM stage?") stays a separate concern owned
+  by the module that implements the LLM stage itself.
+- **Chunking for long documents is deferred, not implemented this phase.**
+  docs/spec.md's Stage 3 calls for splitting on Mathpix page-break markers
+  above a configurable token threshold, with overlap/dedup on reassembly.
+  Real lecture PDFs observed so far (Phase 1/2's `notes_raw/class_1` smoke
+  tests) are 1-2 pages, well under any plausible token threshold. Building
+  chunking logic now would be untested speculative logic with no real
+  document to validate it against — revisit as its own future issue once an
+  actual long lecture is encountered.
+- **Default model: Claude 3.5 Haiku** (`claude-3-5-haiku-20241022` via
+  `litellm`, requires `ANTHROPIC_API_KEY`). Chosen over docs/spec.md's
+  primary suggestion (GPT-4o-mini) because the Phase 1 smoke test's hardest
+  OCR-cleanup cases are subtle, context-dependent misreads (systematic
+  domain-vocabulary substitutions like "parity"→"party", and the "quietly
+  dangerous" `|n⟩`→`\ln` misread) rather than simple spelling errors — these
+  benefit from a model with stronger contextual understanding and precise
+  instruction-following, and cost is negligible either way at this note
+  volume (a few pages per lecture). `config.yaml`'s `llm.model` makes this
+  trivially swappable (e.g. to Sonnet) if Haiku's output quality doesn't
+  hold up during #19's prompt-iteration smoke testing.
+- **`needs_llm_reprocessing()` deliberately ignores `llm_prompt_version`.**
+  See the "Deliberate correction to docs/spec.md's Reprocessing logic
+  table" note above (Current Phase section) — this is the phase's most
+  significant deviation from docs/spec.md and is why `run()` gains a
+  `force_llm` parameter (#18) as forward-looking infrastructure for a Phase
+  7 CLI flag.
+- **`run()` also gains a `target_source_path` parameter (#18), infrastructure
+  for a future single-file rerun CLI flag.** Confirmed use case: after
+  processing a lecture and spotting an LLM cleanup error, manually tweak the
+  prompt and rerun just that one file rather than the whole corpus.
+  `target_source_path` bypasses the full `discover_pdfs()` walk (classifies
+  just the one given PDF directly) and, combined with `force_llm=True`,
+  reprocesses only that file's LLM stage. `main()` doesn't parse a
+  `--file`-style flag for this yet — still Phase 7 — but the parameter and
+  code path land now, alongside `force_llm`, so both pieces of Phase 7
+  infrastructure are built and tested together rather than retrofitted
+  later.
 
 ### Phase 2 progress
 
