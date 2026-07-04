@@ -93,6 +93,15 @@ Tracked in issues #7-#12 (`phase-2` label).
 
 ### Phase 2 progress
 
+**Phase 2 status: VALIDATED — complete.** All Phase 2 issues (#7-#12) are
+implemented and unit-tested (sqlite-backed with `tmp_path`/respx mocks, no
+real API calls in the automated suite — 75 tests passing), and the full
+`src/main.py` orchestration pipeline has additionally been run for real
+against the live Mathpix API on `notes_raw/class_1`'s two PDFs — see the
+issue #12 entry below for the real-run findings. Idempotent rerun behavior
+(the phase's core requirement) was confirmed end-to-end on real data, not
+just in mocked tests.
+
 - **Issue #7 (`src/state.py` schema + CRUD) — done.** Implemented in
   `src/state.py`, tested in `tests/test_state.py` (10 sqlite-backed cases
   using `tmp_path`, no mocking, all passing). Conventions
@@ -349,6 +358,58 @@ Tracked in issues #7-#12 (`phase-2` label).
     `input_root`).
   - No CLI flags (`--dry-run`/`--force`/`--course`/`--verbose`) — still
     Phase 7, per the issue and `docs/spec.md`'s roadmap.
+
+- **Issue #12 (real-data idempotent-rerun validation) — done.** `src/main.py`
+  was run for real (`python -m src.main`, no CLI flags) against
+  `config.yaml`'s actual `input_root`, covering `notes_raw/class_1`'s two
+  existing PDFs. Findings:
+  - **Run 1 (cold, hit the real Mathpix API):** both files classified `new`
+    and processed successfully — console summary `Processed: 2, Skipped: 0,
+    Errors: 0, Ungrouped: 0`. `state.db` got one row per file with
+    `mathpix_status="success"`, a real `mathpix_pdf_id` (UUID), correct
+    `figure_count` (0 for `lecture_01.pdf`, 1 for `lecture_02.pdf`), a
+    64-character SHA-256 `source_hash`, and `source_mtime`/`source_size`
+    matching the files' real `os.stat()` values exactly.
+    `_cache/class_1/lecture_01.mathpix.md`, `lecture_02.mathpix.md`, and
+    `figures/lecture_02_fig_001.jpg` were created, matching Phase 1's
+    documented `fetch_and_extract()` output shape (course-subfolder-nested
+    this time, per issue #11's `cache_dir` convention) — and are
+    byte-for-byte identical to the earlier `scripts/smoke_test_mathpix.py`
+    output from the same two PDFs, confirming deterministic extraction
+    across independent submissions (different `pdf_id`s, same content).
+    `notes_raw/class_1/` itself was left untouched (same permissions,
+    mtime, and size on both PDFs before/after).
+  - **Run 2 (immediate rerun, no Mathpix cost):** both files classified
+    `unchanged` — console summary `Processed: 0, Skipped: 2, Errors: 0,
+    Ungrouped: 0`, with no `processing (...)`/`done` lines printed for
+    either file. Confirmed a true no-op at the data level, not just in the
+    printed summary: every `state.db` column (`source_hash`,
+    `mathpix_pdf_id`, `mathpix_status`, and critically
+    `mathpix_processed_at`) was byte-identical to Run 1 — no row was
+    rewritten — and the `_cache/class_1/` files' and `state.db`'s own
+    mtimes stayed at Run 1's wall-clock time, i.e. nothing was touched
+    during Run 2. This is the phase's core requirement (idempotent rerun)
+    confirmed end-to-end on real data.
+  - Tier 1 (mtime+size pre-check) alone was sufficient to short-circuit
+    Run 2 for both files, since neither file's mtime/size had drifted —
+    consistent with `test_unchanged_mtime_and_size_skips_hash_computation`'s
+    mocked-test coverage of the same path.
+  - **Optional tier-2 (SHA-256 fallback) exercise — also run and confirmed.**
+    `lecture_01.pdf` was `touch`-ed (mtime bumped, bytes unchanged) and
+    `main.py` rerun a third time. Result: still classified `unchanged` and
+    skipped (no reprocessing, no Mathpix call) — tier 1 alone couldn't rule
+    it out (mtime had drifted), so tier 2 computed the SHA-256, found it
+    identical to the stored hash, and correctly treated the file as
+    unchanged. `state.db`'s `source_mtime` for `lecture_01.pdf` was refreshed
+    to the new value (per `classify_pdf()`'s documented partial-upsert
+    behavior for drifted-but-unchanged files), while `source_hash`,
+    `mathpix_status`, `mathpix_pdf_id`, and `mathpix_processed_at` all stayed
+    exactly as written in Run 1 — confirming the refresh is metadata-only
+    and doesn't touch the Mathpix-stage fields. `_cache/class_1/*.mathpix.md`
+    file mtimes were untouched, confirming `process_pdf()` was never
+    invoked. `lecture_02.pdf` (not touched) was unaffected. This is real,
+    non-mocked confirmation of the tier-2 fallback path called out in
+    `test_discovery.py`'s mocked coverage.
 
 ### Phase 1 progress
 
