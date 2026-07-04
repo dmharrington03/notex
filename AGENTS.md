@@ -54,13 +54,42 @@ Dependencies are tracked in `environment.yml` (reproduce with
 
 ## Current Phase
 
-**Phase 1 — Core Mathpix pipeline.** Scope: given a single PDF path, submit to
-Mathpix, poll to completion, retrieve Markdown + figures, write to `_cache/`.
-No discovery loop, no `state.db`, no LLM stage, no vault writing yet — those
-arrive in later phases (see `docs/spec.md` for the full 7-phase roadmap and
-stage-by-stage detail — state.db schema, LLM prompt structure, error handling
-table, CLI flags, etc. Note: follow this file (AGENTS.md), not spec.md, where
-they disagree — see "Mathpix API notes" below for known corrections).
+**Phase 2 — State management.** Scope: SQLite state log (`state.db`),
+two-tier change detection (filesystem mtime+size pre-check, SHA-256 fallback
+per docs/spec.md Stage 1 / State Management), and idempotent rerun behavior
+across all course subfolders in `notes_raw/`. See `docs/spec.md` for the full
+7-phase roadmap and stage-by-stage detail (note: follow this file, AGENTS.md,
+not spec.md, where they disagree).
+
+Concretely, this phase covers:
+- `src/state.py`: `state.db` schema/init + CRUD, matching docs/spec.md's full
+  State Management column list (`mathpix_*`, `llm_*`, `output_path`,
+  `vault_written_at`, etc.) created upfront even though only the
+  `mathpix_*`/discovery-related columns are populated until Phases 3-5.
+- `src/discovery.py`: per-file two-tier classification (new/unchanged/changed,
+  including the "previously `mathpix_failed` -> retry" rule from the
+  Reprocessing logic table) plus a full recursive walk of `paths.input_root`
+  across all course subfolders. Note: docs/spec.md nominally assigns
+  "generalize discovery across all courses" to Phase 6, but that work is
+  being pulled forward into this phase since it's simple on top of the
+  per-file primitive and is needed to prove idempotency for real.
+- `src/config.py`: new narrowly-scoped `load_paths_config()`
+  (`paths.input_root`, `paths.cache_dir`, `paths.state_db`) ahead of Phase
+  6's full `config.yaml` wiring, mirroring the `mathpix:` polling precedent
+  from Phase 1 issue #2. `paths.vault_root` (already present in
+  `config.yaml`/`config.example.yaml`) stays unread until Phase 4/5.
+- `src/main.py`: new, permanent CLI entry point (no flags yet — those are
+  Phase 7) that discovers new/changed PDFs, runs them through Phase 1's
+  `process_pdf()`, and records results (or failures) to `state.db`,
+  continuing past per-file errors rather than aborting the run. Hits the
+  real, paid Mathpix API when run for real — same caution as
+  `scripts/smoke_test_mathpix.py`.
+
+Still out of scope: LLM cleanup, figure copy-to-vault, frontmatter/vault
+writing, course index generation, and CLI flags beyond the bare entry point
+— those arrive in Phases 3-7.
+
+Tracked in issues #7-#12 (`phase-2` label).
 
 ### Phase 1 progress
 
