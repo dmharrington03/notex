@@ -280,6 +280,76 @@ Tracked in issues #7-#12 (`phase-2` label).
     current behavior, so no explicit `cache_dir`/`state_db` keys were
     added for values nobody's overriding yet.
 
+- **Issue #11 (`src/main.py` orchestration entry point) — done.**
+  Implemented in `src/main.py`, tested in `tests/test_main.py` (7 new
+  respx-mocked + tmp_path-`state.db` cases, all passing — no mocking of
+  `state.db` itself, matching `test_discovery.py`'s convention).
+  Conventions established here:
+  - Two entry points, not one: `run(paths_config, conn, client=None) ->
+    RunSummary` is the directly-testable core (takes an already-loaded
+    `PathsConfig` and an already-open `state.db` connection, so tests
+    inject a `tmp_path` input_root tree + real temp `state.db` + a
+    respx-mocked `MathpixClient` without ever going through argparse or
+    `config.yaml`); `main(argv=None) -> int` is the thin CLI wrapper
+    (`load_paths_config()` -> `init_db()` -> `run()` -> print summary ->
+    exit code). `tests/test_main.py` calls `run()` directly for all the
+    substantive cases and only exercises `main()`'s own wiring (with
+    `run`/`load_paths_config` monkeypatched) for the exit-code contract.
+  - **One `MathpixClient` per run, not per file.** `run()` builds (or
+    reuses an injected) client once and passes the same instance to every
+    `process_pdf()` call in the loop — a deliberate departure from
+    `process_pdf()`'s own default of owning/closing a client per call —
+    so a real run shares one HTTP connection across an entire course
+    instead of reconnecting per PDF. Still closed in a `finally` (only
+    when `run()` itself constructed it) matching `process_pdf()`'s
+    `owns_client` pattern.
+  - `RunSummary` (frozen dataclass: `processed`, `skipped`, `errors`,
+    `ungrouped`) is `run()`'s return value; `_ungrouped` is deliberately
+    its own bucket rather than folded into `skipped` or `errors`, so a
+    stray top-level PDF under `input_root` doesn't misleadingly read as
+    "already processed" or "failed."
+  - **`UNGROUPED_COURSE_KEY` files are skipped outright this phase, not
+    processed.** There's no course name to mirror into `cache_dir`, so
+    each one is printed as a warning and left out of `state.db` entirely
+    (no `upsert_entry()` call at all for these) — confirmed with the user
+    rather than assumed, since `discover_pdfs()`'s docstring left this
+    caller-side decision open. Revisit if/when Phase 6 needs a real
+    answer for stray files.
+  - `cache_dir` per actionable file is `paths_config.cache_dir / course`
+    (e.g. `_cache/class_1/lecture_01.mathpix.md`), passed straight through
+    as `process_pdf()`'s `cache_dir` positional arg — the course-subfolder
+    mirroring called out in the issue body.
+  - The hash/mtime/size written back to `state.db` after processing (both
+    success and failure paths) are the ones already computed by
+    `classify_pdf()`/`discover_pdfs()` on the `ClassificationResult` —
+    `run()` never re-reads or re-hashes the source PDF itself.
+  - **Failure handling only catches `MathpixError` /
+    `httpx.HTTPStatusError` / `FileNotFoundError`** (the documented
+    `process_pdf()` failure modes) — anything else propagates and aborts
+    the run, rather than being silently swallowed. On a caught failure,
+    `upsert_entry()` still writes the refreshed `source_hash`/
+    `source_mtime`/`source_size` alongside `mathpix_status="failed"`, so
+    tier-1 change detection stays correct on the next run even for a
+    failed file; `mathpix_pdf_id`/`figure_count`/`mathpix_processed_at`
+    are left untouched (there is no successful `ProcessResult` to read
+    them from).
+  - Progress output is one line per file (`[{course}] {filename}:
+    processing ({classification})...` / `... done` / `... FAILED: {exc}`)
+    plus one warning line per ungrouped file — no per-poll `on_status`
+    spam, since a real course run could mean dozens of poll attempts per
+    file. A basic end-of-run summary (`Processed`/`Skipped`/`Errors`/
+    `Ungrouped` counts) is printed by `main()`, not `run()` itself, so
+    `run()`'s return value stays the single source of truth for tests.
+  - **`main()` always returns `0` once `run()` completes**, even with
+    `RunSummary.errors > 0` — per-file Mathpix failures are recorded in
+    `state.db` and visible in the printed summary, not treated as a fatal
+    run failure (confirmed with the user). `main()` only returns `1` for
+    something that prevents the run from starting at all — currently just
+    `ConfigError` from `load_paths_config()` (e.g. missing `config.yaml`/
+    `input_root`).
+  - No CLI flags (`--dry-run`/`--force`/`--course`/`--verbose`) — still
+    Phase 7, per the issue and `docs/spec.md`'s roadmap.
+
 ### Phase 1 progress
 
 **Phase 1 status: VALIDATED — complete.** All core-pipeline issues (#1-#6)
@@ -677,17 +747,20 @@ notex/                      ← repo root
 ├── docs/
 │   └── spec.md             ← original full spec (historical reference, see note at top of file)
 ├── src/
-│   ├── config.py           ← env/config loading
+│   ├── config.py           ← env/config loading (load_mathpix_credentials, load_mathpix_polling_config, load_paths_config)
 │   ├── mathpix.py          ← Mathpix API client
 │   ├── state.py            ← state.db schema + CRUD (StateEntry, init_db, get_entry, upsert_entry)
-│   └── discovery.py        ← per-file two-tier change classification + recursive multi-course walk (Classification, ClassificationResult, classify_pdf, compute_sha256, discover_pdfs, UNGROUPED_COURSE_KEY)
+│   ├── discovery.py        ← per-file two-tier change classification + recursive multi-course walk (Classification, ClassificationResult, classify_pdf, compute_sha256, discover_pdfs, UNGROUPED_COURSE_KEY)
+│   └── main.py             ← CLI orchestration entry point (RunSummary, run, main) — wires discovery + state.db + process_pdf() into a runnable pass over input_root
 ├── scripts/
 │   └── smoke_test_mathpix.py   ← manual, real-API validation
 ├── tests/
 │   ├── fixtures/           ← fixture data for mocked tests
 │   ├── test_mathpix.py
 │   ├── test_state.py
-│   └── test_discovery.py
+│   ├── test_discovery.py
+│   ├── test_config.py
+│   └── test_main.py
 ├── state.db                ← SQLite state log, gitignored, created at runtime
 └── _cache/                 ← gitignored, created at runtime
 ```
