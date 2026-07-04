@@ -141,9 +141,9 @@ Tracked in issues #13-#20 (`phase-3` label).
 
 ### Phase 3 progress
 
-**Phase 3 status: IN PROGRESS.** Issue #13 is implemented; #14-#20 are filed
-but not yet implemented. Design decisions made during planning, recorded
-here so they aren't lost before the rest of the code lands:
+**Phase 3 status: IN PROGRESS.** Issues #13 and #14 are implemented; #15-#20
+are filed but not yet implemented. Design decisions made during planning,
+recorded here so they aren't lost before the rest of the code lands:
 
 - **Heading-count validation is relaxed, not exact-match.** docs/spec.md
   calls for an exact heading-count match; this phase instead fails
@@ -235,6 +235,54 @@ here so they aren't lost before the rest of the code lands:
     `ANTHROPIC_API_KEY` from the environment itself when invoked, and
     wiring/validating that key is `LLMClient`'s concern (issue #15), not
     this config-loading module's.
+
+- **Issue #14 (`prompts/cleanup_v1.txt`: system prompt content) — done.**
+  Content-only issue, no code changes. `prompts/` didn't exist yet and was
+  created for this file, matching the `prompts/{prompt_version}.txt`
+  loading convention `load_llm_config()` (#13) and `load_prompt_text()`
+  (#15) rely on. Conventions/decisions made writing the prompt text,
+  confirmed with the user:
+  - **Plain-prose system-message format**, not nested Markdown
+    headers/numbered lists — matches the `litellm`/chat-completion system
+    message convention and stays easy to hand-edit for future prompt
+    iteration (#19's smoke testing).
+  - **The domain-vocabulary hint is worded fully generically** — no
+    concrete example baked in (e.g. no literal "parity"→"party" mention)
+    — so the prompt doesn't overfit to one course's vocabulary; it
+    instead describes the *pattern* (a technical term systematically
+    misread as an unrelated common word) and instructs the LLM to correct
+    it consistently everywhere it recurs in the document, not just on
+    first occurrence.
+  - **Hard-constraint wording was tightened to avoid a self-contradiction**
+    caught in review: an earlier draft's "must not change mathematical
+    content inside LaTeX delimiters" rule read as forbidding the very
+    LaTeX-typo-fixing and bra-ket-macro-rewriting the prompt also
+    instructs the LLM to do. The final wording distinguishes changing
+    mathematical *meaning* (numbers/variables/operators/symbols — always
+    forbidden) from syntax/formatting fixes that preserve meaning
+    (LaTeX command typo fixes, bra-ket macro rewrites — explicitly
+    allowed), so the two sections no longer conflict.
+  - **Bra-ket rewrite uses `\braket{x|y}`, not `\braket{x}{y}`** — a
+    single-argument-with-pipe form, per user correction during review
+    (not the two-argument macro signature originally drafted).
+  - **New "worked examples" section, not in the original issue scope but
+    added per user request during review:** handwritten notes sometimes
+    label a worked example inline as `ex)`/`ex:` followed immediately by
+    the example content on the same line; the prompt now instructs the
+    LLM to place the `ex)`/`ex:` heading on its own line and the example
+    content on the following line(s), without altering the content
+    itself. This is a formatting-only reflow (heading/content line
+    placement), consistent with the "syntax/formatting fixes are allowed,
+    meaning-changing edits are not" distinction above.
+  - The stray-heading-artifact permission (dropping exactly one
+    non-structural date/title-line heading at the very start of the
+    document) is scoped tightly — explicitly forbids touching any other
+    heading — so it supports #16's relaxed heading-count validation
+    (fails only on an *increase* in heading count) without opening the
+    door to broader heading restructuring.
+  - Not yet validated against real cached `.mathpix.md` output — that
+    happens via #19's smoke test script, once #15-#19 land. This issue's
+    scope is content-only, per the issue body.
 
 ### Phase 2 progress
 
@@ -952,8 +1000,10 @@ notex/                      ← repo root
 ├── environment.yml         ← conda env spec (reproduce with `conda env create -f environment.yml`)
 ├── docs/
 │   └── spec.md             ← original full spec (historical reference, see note at top of file)
+├── prompts/
+│   └── cleanup_v1.txt      ← versioned LLM system prompt (loaded by prompt_version, see src/llm.py, issue #15)
 ├── src/
-│   ├── config.py           ← env/config loading (load_mathpix_credentials, load_mathpix_polling_config, load_paths_config)
+│   ├── config.py           ← env/config loading (load_mathpix_credentials, load_mathpix_polling_config, load_paths_config, load_llm_config)
 │   ├── mathpix.py          ← Mathpix API client
 │   ├── state.py            ← state.db schema + CRUD (StateEntry, init_db, get_entry, upsert_entry)
 │   ├── discovery.py        ← per-file two-tier change classification + recursive multi-course walk (Classification, ClassificationResult, classify_pdf, compute_sha256, discover_pdfs, UNGROUPED_COURSE_KEY)
