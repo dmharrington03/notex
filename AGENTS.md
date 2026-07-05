@@ -141,10 +141,12 @@ Tracked in issues #13-#20 (`phase-3` label).
 
 ### Phase 3 progress
 
-**Phase 3 status: IN PROGRESS.** Issues #13, #14, #15, #16, #17, #18, and #19
-are implemented; #20 is filed but not yet implemented. Design decisions
-made during planning, recorded here so they aren't lost before the rest of the code
-lands:
+**Phase 3 status: VALIDATED — complete.** All Phase 3 issues (#13-#20) are
+implemented, and the full Mathpix+LLM pipeline has additionally been run for
+real end-to-end against `notes_raw/class_1`'s two PDFs (issue #20), including
+the LLM stage's idempotency and forced-reprocessing guarantees — see the
+issue #20 entry below for the real-run findings. Design decisions made
+during planning are recorded here so they aren't lost:
 
 - **Heading-count validation is relaxed, not exact-match.** docs/spec.md
   calls for an exact heading-count match; this phase instead fails
@@ -625,6 +627,130 @@ lands:
     (tested only via `--help`/argument-parsing sanity, not against a real
     second prompt file) — no side-by-side `cleanup_v2.txt` comparison was
     actually run this issue. Revisit if/when a real prompt fork is needed.
+
+- **Issue #20 (real-data validation: LLM stage idempotency + forced
+  reprocessing) — done.** `src/main.py`'s `run()` was exercised for real
+  (`python -m src.main`, plus two throwaway `python -c` calls for the
+  `force_llm=True`/`target_source_path` cases, per the issue's own "ad hoc
+  script/REPL" wording — no new source file was added) against
+  `notes_raw/class_1`'s two PDFs, covering every bullet in the issue body.
+  `state.db` and `_cache/class_1/` were reset (deleted) first so the cold
+  run below is a genuine from-scratch run through both stages together,
+  not a reuse of Phase 2 issue #12's already-`mathpix_status=success` rows.
+  Findings:
+  - **Cold run** (`python -m src.main`, no flags): both files classified
+    `new` and processed through Mathpix + LLM successfully in one pass —
+    console summary `Processed: 2, Skipped: 0, Errors: 0, Ungrouped: 0,
+    LLM reprocessed: 0`. `state.db` got full `llm_*` columns for both rows:
+    `llm_status="success"`, `llm_model="claude-haiku-4-5-20251001"`,
+    `llm_prompt_version="cleanup_v1"`, `llm_validation_result` with all
+    four checks (`length_ratio`/`dollar_balance`/`left_right_balance`/
+    `heading_count`) `true`, `output_path` pointing at the real
+    `_cache/class_1/{stem}.llm.md`, and `llm_processed_at` a few seconds
+    after `mathpix_processed_at`, confirming the combined
+    Mathpix-then-LLM `_process_file()` path (src/main.py:193-244) runs
+    end to end against the real APIs.
+  - **Immediate rerun**: true no-op — `Processed: 0, Skipped: 2` (no
+    `llm_reprocessed`). Confirmed at the data level, not just the printed
+    summary: every `state.db` column was byte-identical to the cold run
+    (verified via a `sort_keys` JSON diff of both full rows), and every
+    `_cache/class_1/*.md` file's mtime was untouched. Extends Phase 2
+    issue #12's idempotent-rerun confirmation to the LLM stage.
+  - **Prompt-version bump, no CLI flag**: `prompts/cleanup_v1.txt` was
+    copied verbatim to a throwaway `prompts/cleanup_v2.txt`, and
+    `config.yaml`'s `llm.prompt_version` was changed to `cleanup_v2`
+    (both reverted after the test — `cleanup_v2.txt` was deleted, and
+    `config.yaml` restored to `cleanup_v1`, matching the trivial/throwaway
+    treatment decided before starting). A plain rerun of `python -m
+    src.main` afterward was still a full no-op (`Skipped: 2`) — confirms
+    `needs_llm_reprocessing()`'s deliberate correction to docs/spec.md
+    (see "Current Phase" above): `state.db`'s `llm_prompt_version`
+    stayed `cleanup_v1` for both rows even with `config.yaml` pointed at
+    `cleanup_v2`, i.e. no silent mass reprocessing on a prompt-version
+    edit.
+  - **`force_llm=True`** (via a throwaway `python -c` snippet calling
+    `run(paths_config, conn, force_llm=True)` directly, config.yaml still
+    on `cleanup_v2` at this point): both files' LLM stage reran —
+    `RunSummary(llm_reprocessed=2)` — and `state.db`'s
+    `llm_prompt_version` updated to `cleanup_v2` for both rows, with
+    `llm_processed_at` advancing past the cold-run/no-op timestamps.
+    Confirms the explicit-opt-in path is the only way to pick up a new
+    prompt version, exactly as designed.
+  - **`target_source_path` + `force_llm=True`** (throwaway `python -c`
+    call scoped to just `lecture_01.pdf`): `RunSummary(llm_reprocessed=1)`
+    — only `lecture_01`'s row changed (`llm_processed_at` advanced again);
+    `lecture_02`'s row was verified byte-identical (full JSON diff) to its
+    state from the previous `force_llm=True` call, confirming the
+    single-file-rerun infrastructure doesn't touch any other file's state.
+  - **Cleanup after testing**: `config.yaml` reverted to
+    `llm.prompt_version: cleanup_v1` and `prompts/cleanup_v2.txt` deleted;
+    one final `run(..., force_llm=True)` call was made to bring both
+    files' stored `llm_prompt_version` back to `cleanup_v1` for
+    consistency (otherwise they'd have been stuck reading `cleanup_v2` in
+    `state.db` despite `config.yaml` now saying `cleanup_v1`, since
+    `needs_llm_reprocessing()` never triggers on that mismatch alone — see
+    above). A final plain rerun confirmed a full no-op again.
+  - **LLM output quality, read from the real `_cache/class_1/*.llm.md`
+    files produced by this run (not `scripts/smoke_test_llm.py` — these
+    went through the real `cleanup_pdf()`/`run()` pipeline):** the
+    systematic OCR-misread fixes documented in Phase 1's smoke test
+    findings are confirmed working in the actual pipeline, not just
+    `smoke_test_llm.py`'s manual iteration — e.g. "potentral"→potential,
+    "betore"→before, "initrally mstate"→initially in state, "regnore"→
+    ignore, "Persubation"→Perturbation, "party"/"porty"→parity (all 9+
+    occurrences), "ergenstate"/"e.jerstate"→eigenstate, "Ingencoal"→In
+    general, "degreesate"→degenerate. Bra-ket macro normalization
+    (`\ket{}`) was applied to several kets (`\ket{n}`, `\ket{0}`,
+    `\ket{1}`, `\ket{2,0,0}`, `\ket{\alpha}`, `\ket{\beta}`,
+    `\ket{\psi}`) without the earlier `\rangle`-closing-delimiter bug
+    (issue #19's fix held up on this file). The previously-documented
+    "quietly dangerous" `\ln`→"in" misread (AGENTS.md's Smoke test
+    findings: handwritten "in" OCR'd as the LaTeX command `\ln`) was
+    correctly caught and fixed this run (`g.s. $\ln |x\rangle=...$` →
+    `g.s. in $|x\rangle$: ...`).
+  - **New finding — the bra-ket macro rewrite is applied inconsistently
+    within a single document.** Several other raw-notation kets in the
+    same `lecture_02.llm.md` output were left unconverted alongside the
+    ones that were rewritten: `\langle\vec{x}|1,0,0\rangle` (not rewritten
+    to `\braket{\vec{x}}{1,0,0}`), and `|L\rangle`/`|R\rangle`/
+    `|S\rangle`/`|A\rangle` later in the same document (not rewritten to
+    `\ket{L}`/`\ket{R}`/`\ket{S}`/`\ket{A}`) even though `\ket{}` was used
+    for other states earlier in the identical file. Not a validation
+    failure (nothing here is syntactically broken), just an inconsistency
+    in how thoroughly the prompt's bra-ket normalization instruction gets
+    applied — worth keeping in mind if bra-ket consistency ever becomes a
+    hard requirement (e.g. for a future MathJax/KaTeX macro-based vault
+    render), but out of scope to fix here (would be further
+    `prompts/cleanup_v1.txt` prompt-tuning, issue #19's territory, not
+    #20's validation-only scope).
+  - **New finding — the LLM can confidently substitute a wrong specific
+    term for garbled proper-noun OCR text, and no current check can catch
+    it.** `lecture_02.mathpix.md`'s garbled OCR read "Mann's rule" (not a
+    real term — likely a mangled reading of the actual result being
+    referenced, the parity selection rule for electric dipole
+    transitions, properly named "Laporte's rule" — confirmed via a web
+    search during this issue's writeup, not prior domain knowledge baked
+    into the prompt). The LLM's cleanup output confidently rewrote this to
+    "**Wigner's rule**" — a real, specific, but *wrong* physics eponym
+    (Wigner is associated with parity's quantum-mechanical justification
+    per the historical record, but the rule being described here is
+    Laporte's, not Wigner's). This is a new, more dangerous variant of the
+    "quietly dangerous" misread risk already documented in AGENTS.md's
+    Smoke test findings section (the `\ln` case): there, the LLM produced
+    syntactically-valid-but-wrong LaTeX; here, it produces
+    grammatically-fine, plausible-sounding, *specifically wrong* prose
+    that reads as confidently correct to a non-expert. `validate_cleanup()`
+    cannot catch this by construction (it's not a length/delimiter/heading
+    problem), and no prompt wording currently guards against it. Flagged
+    here as a known limitation rather than fixed — addressing it (e.g.
+    prompt wording that encourages leaving genuinely ambiguous
+    proper-noun/eponym OCR garble as-is, or flagged, rather than
+    resolving it to a specific guess) would be new `prompts/cleanup_v1.txt`
+    prompt-design work, out of scope for this validation-only issue.
+  - No code changes were needed — every mechanism (`needs_llm_reprocessing()`,
+    `force_llm`, `target_source_path`, the combined Mathpix+LLM
+    `_process_file()` path) behaved exactly as designed and documented in
+    issues #13-#18's entries above.
 
 ### Phase 2 progress
 
