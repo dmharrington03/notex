@@ -141,8 +141,8 @@ Tracked in issues #13-#20 (`phase-3` label).
 
 ### Phase 3 progress
 
-**Phase 3 status: IN PROGRESS.** Issues #13, #14, #15, and #16 are
-implemented; #17-#20 are filed but not yet implemented. Design decisions
+**Phase 3 status: IN PROGRESS.** Issues #13, #14, #15, #16, and #17 are
+implemented; #18-#20 are filed but not yet implemented. Design decisions
 made during planning, recorded here so they aren't lost before the rest of the code
 lands:
 
@@ -376,6 +376,71 @@ lands:
     only if `cleaned` is also empty — this shouldn't occur in practice
     (cached Mathpix output is never actually empty) but the function must
     not crash on it.
+
+- **Issue #17 (`src/llm.py`: `cleanup_pdf()` orchestration + fallback +
+  `needs_llm_reprocessing()`) — done.** Implemented in `src/llm.py`, tested
+  in `tests/test_llm.py` (9 new cases — success path, fallback on
+  `LLMError`, fallback on failed validation, `FileNotFoundError`/missing-
+  prompt-file propagation, default-client construction, and
+  `needs_llm_reprocessing()`'s truth table — no network, full suite is 114
+  passing). Design decisions confirmed with the user before implementation:
+  - **`LLMResult` is a new frozen dataclass** (`llm_model`,
+    `llm_prompt_version`, `llm_status` [`"success"`/`"failed"` — only two
+    values, not docs/spec.md's three-value `success`/`failed`/`skipped`;
+    the fallback case is still `"failed"`, not a separate `"skipped"`],
+    `llm_validation_result`, `output_path`, `processed_at`). Unlike
+    `src/mathpix.py`'s `ProcessResult`, `LLMResult` is returned on **both**
+    success and failure — `cleanup_pdf()` never raises for an LLM API
+    failure or a failed validation check, since the fallback-to-raw-output
+    behavior is intrinsic to the stage per docs/spec.md, not left to the
+    caller to catch.
+  - **On fallback (whether from an `LLMError` or a failed
+    `validate_cleanup()` check), `output_path` points directly at the
+    existing `mathpix_markdown_path`** — no new file is written, no copy
+    is made. `dest_dir` is left completely untouched in the failure case
+    (not even created).
+  - **On fallback, `llm_model` and `llm_prompt_version` are both `None`**,
+    not the attempted model/prompt_version — confirmed with the user.
+    Rationale: AGENTS.md's own stated invariant is that state.db's
+    `llm_prompt_version` "always records whichever version actually
+    produced that row's currently-stored output," and on fallback the
+    stored output is the untouched raw Mathpix Markdown, produced by no
+    model/prompt at all.
+  - **`llm_validation_result` is `None` only when the failure is an
+    `LLMError`** (the completion call itself failed, so `validate_cleanup()`
+    never ran — nothing meaningful to serialize). When validation *does*
+    run and fails, `llm_validation_result` is still populated with
+    `json.dumps(validation_result.checks)` (the failing checks dict), for
+    debugging visibility into which specific check(s) failed — confirmed
+    with the user as a deliberate asymmetry from the `LLMError` case.
+  - **`FileNotFoundError` (missing `mathpix_markdown_path`) and `LLMError`
+    from `load_prompt_text()` (missing `prompts/{prompt_version}.txt`)
+    both propagate rather than being caught into the fallback** —
+    confirmed with the user. These are setup/config errors, not per-file
+    LLM failures: a missing cached Mathpix file means the Mathpix stage
+    should have run first (mirrors `process_pdf()`'s own
+    `FileNotFoundError` propagation for a missing input PDF), and a
+    missing prompt file for a configured `prompt_version` is "a real
+    config error, not silently ignorable" per `load_prompt_text()`'s own
+    docstring (issue #15). Only the LLM completion call and the
+    post-cleanup validation are covered by the fallback-to-raw behavior.
+  - `cleanup_pdf(mathpix_markdown_path, dest_dir, lecture_stem, llm_config,
+    client=None)` matches the issue's exact signature. `client:
+    LLMClient | None = None` mirrors `MathpixClient`'s `client=`/
+    `http_client=` injection precedent: when omitted, `cleanup_pdf()`
+    constructs its own `LLMClient(model=llm_config.model)`. Unlike
+    `MathpixClient`, there's no ownership/`close()` bookkeeping needed —
+    `LLMClient` owns no closable resources (see issue #15's notes).
+  - `needs_llm_reprocessing(entry: StateEntry) -> bool` is exactly
+    `entry.llm_status is None or entry.llm_status == "failed"` — never
+    compares `entry.llm_prompt_version` against the currently configured
+    `llm.prompt_version`, per the issue's explicit requirement and
+    AGENTS.md's "Deliberate correction to docs/spec.md's Reprocessing
+    logic table" above. Verified directly in
+    `test_needs_llm_reprocessing_false_when_successful_with_stale_prompt_version`.
+    Lives in `src/llm.py`, not `src/discovery.py` — a separate concern
+    from `classify_pdf()`'s Mathpix-stage-only change detection (see issue
+    #15/#16 notes and `discovery.py`'s own docstring).
 
 ### Phase 2 progress
 
@@ -1100,7 +1165,7 @@ notex/                      ← repo root
 │   ├── mathpix.py          ← Mathpix API client
 │   ├── state.py            ← state.db schema + CRUD (StateEntry, init_db, get_entry, upsert_entry)
 │   ├── discovery.py        ← per-file two-tier change classification + recursive multi-course walk (Classification, ClassificationResult, classify_pdf, compute_sha256, discover_pdfs, UNGROUPED_COURSE_KEY)
-│   ├── llm.py              ← LLM cleanup client + prompt loading (LLMClient, LLMError, load_prompt_text — issue #15)
+│   ├── llm.py              ← LLM cleanup client + prompt loading + orchestration (LLMClient, LLMError, load_prompt_text, validate_cleanup, cleanup_pdf, needs_llm_reprocessing — issues #15-#17)
 │   └── main.py             ← CLI orchestration entry point (RunSummary, run, main) — wires discovery + state.db + process_pdf() into a runnable pass over input_root
 ├── scripts/
 │   └── smoke_test_mathpix.py   ← manual, real-API validation

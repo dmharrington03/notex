@@ -1,34 +1,42 @@
 """
-LLM cleanup client — Phase 3, issues #15-#16.
+LLM cleanup client — Phase 3, issues #15-#17.
 
-Thin wrapper around litellm.completion() plus prompt-text loading and
-post-cleanup validation. This module deliberately does not implement the
-cleanup orchestration itself (cleanup_pdf(), issue #17) -- just the pieces
-that depend on:
+Thin wrapper around litellm.completion() plus prompt-text loading,
+post-cleanup validation, and end-to-end per-file orchestration:
 
-    - LLMClient          thin, injectable litellm.completion() wrapper
-    - LLMError           raised on completion failures / bad responses
-    - load_prompt_text() reads prompts/{prompt_version}.txt
-    - ValidationResult   post-cleanup validation result
-    - validate_cleanup() length ratio / delimiter-balance / heading checks
+    - LLMClient               thin, injectable litellm.completion() wrapper
+    - LLMError                raised on completion failures / bad responses
+    - load_prompt_text()      reads prompts/{prompt_version}.txt
+    - ValidationResult        post-cleanup validation result
+    - validate_cleanup()      length ratio / delimiter-balance / heading checks
+    - LLMResult               result of cleanup_pdf()
+    - cleanup_pdf()           orchestrates cleanup + validation + fallback
+    - needs_llm_reprocessing() LLM-stage staleness check (separate concern
+                              from src/discovery.py's Mathpix-stage
+                              classify_pdf() -- see AGENTS.md)
 
 Implementation status:
-    - LLMClient / complete()  implemented (issue #15)
-    - load_prompt_text()      implemented (issue #15)
-    - validate_cleanup()      implemented (issue #16)
-    - cleanup_pdf()           not yet implemented (issue #17)
-    - needs_llm_reprocessing() not yet implemented (issue #17)
+    - LLMClient / complete()   implemented (issue #15)
+    - load_prompt_text()       implemented (issue #15)
+    - validate_cleanup()       implemented (issue #16)
+    - cleanup_pdf()            implemented (issue #17)
+    - needs_llm_reprocessing() implemented (issue #17)
 """
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 import litellm
 from dotenv import load_dotenv
+
+from src.config import LLMConfig
+from src.state import StateEntry
 
 # Word-boundary-aware: excludes \rightarrow, \leftarrow, \leftrightarrow,
 # etc, which start with \right/\left as a literal prefix but aren't the
@@ -227,3 +235,186 @@ def validate_cleanup(
     }
 
     return ValidationResult(passed=all(checks.values()), checks=checks)
+
+
+@dataclass(frozen=True)
+class LLMResult:
+    """
+    Result of cleanup_pdf().
+
+    Unlike src/mathpix.py's ProcessResult, LLMResult is returned on both
+    success *and* failure -- the LLM cleanup stage's fallback-to-raw-output
+    behavior is intrinsic to cleanup_pdf() itself (per docs/spec.md /
+    AGENTS.md), so failure is represented here rather than via an
+    exception.
+
+    On failure (llm_status == "failed", whether from an LLMError raised by
+    the completion call itself, or from a failed validate_cleanup() check):
+        - llm_model / llm_prompt_version are both None -- the stored
+          output_path in that case is the untouched raw Mathpix Markdown,
+          which was not actually produced by any model/prompt version (see
+          AGENTS.md: state.db's llm_prompt_version "always records
+          whichever version actually produced that row's currently-stored
+          output").
+        - output_path points directly at the original
+          mathpix_markdown_path passed into cleanup_pdf() -- no new file
+          is written in the failure case.
+        - llm_validation_result is None if the failure was an LLMError
+          (validation never ran), or the JSON-serialized checks dict from
+          ValidationResult if validation ran and failed.
+
+    On success (llm_status == "success"):
+        - llm_model / llm_prompt_version reflect the LLMConfig actually
+          used to produce the output.
+        - output_path points at the newly-written
+          dest_dir/{lecture_stem}.llm.md.
+        - llm_validation_result is the JSON-serialized (passing) checks
+          dict from ValidationResult.
+    """
+
+    llm_model: str | None
+    llm_prompt_version: str | None
+    llm_status: str
+    llm_validation_result: str | None
+    output_path: Path
+    processed_at: datetime
+
+
+def cleanup_pdf(
+    mathpix_markdown_path: str | Path,
+    dest_dir: str | Path,
+    lecture_stem: str,
+    llm_config: LLMConfig,
+    client: LLMClient | None = None,
+) -> LLMResult:
+    """
+    Orchestrate the LLM cleanup stage for a single already-cached Mathpix
+    Markdown file: read it, run it through the LLM, validate the result,
+    and either write the cleaned output or fall back to the raw input.
+
+    Args:
+        mathpix_markdown_path: path to the cached `.mathpix.md` file to
+            clean up (see src/mathpix.py's fetch_and_extract()).
+        dest_dir: directory to write `{lecture_stem}.llm.md` into on
+            success. Created if it doesn't already exist. Not touched at
+            all on failure.
+        lecture_stem: filename stem used for the output file, e.g.
+            "lecture_01" (matching src/mathpix.py's fetch_and_extract()
+            convention).
+        llm_config: the LLMConfig to use (model, prompt_version,
+            min_length_ratio, max_length_ratio) -- see
+            src/config.py's load_llm_config().
+        client: an already-constructed LLMClient to use, e.g. one wired to
+            a fake completion_fn for tests (mirrors src/mathpix.py's
+            client= injection pattern). When omitted, cleanup_pdf()
+            constructs its own LLMClient(model=llm_config.model). Unlike
+            MathpixClient, LLMClient owns no closable resources, so there's
+            no ownership/close() bookkeeping here.
+
+    Returns:
+        An LLMResult on both success and failure -- see LLMResult's
+        docstring. cleanup_pdf() itself does not raise for an LLM API
+        failure or a failed validation check; the stage's
+        fallback-to-raw-Mathpix-output behavior is intrinsic to it, per
+        docs/spec.md / AGENTS.md.
+
+    Raises:
+        FileNotFoundError: if mathpix_markdown_path does not exist. This is
+            a setup error (the Mathpix stage should already have produced
+            this file), not a per-file LLM failure, so it propagates
+            rather than falling back -- matches src/mathpix.py's
+            process_pdf() letting FileNotFoundError propagate for a
+            missing input PDF.
+        LLMError: if load_prompt_text() can't find
+            prompts/{llm_config.prompt_version}.txt. A missing configured
+            prompt_version is a real config error, not silently
+            ignorable (see load_prompt_text()'s own docstring), so it
+            propagates rather than falling back.
+    """
+    mathpix_markdown_path = Path(mathpix_markdown_path)
+    if not mathpix_markdown_path.is_file():
+        raise FileNotFoundError(f"Mathpix Markdown not found: {mathpix_markdown_path}")
+
+    raw_markdown = mathpix_markdown_path.read_text(encoding="utf-8")
+
+    # Propagates LLMError if prompts/{prompt_version}.txt is missing -- a
+    # real config error, not covered by the API/validation fallback below.
+    system_prompt = load_prompt_text(llm_config.prompt_version)
+
+    if client is None:
+        client = LLMClient(model=llm_config.model)
+
+    try:
+        cleaned_markdown = client.complete(system_prompt, raw_markdown)
+    except LLMError:
+        return LLMResult(
+            llm_model=None,
+            llm_prompt_version=None,
+            llm_status="failed",
+            llm_validation_result=None,
+            output_path=mathpix_markdown_path,
+            processed_at=datetime.now(timezone.utc),
+        )
+
+    validation_result = validate_cleanup(
+        raw_markdown,
+        cleaned_markdown,
+        llm_config.min_length_ratio,
+        llm_config.max_length_ratio,
+    )
+
+    if not validation_result.passed:
+        return LLMResult(
+            llm_model=None,
+            llm_prompt_version=None,
+            llm_status="failed",
+            llm_validation_result=json.dumps(validation_result.checks),
+            output_path=mathpix_markdown_path,
+            processed_at=datetime.now(timezone.utc),
+        )
+
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    output_path = dest_dir / f"{lecture_stem}.llm.md"
+    output_path.write_text(cleaned_markdown, encoding="utf-8")
+
+    return LLMResult(
+        llm_model=llm_config.model,
+        llm_prompt_version=llm_config.prompt_version,
+        llm_status="success",
+        llm_validation_result=json.dumps(validation_result.checks),
+        output_path=output_path,
+        processed_at=datetime.now(timezone.utc),
+    )
+
+
+def needs_llm_reprocessing(entry: StateEntry) -> bool:
+    """
+    Whether a file whose Mathpix stage is already cached/unchanged still
+    needs its LLM cleanup stage (re)run.
+
+    True only if entry.llm_status is None (never attempted) or "failed"
+    (previously failed, including the fallback-to-raw case -- see
+    LLMResult). A stored llm_status of "success" always returns False, even
+    if entry.llm_prompt_version doesn't match the currently configured
+    llm.prompt_version -- deliberately: switching config.yaml's
+    llm.prompt_version must never silently trigger mass reprocessing (and
+    its associated LLM API cost) on the next ordinary run. See AGENTS.md's
+    "Deliberate correction to docs/spec.md's Reprocessing logic table" and
+    the forthcoming force_llm parameter on src/main.py's run() (issue #18)
+    for the explicit-opt-in path to reprocess under a new prompt version.
+
+    This is a separate concern from src/discovery.py's classify_pdf(),
+    which is scoped to Mathpix-stage change detection only (see
+    discovery.py's own docstring) -- "has this file's cached Mathpix
+    output ever been successfully cleaned by the LLM stage?" is a
+    different question, owned by this module instead.
+
+    Args:
+        entry: the file's current state.db row (see src/state.py's
+            get_entry()).
+
+    Returns:
+        True if the LLM stage should run (or re-run) for this file.
+    """
+    return entry.llm_status is None or entry.llm_status == "failed"

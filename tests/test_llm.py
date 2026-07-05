@@ -16,18 +16,42 @@ Also covered here (issue #16 — validate_cleanup()):
     - the relaxed-heading-decrease-still-passes case explicitly
     - the empty-original length_ratio edge case
 
+Also covered here (issue #17 — cleanup_pdf() / needs_llm_reprocessing()):
+    - success path writes {lecture_stem}.llm.md and returns a
+      llm_status="success" LLMResult
+    - fallback on LLMError (API failure) -- output_path points at the
+      original mathpix_markdown_path, llm_model/llm_prompt_version/
+      llm_validation_result are all None
+    - fallback on failed validation -- same fallback shape, except
+      llm_validation_result carries the (failing) checks dict
+    - FileNotFoundError / LLMError (missing prompt file) propagate rather
+      than being caught into the fallback
+    - needs_llm_reprocessing()'s truth table
+
 No network: completion_fn is always a fake/stub, never litellm.completion
 itself (see AGENTS.md Testing Conventions).
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from src.llm import LLMClient, LLMError, ValidationResult, load_prompt_text, validate_cleanup
+from src.config import LLMConfig
+from src.llm import (
+    LLMClient,
+    LLMError,
+    LLMResult,
+    ValidationResult,
+    cleanup_pdf,
+    load_prompt_text,
+    needs_llm_reprocessing,
+    validate_cleanup,
+)
+from src.state import StateEntry
 
 
 def _fake_response(content: str) -> SimpleNamespace:
@@ -258,3 +282,178 @@ def test_validate_cleanup_fails_heading_count_when_cleaned_has_more_headings():
 
     assert result.passed is False
     assert result.checks["heading_count"] is False
+
+
+# --- cleanup_pdf() / needs_llm_reprocessing() (issue #17) ---
+
+
+def _llm_config(**overrides) -> LLMConfig:
+    defaults = dict(
+        model="fake-model",
+        prompt_version="cleanup_v1",
+        min_length_ratio=0.1,
+        max_length_ratio=5.0,
+    )
+    defaults.update(overrides)
+    return LLMConfig(**defaults)
+
+
+def _state_entry(**overrides) -> StateEntry:
+    defaults = dict(
+        source_path="/notes_raw/class_1/lecture_01.pdf",
+        source_hash="abc123",
+        source_mtime=1234.5,
+        source_size=4096,
+        mathpix_pdf_id="pdf_xyz",
+        mathpix_status="success",
+        llm_model=None,
+        llm_prompt_version=None,
+        llm_status=None,
+        llm_validation_result=None,
+        figure_count=0,
+        output_path=None,
+        mathpix_processed_at=None,
+        llm_processed_at=None,
+        vault_written_at=None,
+    )
+    defaults.update(overrides)
+    return StateEntry(**defaults)
+
+
+def test_cleanup_pdf_success_writes_llm_md_and_returns_success_result(tmp_path):
+    mathpix_path = tmp_path / "lecture_01.mathpix.md"
+    mathpix_path.write_text("# Lecture 21-4/14\n\nsome raw mathpix text", encoding="utf-8")
+    dest_dir = tmp_path / "out"
+
+    def fake_completion_fn(**kwargs):
+        return _fake_response("# Real Heading\n\nsome cleaned text")
+
+    client = LLMClient(model="fake-model", completion_fn=fake_completion_fn)
+    llm_config = _llm_config()
+
+    result = cleanup_pdf(mathpix_path, dest_dir, "lecture_01", llm_config, client=client)
+
+    assert isinstance(result, LLMResult)
+    assert result.llm_status == "success"
+    assert result.llm_model == "fake-model"
+    assert result.llm_prompt_version == "cleanup_v1"
+    assert result.output_path == dest_dir / "lecture_01.llm.md"
+    assert result.output_path.read_text(encoding="utf-8") == "# Real Heading\n\nsome cleaned text"
+    assert json.loads(result.llm_validation_result) == {
+        "length_ratio": True,
+        "dollar_balance": True,
+        "left_right_balance": True,
+        "heading_count": True,
+    }
+
+
+def test_cleanup_pdf_falls_back_on_llm_error(tmp_path):
+    mathpix_path = tmp_path / "lecture_01.mathpix.md"
+    mathpix_path.write_text("some raw mathpix text", encoding="utf-8")
+    dest_dir = tmp_path / "out"
+
+    def failing_completion_fn(**kwargs):
+        raise RuntimeError("boom")
+
+    client = LLMClient(model="fake-model", completion_fn=failing_completion_fn)
+    llm_config = _llm_config()
+
+    result = cleanup_pdf(mathpix_path, dest_dir, "lecture_01", llm_config, client=client)
+
+    assert result.llm_status == "failed"
+    assert result.llm_model is None
+    assert result.llm_prompt_version is None
+    assert result.llm_validation_result is None
+    assert result.output_path == mathpix_path
+    # No new file written on failure.
+    assert not dest_dir.exists()
+
+
+def test_cleanup_pdf_falls_back_on_failed_validation(tmp_path):
+    mathpix_path = tmp_path / "lecture_01.mathpix.md"
+    mathpix_path.write_text("word " * 100, encoding="utf-8")
+    dest_dir = tmp_path / "out"
+
+    def fake_completion_fn(**kwargs):
+        return _fake_response("word " * 10)  # far below min_length_ratio
+
+    client = LLMClient(model="fake-model", completion_fn=fake_completion_fn)
+    llm_config = _llm_config(min_length_ratio=0.7, max_length_ratio=1.3)
+
+    result = cleanup_pdf(mathpix_path, dest_dir, "lecture_01", llm_config, client=client)
+
+    assert result.llm_status == "failed"
+    assert result.llm_model is None
+    assert result.llm_prompt_version is None
+    assert result.output_path == mathpix_path
+    checks = json.loads(result.llm_validation_result)
+    assert checks["length_ratio"] is False
+    assert not dest_dir.exists()
+
+
+def test_cleanup_pdf_raises_file_not_found_for_missing_mathpix_markdown(tmp_path):
+    llm_config = _llm_config()
+    client = LLMClient(model="fake-model", completion_fn=lambda **kwargs: _fake_response("x"))
+
+    with pytest.raises(FileNotFoundError):
+        cleanup_pdf(
+            tmp_path / "does_not_exist.mathpix.md",
+            tmp_path / "out",
+            "lecture_01",
+            llm_config,
+            client=client,
+        )
+
+
+def test_cleanup_pdf_raises_llm_error_for_missing_prompt_file(tmp_path):
+    mathpix_path = tmp_path / "lecture_01.mathpix.md"
+    mathpix_path.write_text("raw text", encoding="utf-8")
+    client = LLMClient(model="fake-model", completion_fn=lambda **kwargs: _fake_response("x"))
+    llm_config = _llm_config(prompt_version="nonexistent_version")
+
+    with pytest.raises(LLMError, match="Prompt file not found"):
+        cleanup_pdf(mathpix_path, tmp_path / "out", "lecture_01", llm_config, client=client)
+
+
+def test_cleanup_pdf_constructs_its_own_client_when_none_given(tmp_path, monkeypatch):
+    mathpix_path = tmp_path / "lecture_01.mathpix.md"
+    mathpix_path.write_text("raw text", encoding="utf-8")
+    dest_dir = tmp_path / "out"
+    llm_config = _llm_config()
+
+    captured = {}
+
+    def fake_completion(**kwargs):
+        captured.update(kwargs)
+        return _fake_response("cleaned text")
+
+    monkeypatch.setattr("litellm.completion", fake_completion)
+
+    result = cleanup_pdf(mathpix_path, dest_dir, "lecture_01", llm_config)
+
+    assert result.llm_status == "success"
+    assert captured["model"] == "fake-model"
+
+
+def test_needs_llm_reprocessing_true_when_never_run():
+    entry = _state_entry(llm_status=None)
+    assert needs_llm_reprocessing(entry) is True
+
+
+def test_needs_llm_reprocessing_true_when_failed():
+    entry = _state_entry(llm_status="failed")
+    assert needs_llm_reprocessing(entry) is True
+
+
+def test_needs_llm_reprocessing_false_when_successful_and_up_to_date():
+    entry = _state_entry(llm_status="success", llm_prompt_version="cleanup_v1")
+    assert needs_llm_reprocessing(entry) is False
+
+
+def test_needs_llm_reprocessing_false_when_successful_with_stale_prompt_version():
+    # Deliberate: switching config.yaml's llm.prompt_version must not
+    # silently trigger reprocessing of already-successful files -- see
+    # AGENTS.md's "Deliberate correction to docs/spec.md's Reprocessing
+    # logic table".
+    entry = _state_entry(llm_status="success", llm_prompt_version="cleanup_v0_old")
+    assert needs_llm_reprocessing(entry) is False
