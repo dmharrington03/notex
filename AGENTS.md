@@ -141,9 +141,9 @@ Tracked in issues #13-#20 (`phase-3` label).
 
 ### Phase 3 progress
 
-**Phase 3 status: IN PROGRESS.** Issues #13, #14, and #15 are implemented;
-#16-#20 are filed but not yet implemented. Design decisions made during
-planning, recorded here so they aren't lost before the rest of the code
+**Phase 3 status: IN PROGRESS.** Issues #13, #14, #15, and #16 are
+implemented; #17-#20 are filed but not yet implemented. Design decisions
+made during planning, recorded here so they aren't lost before the rest of the code
 lands:
 
 - **Heading-count validation is relaxed, not exact-match.** docs/spec.md
@@ -334,6 +334,48 @@ lands:
     (gitignored) `.env`, added back in issue #13 alongside the existing
     Mathpix credential lines — no further `.env`/`.env.example`/
     `environment.yml` changes were needed for this issue.
+
+- **Issue #16 (`src/llm.py`: `validate_cleanup()`) — done.** Implemented in
+  `src/llm.py`, tested in `tests/test_llm.py` (12 new pure-string cases —
+  one pass + one fail per check, plus the relaxed-heading-decrease and
+  empty-original edge cases — no network, full suite is 104 passing).
+  Conventions established/extended here:
+  - `ValidationResult` is a new frozen dataclass (`passed: bool`,
+    `checks: dict[str, bool]`), matching the `StateEntry`/`ProcessResult`
+    frozen-dataclass convention elsewhere in the codebase. `passed` is
+    simply `all(checks.values())`.
+  - `validate_cleanup(original, cleaned, min_length_ratio,
+    max_length_ratio) -> ValidationResult` is a pure function — no I/O,
+    no config/client access — matching the issue's exact signature.
+  - **`dollar_balance` and `left_right_balance` are checked on `cleaned`
+    only**, not compared against `original` — deliberate, since the issue
+    body doesn't reference `original` for either of these two checks (unlike
+    `length_ratio`/`heading_count`, which explicitly compare both). The
+    question being asked is "is the LLM's output internally well-formed,"
+    not "does its balance match the original's."
+  - `dollar_balance` is a single even/odd check on the total count of `$`
+    characters in `cleaned` (`cleaned.count("$") % 2 == 0`) — covers both
+    `$...$` and `$$ ... $$` simultaneously, since `$$` is just two adjacent
+    `$` chars, per the issue body's explicit guidance.
+  - `left_right_balance` counts `\left`/`\right` via a
+    word-boundary-aware regex (`\\left(?![a-zA-Z])` /
+    `\\right(?![a-zA-Z])`), **not** a naive substring count — a naive count
+    would misattribute `\rightarrow`/`\leftarrow`/`\leftrightarrow` (which
+    start with `\right`/`\left` as a literal prefix but aren't the
+    delimiter command) as delimiter occurrences. Count-only balance (not
+    delimiter-*type* pairing), per AGENTS.md's Smoke test findings on why
+    type-matching isn't statically checkable.
+  - `heading_count` uses a simple per-line ATX regex (`^#{1,6}\s`,
+    `re.MULTILINE`) on both `original` and `cleaned`, and is relaxed per
+    the issue: fails only if `cleaned` has *more* headings than `original`
+    (equal or fewer both pass), so prompts/cleanup_v1.txt's permitted
+    single-stray-heading removal doesn't fail validation.
+  - **`length_ratio`'s empty-`original` edge case is handled explicitly**
+    (not in the issue body, decided during implementation) to avoid a
+    `ZeroDivisionError`: an empty `original` passes the length_ratio check
+    only if `cleaned` is also empty — this shouldn't occur in practice
+    (cached Mathpix output is never actually empty) but the function must
+    not crash on it.
 
 ### Phase 2 progress
 

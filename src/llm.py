@@ -1,30 +1,43 @@
 """
-LLM cleanup client — Phase 3, issue #15.
+LLM cleanup client — Phase 3, issues #15-#16.
 
-Thin wrapper around litellm.completion() plus prompt-text loading. This
-module deliberately does not implement the cleanup orchestration itself
-(cleanup_pdf(), issue #17) or post-cleanup validation (validate_cleanup(),
-issue #16) -- just the pieces those depend on:
+Thin wrapper around litellm.completion() plus prompt-text loading and
+post-cleanup validation. This module deliberately does not implement the
+cleanup orchestration itself (cleanup_pdf(), issue #17) -- just the pieces
+that depend on:
 
     - LLMClient          thin, injectable litellm.completion() wrapper
     - LLMError           raised on completion failures / bad responses
     - load_prompt_text() reads prompts/{prompt_version}.txt
+    - ValidationResult   post-cleanup validation result
+    - validate_cleanup() length ratio / delimiter-balance / heading checks
 
 Implementation status:
     - LLMClient / complete()  implemented (issue #15)
     - load_prompt_text()      implemented (issue #15)
-    - validate_cleanup()      not yet implemented (issue #16)
+    - validate_cleanup()      implemented (issue #16)
     - cleanup_pdf()           not yet implemented (issue #17)
     - needs_llm_reprocessing() not yet implemented (issue #17)
 """
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 import litellm
 from dotenv import load_dotenv
+
+# Word-boundary-aware: excludes \rightarrow, \leftarrow, \leftrightarrow,
+# etc, which start with \right/\left as a literal prefix but aren't the
+# delimiter command itself (see AGENTS.md's \left/\right validation notes).
+_LEFT_DELIMITER_RE = re.compile(r"\\left(?![a-zA-Z])")
+_RIGHT_DELIMITER_RE = re.compile(r"\\right(?![a-zA-Z])")
+
+# ATX-style Markdown heading, e.g. "## Heading" -- matched per line.
+_HEADING_RE = re.compile(r"^#{1,6}\s", re.MULTILINE)
 
 
 class LLMError(Exception):
@@ -130,3 +143,87 @@ def load_prompt_text(
         raise LLMError(f"Prompt file not found for prompt_version={prompt_version!r}: {path}")
 
     return path.read_text(encoding="utf-8")
+
+
+@dataclass(frozen=True)
+class ValidationResult:
+    """Result of validate_cleanup(): overall pass/fail plus a per-check
+    breakdown, so callers (cleanup_pdf(), issue #17) can log/store which
+    specific check(s) failed rather than just a single boolean."""
+
+    passed: bool
+    checks: dict[str, bool]
+
+
+def validate_cleanup(
+    original: str,
+    cleaned: str,
+    min_length_ratio: float,
+    max_length_ratio: float,
+) -> ValidationResult:
+    """
+    Validate an LLM cleanup pass's output against the raw Mathpix Markdown
+    it was derived from.
+
+    Four independent checks (all must pass for ValidationResult.passed to
+    be True):
+
+        - length_ratio: len(cleaned) / len(original) falls within
+          [min_length_ratio, max_length_ratio]. Guards against wholesale
+          truncation or runaway hallucinated expansion.
+        - dollar_balance: `cleaned` has an even number of "$" characters
+          (covers both inline "$...$" and display "$$ ... $$" delimiters,
+          since "$$" is just two adjacent "$" -- an even total count
+          balances both forms simultaneously). Checked on `cleaned` alone,
+          not compared against `original`.
+        - left_right_balance: `cleaned` has an equal count of "\\left" and
+          "\\right" delimiter commands. Count-only, not delimiter-*type*
+          matching -- see AGENTS.md's Smoke test findings: "\\left(...\\right]"
+          is syntactically valid LaTeX regardless of whether the bracket
+          shapes correspond, so there's no static rule to catch a true
+          type mismatch. Checked on `cleaned` alone.
+        - heading_count: relaxed, not exact-match. Fails only if `cleaned`
+          has *more* ATX-style Markdown headings than `original` (a
+          hallucinated new heading); equal or fewer passes, since the
+          cleanup prompt (prompts/cleanup_v1.txt) is explicitly permitted
+          to drop a single stray non-structural heading artifact.
+
+    Args:
+        original: the raw Mathpix Markdown before cleanup.
+        cleaned: the LLM's cleaned-up Markdown output.
+        min_length_ratio: lower bound for len(cleaned)/len(original).
+        max_length_ratio: upper bound for len(cleaned)/len(original).
+
+    Returns:
+        ValidationResult with `passed` set iff every check in `checks`
+        passed.
+    """
+    if len(original) == 0:
+        # Degenerate case (shouldn't occur in practice -- cached Mathpix
+        # output is never actually empty) -- avoid a ZeroDivisionError.
+        # An empty original can only "pass" the ratio check by staying
+        # empty; any non-empty cleaned output against an empty original
+        # has no meaningful ratio to bound.
+        length_ratio_ok = len(cleaned) == 0
+    else:
+        ratio = len(cleaned) / len(original)
+        length_ratio_ok = min_length_ratio <= ratio <= max_length_ratio
+
+    dollar_balance_ok = cleaned.count("$") % 2 == 0
+
+    left_count = len(_LEFT_DELIMITER_RE.findall(cleaned))
+    right_count = len(_RIGHT_DELIMITER_RE.findall(cleaned))
+    left_right_balance_ok = left_count == right_count
+
+    original_heading_count = len(_HEADING_RE.findall(original))
+    cleaned_heading_count = len(_HEADING_RE.findall(cleaned))
+    heading_count_ok = cleaned_heading_count <= original_heading_count
+
+    checks = {
+        "length_ratio": length_ratio_ok,
+        "dollar_balance": dollar_balance_ok,
+        "left_right_balance": left_right_balance_ok,
+        "heading_count": heading_count_ok,
+    }
+
+    return ValidationResult(passed=all(checks.values()), checks=checks)
