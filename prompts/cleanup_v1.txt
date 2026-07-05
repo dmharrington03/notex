@@ -42,10 +42,39 @@ This OCR output often renders bra/ket/inner-product expressions by hand
 with raw \langle, \rangle, and | characters (e.g. |n\rangle,
 \langle x \mid y \rangle), which are prone to OCR mis-nesting errors.
 Rewrite these into the semantic macros \ket{}, \bra{}, and \braket{}
-wherever you can identify a clear bra/ket/inner-product expression, e.g.:
-  |n\rangle                -> \ket{n}
-  \langle x \mid y\rangle  -> \braket{x|y}
-  \langle \psi |           -> \bra{\psi}
+wherever you can identify a clear bra/ket/inner-product expression.
+
+Critical — closing delimiter: \ket{}, \bra{}, and \braket{} are ordinary
+LaTeX macros whose argument is delimited ONLY by a curly brace pair,
+{ and }. They are never delimited by \rangle, \langle, or |. When you
+rewrite a raw \langle/\rangle/| expression into one of these macros, you
+must replace BOTH the opening and closing raw delimiter — do not leave a
+stray \rangle (or \langle) inside or after the braces. A closing brace
+"}" must always be paired with an opening brace "{"; mixing a "{" open
+with a "\rangle" close (or vice versa) produces invalid, mismatched
+LaTeX and is a common mistake to avoid here. This holds no matter what
+the argument contains, including commas, equals signs, or multiple
+labels.
+
+  Correct:
+    |n\rangle                 -> \ket{n}
+    |1,0,0\rangle              -> \ket{1,0,0}
+    |n, l, m_l\rangle          -> \ket{n, l, m_l}
+    |n=2, l=1\rangle           -> \ket{n=2, l=1}
+    \langle x \mid y\rangle    -> \braket{x|y}
+    \langle \psi |             -> \bra{\psi}
+
+  Incorrect — never produce output like this (the closing \rangle must
+  not survive the rewrite; the only valid closing character is "}"):
+    \ket{100\rangle
+    \ket{1,0,0\rangle
+    \ket{n=2, l=1\rangle
+
+Before finalizing any \ket{...}, \bra{...}, or \braket{...} you write,
+double check that its argument ends in a plain "}" — if you see a
+"\rangle" or "\langle" anywhere between a "{" and its matching "}" for
+these macros, that is always wrong and must be fixed.
+
 Only apply this rewrite where the meaning is unambiguous; do not guess at
 malformed expressions you can't confidently parse.
 
@@ -63,6 +92,27 @@ and put the example's content on the line(s) after it, e.g.:
   Let x = 5, then f(x) = 25
 
 Do not alter the example's content itself when reformatting it this way.
+
+Figure references:
+Markdown image references (e.g. ![](figures/lecture_02_fig_001.jpg)) must
+always start on their own line — never inline in the middle of a sentence
+or paragraph. If a figure reference appears embedded within surrounding
+text, move it onto its own line, immediately before or after the text it
+was embedded in (whichever preserves the original reading order), without
+altering the image path or alt text itself.
+
+Sentence-ending punctuation after inline math:
+Handwritten notes often omit punctuation immediately after an inline math
+expression, especially when the text that follows starts a new sentence
+(e.g. begins with a capital letter, or is clearly an unrelated new
+clause rather than a continuation of the equation). If the text
+immediately after the closing "$" of an inline equation looks like the
+start of a new sentence, insert a period right after the closing "$" (in
+the surrounding prose, outside the math delimiters) to mark the sentence
+boundary. Only do this where it's reasonably clear a sentence boundary is
+intended; do not add punctuation after every inline equation
+indiscriminately, and never insert punctuation inside the math
+delimiters themselves.
 
 Stray heading artifact:
 OCR sometimes turns a handwritten date or title line at the top of a page

@@ -141,8 +141,8 @@ Tracked in issues #13-#20 (`phase-3` label).
 
 ### Phase 3 progress
 
-**Phase 3 status: IN PROGRESS.** Issues #13, #14, #15, #16, #17, and #18 are
-implemented; #19-#20 are filed but not yet implemented. Design decisions
+**Phase 3 status: IN PROGRESS.** Issues #13, #14, #15, #16, #17, #18, and #19
+are implemented; #20 is filed but not yet implemented. Design decisions
 made during planning, recorded here so they aren't lost before the rest of the code
 lands:
 
@@ -537,6 +537,94 @@ lands:
     its seeded state.db row now explicitly sets `llm_status="success"`
     (previously unset) so it still exercises a full skip rather than
     incidentally becoming the new stale-LLM-reprocessing case.
+
+- **Issue #19 (`scripts/smoke_test_llm.py`: manual real-API prompt-iteration
+  script) — done.** Implemented in `scripts/smoke_test_llm.py`. Not under
+  `pytest` (manual, real-API, per Testing Conventions); manually run against
+  the real Anthropic API on both of `_cache/class_1`'s cached
+  `.mathpix.md` files. Design decisions confirmed with the user before
+  implementation:
+  - **Calls `LLMClient.complete()` + `validate_cleanup()` directly, not
+    `cleanup_pdf()`** — a deliberate departure from the issue text's
+    ambiguous "Calls `cleanup_pdf()`/`LLMClient` directly" phrasing,
+    confirmed with the user. `cleanup_pdf()` discards the cleaned text
+    entirely on a failed `validate_cleanup()` check (by design, for the
+    pipeline's fallback-to-raw-output behavior — issue #17), which would
+    hide the single most useful case for prompt iteration: seeing *why* a
+    cleanup attempt failed validation. Calling `LLMClient`/`validate_cleanup()`
+    directly means the script always has the cleaned text in hand
+    regardless of pass/fail.
+  - CLI: positional `mathpix_md_path` (the cached `.mathpix.md` file to
+    clean up); `--prompt-version` (optional override of
+    `load_llm_config()`'s configured `prompt_version` for that one run,
+    without touching `config.yaml` — confirmed with the user as a useful
+    addition for quick side-by-side prompt comparisons); `--out` (optional,
+    **no default path** — confirmed with the user specifically to avoid a
+    routine run silently overwriting a previously-successful `.llm.md` the
+    real pipeline wrote, or leaving a validation-failing file sitting in
+    the cache dir with no `state.db` record explaining it isn't the "real"
+    output). Model is not overridable — always uses the configured
+    `llm.model`.
+  - **When `--out` is given, the cleaned Markdown is written to that file
+    and NOT also dumped to stdout** (confirmed with the user) — only the
+    validation summary prints in that case. Without `--out`, the cleaned
+    Markdown is printed in full to stdout under a `--- CLEANED OUTPUT ---`
+    separator.
+  - Validation summary (always printed, regardless of `--out`): model,
+    prompt_version actually used, original/cleaned char counts + length
+    ratio, each of `validate_cleanup()`'s 4 checks individually
+    (pass/fail), and an overall passed/failed line. The script's exit code
+    is `0` even when validation fails (it reports results; it isn't a
+    pass/fail gate) — only a missing input file, `ConfigError`, or
+    `LLMError` (missing prompt file / completion failure) causes a
+    non-zero exit, mirroring `smoke_test_mathpix.py`'s exact exception
+    tuple (`ConfigError`/`LLMError`/`FileNotFoundError`).
+  - Does not touch `state.db` at all, and never imports `src.state` —
+    confirmed as a hard requirement per the issue text.
+  - **Real-API run findings (against `_cache/class_1/lecture_02.mathpix.md`
+    in particular) drove three `prompts/cleanup_v1.txt` prompt fixes**,
+    made as part of this issue's real-API iteration work (the actual point
+    of the script):
+    1. **Bra-ket closing-delimiter bug**: the model was rewriting
+       `|1,0,0\rangle` into the mismatched `\ket{1,0,0\rangle` (closing
+       with `\rangle` instead of `}`) in several places (`g.s.
+       $\ket{100\rangle=\ket{1,0,0\rangle$`, `\ket{2,0,0\rangle`,
+       `\ket{n=2, l=1\rangle`, etc.) — syntactically broken LaTeX that
+       `validate_cleanup()`'s count-only `\left`/`\right` check can't catch
+       (it isn't a `\left`/`\right` delimiter at all) and that the
+       `dollar_balance` check also can't catch (the `$` count is still
+       even). Fixed by adding an explicit "Critical — closing delimiter"
+       subsection to the bra-ket notation guidance in
+       `prompts/cleanup_v1.txt`, spelling out that `\ket{}`/`\bra{}`/
+       `\braket{}` arguments are delimited only by `{`/`}` (never
+       `\rangle`/`\langle`), with side-by-side correct/incorrect examples
+       matching the exact observed failure pattern (including multi-token
+       arguments with commas/`=` signs) and an explicit self-check
+       instruction.
+    2. **Figure references appearing inline**: added a new "Figure
+       references" rule instructing the LLM to always place Markdown image
+       references (`![](figures/...)`) on their own line, reflowing an
+       inline one onto its own line (preserving reading order) without
+       altering the path/alt text — same formatting-only-reflow shape as
+       the existing worked-examples rule.
+    3. **Missing sentence-ending punctuation after inline math**: added a
+       new "Sentence-ending punctuation after inline math" rule — when
+       text immediately following the closing `$` of an inline equation
+       looks like the start of a new sentence, insert a period right
+       after the `$` (in the surrounding prose, never inside the math
+       delimiters), with an explicit caution against doing this after
+       every inline equation indiscriminately.
+    All three are prompt-content-only changes (no code touched), following
+    issue #14's precedent that `prompts/cleanup_v1.txt` changes don't
+    require `prompt_version` to be bumped to a new file unless the user
+    wants old and new prompt behavior to coexist side by side — this
+    round of fixes was applied in place to `cleanup_v1.txt` per user
+    direction. Full `pytest` suite re-confirmed passing (119 passed) after
+    each prompt edit, since none of them touch code.
+  - Not yet exercised: `--prompt-version`'s override path in a real run
+    (tested only via `--help`/argument-parsing sanity, not against a real
+    second prompt file) — no side-by-side `cleanup_v2.txt` comparison was
+    actually run this issue. Revisit if/when a real prompt fork is needed.
 
 ### Phase 2 progress
 
@@ -1241,10 +1329,12 @@ notes, one hand-drawn figure) — see `_cache/smoke_test/lecture_02.mathpix.md`
 
 - **Automated unit tests** (`tests/`) mock all HTTP calls via `respx`. They
   must never hit the real Mathpix API — no network, no cost, safe for CI.
-- **Manual smoke tests** (`scripts/`) hit the real Mathpix API against real
-  PDFs and cost money per run. They are not part of the `pytest` suite and
-  are run manually when validating actual output quality (OCR correctness on
-  handwriting can't be asserted automatically).
+- **Manual smoke tests** (`scripts/`) hit a real external API (Mathpix for
+  `smoke_test_mathpix.py`, the configured LLM provider via `litellm` for
+  `smoke_test_llm.py`) and cost money per run. They are not part of the
+  `pytest` suite and are run manually when validating actual output quality
+  (OCR correctness on handwriting, or LLM cleanup/prompt quality, can't be
+  asserted automatically).
 
 ## Directory Structure
 
@@ -1264,7 +1354,8 @@ notex/                      ← repo root
 │   ├── llm.py              ← LLM cleanup client + prompt loading + orchestration (LLMClient, LLMError, load_prompt_text, validate_cleanup, cleanup_pdf, needs_llm_reprocessing — issues #15-#17)
 │   └── main.py             ← CLI orchestration entry point (RunSummary, run, main) — wires discovery + state.db + process_pdf() into a runnable pass over input_root
 ├── scripts/
-│   └── smoke_test_mathpix.py   ← manual, real-API validation
+│   ├── smoke_test_mathpix.py   ← manual, real-API Mathpix validation
+│   └── smoke_test_llm.py       ← manual, real-API LLM prompt-iteration script (issue #19)
 ├── tests/
 │   ├── fixtures/           ← fixture data for mocked tests
 │   ├── test_mathpix.py
