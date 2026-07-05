@@ -141,9 +141,10 @@ Tracked in issues #13-#20 (`phase-3` label).
 
 ### Phase 3 progress
 
-**Phase 3 status: IN PROGRESS.** Issues #13 and #14 are implemented; #15-#20
-are filed but not yet implemented. Design decisions made during planning,
-recorded here so they aren't lost before the rest of the code lands:
+**Phase 3 status: IN PROGRESS.** Issues #13, #14, and #15 are implemented;
+#16-#20 are filed but not yet implemented. Design decisions made during
+planning, recorded here so they aren't lost before the rest of the code
+lands:
 
 - **Heading-count validation is relaxed, not exact-match.** docs/spec.md
   calls for an exact heading-count match; this phase instead fails
@@ -283,6 +284,56 @@ recorded here so they aren't lost before the rest of the code lands:
   - Not yet validated against real cached `.mathpix.md` output — that
     happens via #19's smoke test script, once #15-#19 land. This issue's
     scope is content-only, per the issue body.
+
+- **Issue #15 (`src/llm.py`: `LLMClient` + prompt loading) — done.**
+  Implemented in `src/llm.py`, tested in `tests/test_llm.py` (11
+  fake-`completion_fn` cases, no network, all passing — full suite is 92
+  passing). Conventions established here that later Phase 3 issues (#16,
+  #17) should follow:
+  - `LLMClient(model, completion_fn=None)` mirrors `MathpixClient`'s
+    `http_client=` injection pattern precedent (issue #1):
+    `completion_fn` defaults to `litellm.completion` itself when omitted,
+    and tests always inject a fake, never hitting a real API.
+  - `LLMClient.complete(system_prompt, user_content) -> str` is the one
+    method this issue adds beyond the constructor (not specified in the
+    issue body itself, decided during planning): builds the two-message
+    `[{"role": "system", ...}, {"role": "user", ...}]` list internally so
+    `cleanup_pdf()` (#17) only ever needs to pass prompt text + raw
+    Mathpix markdown, not construct a messages list itself. Wraps any
+    `completion_fn` exception, any response missing the expected
+    `response.choices[0].message.content` shape, and empty/whitespace-only
+    content all into `LLMError` — `complete()` never returns anything
+    other than non-blank completion text.
+  - **`LLMClient.__init__` calls `load_dotenv()` unconditionally** — a
+    deliberate, explicitly-confirmed addition beyond the issue's literal
+    text, closing a real gap: `load_dotenv()` was previously only called
+    inside `load_mathpix_credentials()` (`src/config.py`), so a run that
+    touches only the LLM stage for a file (e.g. once #17/#18's
+    `force_llm`/`needs_llm_reprocessing()` land and a file's Mathpix stage
+    is already cached/unchanged) could otherwise never load `.env` at all
+    in that process, leaving `ANTHROPIC_API_KEY` unset even though it's
+    present in `.env`. This does **not** read or validate the key itself
+    (still `litellm`'s job, consistent with `config.py`'s "no
+    credential-loading logic here" note for issue #13) — a still-missing
+    key surfaces as whatever exception `completion_fn` raises, caught and
+    wrapped into `LLMError` by `complete()`. No `env_file=` param was
+    added (constructor signature stays exactly `LLMClient(model,
+    completion_fn=None)` per the issue); `load_dotenv()` uses its default
+    upward-search behavior, matching the project's "run the CLI from the
+    repo root" convention already established for `DEFAULT_CONFIG_PATH`.
+  - No context manager / `close()` on `LLMClient` — unlike
+    `MathpixClient` (owns an `httpx.Client` connection), it wraps a
+    stateless function call with nothing to clean up.
+  - `load_prompt_text(prompt_version, prompts_dir=Path("prompts"))` reads
+    `prompts/{prompt_version}.txt` and returns its contents verbatim (no
+    `.strip()`) via `.read_text(encoding="utf-8")`, raising `LLMError` (not
+    `FileNotFoundError`) when the file doesn't exist — matches the issue's
+    explicit requirement that a configured `prompt_version` with no
+    matching file is a real config error, not silently ignorable.
+  - `ANTHROPIC_API_KEY` is confirmed already populated in the real
+    (gitignored) `.env`, added back in issue #13 alongside the existing
+    Mathpix credential lines — no further `.env`/`.env.example`/
+    `environment.yml` changes were needed for this issue.
 
 ### Phase 2 progress
 
@@ -1007,6 +1058,7 @@ notex/                      ← repo root
 │   ├── mathpix.py          ← Mathpix API client
 │   ├── state.py            ← state.db schema + CRUD (StateEntry, init_db, get_entry, upsert_entry)
 │   ├── discovery.py        ← per-file two-tier change classification + recursive multi-course walk (Classification, ClassificationResult, classify_pdf, compute_sha256, discover_pdfs, UNGROUPED_COURSE_KEY)
+│   ├── llm.py              ← LLM cleanup client + prompt loading (LLMClient, LLMError, load_prompt_text — issue #15)
 │   └── main.py             ← CLI orchestration entry point (RunSummary, run, main) — wires discovery + state.db + process_pdf() into a runnable pass over input_root
 ├── scripts/
 │   └── smoke_test_mathpix.py   ← manual, real-API validation
@@ -1016,6 +1068,7 @@ notex/                      ← repo root
 │   ├── test_state.py
 │   ├── test_discovery.py
 │   ├── test_config.py
+│   ├── test_llm.py
 │   └── test_main.py
 ├── state.db                ← SQLite state log, gitignored, created at runtime
 └── _cache/                 ← gitignored, created at runtime
