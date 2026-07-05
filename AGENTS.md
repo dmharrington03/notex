@@ -141,8 +141,8 @@ Tracked in issues #13-#20 (`phase-3` label).
 
 ### Phase 3 progress
 
-**Phase 3 status: IN PROGRESS.** Issues #13, #14, #15, #16, and #17 are
-implemented; #18-#20 are filed but not yet implemented. Design decisions
+**Phase 3 status: IN PROGRESS.** Issues #13, #14, #15, #16, #17, and #18 are
+implemented; #19-#20 are filed but not yet implemented. Design decisions
 made during planning, recorded here so they aren't lost before the rest of the code
 lands:
 
@@ -441,6 +441,102 @@ lands:
     Lives in `src/llm.py`, not `src/discovery.py` — a separate concern
     from `classify_pdf()`'s Mathpix-stage-only change detection (see issue
     #15/#16 notes and `discovery.py`'s own docstring).
+
+- **Issue #18 (`src/main.py`: wire LLM stage into `run()`, `force_llm` +
+  `target_source_path` infra) — done.** Implemented in `src/main.py`,
+  tested in `tests/test_main.py` (12 cases total — 3 existing Phase 2 tests
+  extended to also cover the LLM stage, 9 new — no network for the LLM
+  side: `src.main.cleanup_pdf` is monkeypatched to a fake, never
+  `litellm.completion`/a real API; full suite is 119 passing). Design
+  decisions confirmed with the user before implementation:
+  - **The per-file processing body is factored into a new private
+    `_process_file(result, cache_dir, mathpix_client, llm_client,
+    llm_config, conn, force_llm, course_label) -> _FileOutcome` helper**,
+    called identically by the normal per-course loop and the
+    `target_source_path` branch — per the issue's explicit requirement,
+    so the two entry points can't drift apart. `_FileOutcome` is a small
+    frozen dataclass (`processed`/`skipped`/`errors`/`llm_reprocessed`,
+    all defaulting to `0`) that `run()` accumulates into its final
+    `RunSummary`. The **ungrouped-skip decision itself stays outside**
+    this shared helper (it lives in each branch's own dispatch — see
+    below) since the issue scopes the shared helper to "mathpix stage
+    handling, LLM stage handling, upsert_entry() calls" specifically, not
+    course/ungrouped resolution.
+  - **LLM output lands in the same per-course `cache_dir` as the Mathpix
+    stage**, not a separate `llm/` subfolder — confirmed with the user.
+    `cleanup_pdf()`'s `dest_dir` is passed through as exactly the same
+    `paths_config.cache_dir / course` used for `process_pdf()`, so
+    `{stem}.llm.md` sits alongside `{stem}.mathpix.md`. Keeps Phase 3
+    scope to "cache only" per AGENTS.md — no vault-facing directory
+    structure decisions are made here (Phase 4/5).
+  - **For the UNCHANGED-file LLM-only-rerun path, `mathpix_markdown_path`
+    is derived by naming convention** (`cache_dir / f"{lecture_stem}.mathpix.md"`),
+    not read from a `ProcessResult` (there isn't one — Mathpix didn't run
+    this pass). Relies on `fetch_and_extract()`'s (issue #3) deterministic
+    naming convention holding.
+  - **`RunSummary.errors` counts LLM fallbacks too, not just Mathpix
+    failures** — confirmed with the user (a deliberate broadening of the
+    field's original Phase 2 meaning). Any `cleanup_pdf()` call this run
+    that returns `llm_status == "failed"` (whether from the actionable
+    NEW/CHANGED/RETRY path or the UNCHANGED-file `llm_reprocessed` path)
+    increments `errors` by 1, in addition to whatever else that call
+    already counts (`processed`/`llm_reprocessed`) — i.e. a single file
+    can contribute to both `processed` (or `llm_reprocessed`) *and*
+    `errors` in the same run if its Mathpix stage succeeded but its LLM
+    stage fell back to raw output. This is a real deviation from Phase
+    2's original "errors == Mathpix API failures only" meaning, made
+    explicitly rather than assumed.
+  - **`target_source_path` resolving to an ungrouped file (no course
+    subfolder) is force-processed, not skipped** — a deliberate asymmetry
+    from the normal-run ungrouped-skip behavior (issue #11), confirmed
+    with the user: since the caller explicitly named this exact file by
+    path, there's no ambiguity about intent the way there is for a stray
+    file discovered incidentally during a full `discover_pdfs()` walk.
+    Its cache dir is a new reserved sentinel subfolder,
+    `paths_config.cache_dir / "_ungrouped"` (module constant
+    `_UNGROUPED_CACHE_SUBDIR` in `src/main.py`) — mirrors
+    `discovery.py`'s `UNGROUPED_COURSE_KEY` sentinel's *role* but is a
+    real filesystem folder name (unlike `UNGROUPED_COURSE_KEY`, which is
+    `""` and is never used as a path component), since this code path
+    actually does write cache/state for the file rather than just
+    warning and skipping it.
+  - **`cleanup_pdf()`'s two possible raised exceptions are handled
+    differently in the UNCHANGED-file LLM-only-rerun path** — confirmed
+    with the user: a `FileNotFoundError` (the cached `.mathpix.md`
+    unexpectedly missing, e.g. `_cache` manually cleared) is caught
+    per-file, logged, and counted as `errors += 1` without aborting the
+    run — a filesystem hiccup local to one file. An `LLMError` from a
+    missing `prompts/{prompt_version}.txt` is **not** caught — it
+    propagates out of `run()` (and crashes `main()`) — since a missing
+    configured prompt file is a global config problem that would fail
+    identically for every remaining file this run, not a per-file
+    condition worth silently degrading through. (Both exceptions are
+    structurally impossible on the actionable NEW/CHANGED/RETRY path,
+    since `mathpix_markdown_path` there is `process_result.markdown_path`,
+    a file `process_pdf()` just created moments earlier.)
+  - **Testing seam: `src.main.cleanup_pdf` is monkeypatched directly**,
+    rather than adding a new `llm_client=`/`completion_fn=`-style
+    injection parameter to `run()` — confirmed with the user, since the
+    issue's exact `run()` signature has no such parameter (only
+    `llm_config`, not an injectable client/callable). Mirrors the
+    existing convention of monkeypatching `src.main.run` itself for
+    `main()`'s tests. This means `run()` still unconditionally
+    constructs a real `LLMClient(model=llm_config.model)` every call
+    (per the issue's "one `LLMClient` per run" requirement) even in
+    tests, but since `LLMClient.__init__` only calls `load_dotenv()` (no
+    API call — see issue #15), this is harmless even without a real
+    `ANTHROPIC_API_KEY` configured.
+  - Three existing Phase 2 tests
+    (`test_run_processes_new_file_and_records_success`,
+    `test_run_continues_after_one_file_fails`,
+    `test_run_second_pass_is_full_noop`) now also install the fake
+    `cleanup_pdf` and assert on the new `llm_*`/`output_path` state.db
+    columns, since every actionable-file success now triggers the LLM
+    stage automatically. `test_run_skips_unchanged_file_without_calling_process_pdf`
+    was renamed `test_run_skips_unchanged_and_current_file_entirely` and
+    its seeded state.db row now explicitly sets `llm_status="success"`
+    (previously unset) so it still exercises a full skip rather than
+    incidentally becoming the new stale-LLM-reprocessing case.
 
 ### Phase 2 progress
 
