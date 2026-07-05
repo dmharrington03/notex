@@ -137,7 +137,10 @@ This phase's `validate_cleanup()` implements a **count**-balance check for
 check, and relies on the cleanup prompt itself (with bra-ket normalization
 guidance) to actually fix mismatched pairs on a best-effort basis.
 
-Tracked in issues #13-#20 (`phase-3` label).
+Tracked in issues #13-#20 (`phase-3` label). Issue #21 (LLM token usage +
+cost estimate tracking) was opened as a small `phase-3`-labeled followup
+after this phase was already validated/closed — see its entry in "Phase 3
+progress" below.
 
 ### Phase 3 progress
 
@@ -751,6 +754,109 @@ during planning are recorded here so they aren't lost:
     `force_llm`, `target_source_path`, the combined Mathpix+LLM
     `_process_file()` path) behaved exactly as designed and documented in
     issues #13-#18's entries above.
+
+- **Issue #21 (LLM token usage + cost estimate tracking in `state.db`) —
+  done.** A `phase-3`-labeled followup opened after Phase 3 was already
+  validated/closed (#13-#20) — not part of the original Phase 3 scope, but
+  small enough to land without reopening the phase. Implemented across
+  `src/llm.py`, `src/state.py`, `src/main.py`, and
+  `scripts/smoke_test_llm.py`; tested in `tests/test_llm.py` (5 new/updated
+  cases), `tests/test_state.py` (1 new case), and `tests/test_main.py`
+  (existing cases extended with token/cost assertions) — no network, full
+  suite is 123 passing. Implementation matched the issue body's
+  pre-confirmed design decisions exactly, no further decisions needed
+  during implementation:
+  - **`LLMClient.complete()`'s return type changed from `str` to a new
+    frozen dataclass `CompletionResult`** (`content`, `input_tokens`,
+    `output_tokens`, `cost`) — a breaking change to `complete()`'s return
+    shape, updated at every call site (`cleanup_pdf()`,
+    `scripts/smoke_test_llm.py`, every `tests/test_llm.py` case that
+    previously asserted a bare string). `input_tokens`/`output_tokens` are
+    read directly from the real `litellm.completion()` response's
+    `response.usage.prompt_tokens`/`.completion_tokens` — exact/billed
+    figures, not a `litellm.token_counter()` re-tokenization pass. `cost`
+    comes from `litellm.completion_cost(completion_response=response,
+    model=self.model)`. Both usage reading and cost lookup are
+    independently best-effort: a response lacking a usable `usage`
+    attribute (caught via `AttributeError`) falls back to
+    `input_tokens=None, output_tokens=None`, and any exception from
+    `completion_cost()` (confirmed locally: it raises
+    `litellm.BadRequestError` for a model litellm doesn't recognize, e.g.
+    the tests' `"fake-model"`) falls back to `cost=None` — neither ever
+    raises `LLMError`, since a missing/unpriceable model shouldn't break
+    the actual cleanup call that already succeeded.
+  - **`LLMResult` gained three new optional fields**
+    (`llm_input_tokens`/`llm_output_tokens`/`llm_cost_estimate`, all
+    defaulting to `None` so the dataclass stays backward compatible with
+    any positional-arg construction elsewhere), populated from the
+    `CompletionResult` on both the success path and the
+    validation-failure fallback path (the completion call still happened
+    and cost real money even though the cleaned output was discarded —
+    mirrors the existing asymmetric treatment of `llm_validation_result`).
+    On the `LLMError` fallback (no completion ever returned), all three
+    stay `None` — there's no usage to report.
+  - **`state.db` gained three new nullable columns**
+    (`llm_input_tokens INTEGER`, `llm_output_tokens INTEGER`,
+    `llm_cost_estimate REAL`), added to
+    `_VALUE_COLUMNS`, `_CREATE_TABLE_SQL`, and `StateEntry`, following the
+    exact same partial-upsert convention as every other column (verified
+    directly in a new
+    `test_upsert_entry_partial_update_preserves_token_and_cost_columns`
+    case). **No schema-migration logic was added** — `init_db()` still
+    only ever runs `CREATE TABLE IF NOT EXISTS`, per the issue's explicit
+    design decision. The real (gitignored) local `state.db`, which
+    predated these columns from issue #20's live validation run, was
+    deleted as the one-time manual step the issue calls for — it rebuilds
+    cleanly on the next real run since `notes_raw/class_1` is only two
+    lecture PDFs.
+  - **`src/main.py`'s `RunSummary` gained `total_input_tokens`,
+    `total_output_tokens`, `total_cost_estimate`** (all defaulting to
+    `0`/`0`/`0.0`), accumulated via a matching set of new fields on the
+    internal `_FileOutcome` helper. Both of `_process_file()`'s
+    `upsert_entry()` call sites (the actionable NEW/CHANGED/RETRY path and
+    the UNCHANGED-file LLM-only-rerun path) now also pass through
+    `llm_input_tokens`/`llm_output_tokens`/`llm_cost_estimate` from the
+    `LLMResult`, and both of `_process_file()`'s return points populate
+    `_FileOutcome`'s new accumulator fields from the same `LLMResult`
+    (`llm_input_tokens or 0`, etc., so a `None` from a fallen-back-to-raw
+    `LLMResult` contributes `0` rather than breaking accumulation).
+    `_print_summary()` prints the three new totals (`Input tokens:`,
+    `Output tokens:`, `Est. cost:` formatted to 4 decimal places).
+  - **`scripts/smoke_test_llm.py`** updated its one `client.complete()`
+    call site for the new `CompletionResult` shape and now prints real
+    input/output token counts and an estimated cost (falling back to the
+    literal string `"unknown"` for any field that came back `None`)
+    alongside the existing validation summary — a capability this script
+    didn't have before, since token/cost capture previously didn't exist
+    anywhere in the codebase.
+  - Out of scope, per the issue: any aggregate/all-time cost-reporting CLI
+    flag summing `state.db` across the whole vault (future Phase 7
+    territory), and Mathpix-side cost tracking (page-priced, not
+    token-priced, so none of this applies to that stage).
+  - **Real-API validation (post-implementation, ad hoc — not a separate
+    issue).** `scripts/smoke_test_llm.py` was run once for real against
+    the already-cached `_cache/class_1/lecture_01.mathpix.md` (`--out`
+    pointed at a throwaway directory, deleted afterward): cleanup
+    succeeded, all 4 validation checks passed, and the new token/cost
+    summary lines printed real figures (3133 input / 1407 output tokens,
+    ~$0.0102). Separately, `state.db` (deleted per this issue's design
+    decision — see above) was reseeded with matching mtime/size/hash +
+    `mathpix_status="success"` for both `notes_raw/class_1` PDFs (no
+    `llm_status`, so `needs_llm_reprocessing()` triggers the existing
+    LLM-only-rerun path) to exercise the real `python -m src.main`
+    pipeline's new token/cost wiring **without** re-incurring a real
+    Mathpix API charge for OCR that was already validated in issue #20.
+    The real run correctly avoided any Mathpix call, ran both files'
+    LLM stage for real, and printed `Input tokens: 5729`, `Output
+    tokens: 2290`, `Est. cost: $0.0172` — matching the per-file
+    `llm_input_tokens`/`llm_output_tokens`/`llm_cost_estimate` values
+    written to `state.db` for each row exactly (lecture_01: 3133/1387/
+    $0.0101; lecture_02: 2596/903/$0.0071). An immediate second run was
+    confirmed a true no-op (`Skipped: 2`, all three new totals `0`),
+    matching the LLM stage's existing idempotency guarantee (issue #20)
+    with the new fields in place. Total real API usage across this
+    validation: 3 completions (1 smoke-test + 2 from the single real
+    `src.main` run), 0 Mathpix calls.
 
 ### Phase 2 progress
 

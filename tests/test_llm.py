@@ -42,6 +42,7 @@ import pytest
 
 from src.config import LLMConfig
 from src.llm import (
+    CompletionResult,
     LLMClient,
     LLMError,
     LLMResult,
@@ -54,9 +55,22 @@ from src.llm import (
 from src.state import StateEntry
 
 
-def _fake_response(content: str) -> SimpleNamespace:
+def _fake_response(
+    content: str, prompt_tokens: int = 100, completion_tokens: int = 50
+) -> SimpleNamespace:
     """Build a stub object shaped like litellm.completion()'s return value:
-    response.choices[0].message.content."""
+    response.choices[0].message.content, plus a response.usage matching
+    litellm's real usage-reporting shape (issue #21)."""
+    message = SimpleNamespace(content=content)
+    choice = SimpleNamespace(message=message)
+    usage = SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+    return SimpleNamespace(choices=[choice], usage=usage)
+
+
+def _fake_response_no_usage(content: str) -> SimpleNamespace:
+    """Same as _fake_response() but without a `usage` attribute at all --
+    exercises complete()'s best-effort fallback to None/None for
+    input_tokens/output_tokens (issue #21)."""
     message = SimpleNamespace(content=content)
     choice = SimpleNamespace(message=message)
     return SimpleNamespace(choices=[choice])
@@ -72,12 +86,59 @@ def test_complete_returns_message_content_and_calls_completion_fn_correctly():
     client = LLMClient(model="fake-model", completion_fn=fake_completion_fn)
     result = client.complete("system prompt text", "raw markdown")
 
-    assert result == "cleaned markdown text"
+    assert isinstance(result, CompletionResult)
+    assert result.content == "cleaned markdown text"
     assert captured["model"] == "fake-model"
     assert captured["messages"] == [
         {"role": "system", "content": "system prompt text"},
         {"role": "user", "content": "raw markdown"},
     ]
+
+
+def test_complete_captures_usage_from_response(monkeypatch):
+    def fake_completion_fn(**kwargs):
+        return _fake_response("cleaned text", prompt_tokens=123, completion_tokens=45)
+
+    # completion_cost() itself is best-effort/independent of usage capture;
+    # stub it directly here so this test asserts on token capture alone.
+    monkeypatch.setattr("src.llm.litellm.completion_cost", lambda **kwargs: 0.0042)
+
+    client = LLMClient(model="fake-model", completion_fn=fake_completion_fn)
+    result = client.complete("sys", "user")
+
+    assert result.input_tokens == 123
+    assert result.output_tokens == 45
+    assert result.cost == 0.0042
+
+
+def test_complete_usage_and_cost_are_none_when_response_lacks_usage_attribute():
+    def fake_completion_fn(**kwargs):
+        return _fake_response_no_usage("cleaned text")
+
+    client = LLMClient(model="fake-model", completion_fn=fake_completion_fn)
+    result = client.complete("sys", "user")
+
+    assert result.content == "cleaned text"
+    assert result.input_tokens is None
+    assert result.output_tokens is None
+
+
+def test_complete_cost_is_none_when_completion_cost_raises(monkeypatch):
+    def fake_completion_fn(**kwargs):
+        return _fake_response("cleaned text")
+
+    def raising_completion_cost(**kwargs):
+        raise ValueError("no pricing info for this model")
+
+    monkeypatch.setattr("src.llm.litellm.completion_cost", raising_completion_cost)
+
+    client = LLMClient(model="fake-model", completion_fn=fake_completion_fn)
+    result = client.complete("sys", "user")
+
+    # Usage capture still succeeds independently of the cost lookup failing.
+    assert result.input_tokens == 100
+    assert result.output_tokens == 50
+    assert result.cost is None
 
 
 def test_complete_wraps_completion_fn_exception_in_llm_error():
@@ -131,7 +192,7 @@ def test_llm_client_construction_does_not_require_a_real_api_key(monkeypatch):
         return _fake_response("ok")
 
     client = LLMClient(model="fake-model", completion_fn=fake_completion_fn)
-    assert client.complete("sys", "user") == "ok"
+    assert client.complete("sys", "user").content == "ok"
 
 
 def test_load_prompt_text_reads_real_cleanup_v1_prompt():
@@ -315,18 +376,25 @@ def _state_entry(**overrides) -> StateEntry:
         mathpix_processed_at=None,
         llm_processed_at=None,
         vault_written_at=None,
+        llm_input_tokens=None,
+        llm_output_tokens=None,
+        llm_cost_estimate=None,
     )
     defaults.update(overrides)
     return StateEntry(**defaults)
 
 
-def test_cleanup_pdf_success_writes_llm_md_and_returns_success_result(tmp_path):
+def test_cleanup_pdf_success_writes_llm_md_and_returns_success_result(tmp_path, monkeypatch):
     mathpix_path = tmp_path / "lecture_01.mathpix.md"
     mathpix_path.write_text("# Lecture 21-4/14\n\nsome raw mathpix text", encoding="utf-8")
     dest_dir = tmp_path / "out"
 
     def fake_completion_fn(**kwargs):
-        return _fake_response("# Real Heading\n\nsome cleaned text")
+        return _fake_response(
+            "# Real Heading\n\nsome cleaned text", prompt_tokens=200, completion_tokens=80
+        )
+
+    monkeypatch.setattr("src.llm.litellm.completion_cost", lambda **kwargs: 0.0123)
 
     client = LLMClient(model="fake-model", completion_fn=fake_completion_fn)
     llm_config = _llm_config()
@@ -345,6 +413,9 @@ def test_cleanup_pdf_success_writes_llm_md_and_returns_success_result(tmp_path):
         "left_right_balance": True,
         "heading_count": True,
     }
+    assert result.llm_input_tokens == 200
+    assert result.llm_output_tokens == 80
+    assert result.llm_cost_estimate == 0.0123
 
 
 def test_cleanup_pdf_falls_back_on_llm_error(tmp_path):
@@ -365,17 +436,25 @@ def test_cleanup_pdf_falls_back_on_llm_error(tmp_path):
     assert result.llm_prompt_version is None
     assert result.llm_validation_result is None
     assert result.output_path == mathpix_path
+    # No completion was ever returned -- no usage to report.
+    assert result.llm_input_tokens is None
+    assert result.llm_output_tokens is None
+    assert result.llm_cost_estimate is None
     # No new file written on failure.
     assert not dest_dir.exists()
 
 
-def test_cleanup_pdf_falls_back_on_failed_validation(tmp_path):
+def test_cleanup_pdf_falls_back_on_failed_validation(tmp_path, monkeypatch):
     mathpix_path = tmp_path / "lecture_01.mathpix.md"
     mathpix_path.write_text("word " * 100, encoding="utf-8")
     dest_dir = tmp_path / "out"
 
     def fake_completion_fn(**kwargs):
-        return _fake_response("word " * 10)  # far below min_length_ratio
+        return _fake_response(
+            "word " * 10, prompt_tokens=50, completion_tokens=10
+        )  # far below min_length_ratio
+
+    monkeypatch.setattr("src.llm.litellm.completion_cost", lambda **kwargs: 0.002)
 
     client = LLMClient(model="fake-model", completion_fn=fake_completion_fn)
     llm_config = _llm_config(min_length_ratio=0.7, max_length_ratio=1.3)
@@ -389,6 +468,12 @@ def test_cleanup_pdf_falls_back_on_failed_validation(tmp_path):
     checks = json.loads(result.llm_validation_result)
     assert checks["length_ratio"] is False
     assert not dest_dir.exists()
+    # The completion call still happened and cost real money even though
+    # validation failed and the output was discarded -- tokens/cost are
+    # still recorded (issue #21).
+    assert result.llm_input_tokens == 50
+    assert result.llm_output_tokens == 10
+    assert result.llm_cost_estimate == 0.002
 
 
 def test_cleanup_pdf_raises_file_not_found_for_missing_mathpix_markdown(tmp_path):

@@ -118,7 +118,13 @@ def _upsert_unchanged_entry(
     )
 
 
-def _install_fake_cleanup_pdf(monkeypatch, status: str = "success"):
+def _install_fake_cleanup_pdf(
+    monkeypatch,
+    status: str = "success",
+    input_tokens: int = 100,
+    output_tokens: int = 50,
+    cost_estimate: float = 0.001,
+):
     """
     Monkeypatch src.main.cleanup_pdf with a fake that never touches
     litellm/a real API. Returns the list of call-argument dicts recorded,
@@ -126,9 +132,13 @@ def _install_fake_cleanup_pdf(monkeypatch, status: str = "success"):
 
     status="success" writes a real {lecture_stem}.llm.md into dest_dir
     (mirroring cleanup_pdf()'s real success behavior) and returns a
-    llm_status="success" LLMResult; status="failed" mirrors the
+    llm_status="success" LLMResult with the given input_tokens/
+    output_tokens/cost_estimate; status="failed" mirrors the
     fallback-to-raw-output shape (llm_model/llm_prompt_version/
-    llm_validation_result all None, output_path == mathpix_markdown_path).
+    llm_validation_result all None, output_path == mathpix_markdown_path)
+    but -- per issue #21 -- still reports the given token/cost figures,
+    since the completion call still happened and cost real money even
+    though validation failed and the output was discarded.
     """
     import src.main as main_module
 
@@ -155,6 +165,9 @@ def _install_fake_cleanup_pdf(monkeypatch, status: str = "success"):
                 llm_validation_result=json.dumps({"length_ratio": True}),
                 output_path=output_path,
                 processed_at=datetime.now(timezone.utc),
+                llm_input_tokens=input_tokens,
+                llm_output_tokens=output_tokens,
+                llm_cost_estimate=cost_estimate,
             )
         return LLMResult(
             llm_model=None,
@@ -163,6 +176,9 @@ def _install_fake_cleanup_pdf(monkeypatch, status: str = "success"):
             llm_validation_result=None,
             output_path=Path(mathpix_markdown_path),
             processed_at=datetime.now(timezone.utc),
+            llm_input_tokens=input_tokens,
+            llm_output_tokens=output_tokens,
+            llm_cost_estimate=cost_estimate,
         )
 
     monkeypatch.setattr(main_module, "cleanup_pdf", _fake_cleanup_pdf)
@@ -220,7 +236,16 @@ def test_run_processes_new_file_and_records_success(client, tmp_path, monkeypatc
 
     summary = run(paths_config, conn, client=client, llm_config=_make_llm_config())
 
-    assert summary == RunSummary(processed=1, skipped=0, errors=0, ungrouped=0, llm_reprocessed=0)
+    assert summary == RunSummary(
+        processed=1,
+        skipped=0,
+        errors=0,
+        ungrouped=0,
+        llm_reprocessed=0,
+        total_input_tokens=100,
+        total_output_tokens=50,
+        total_cost_estimate=0.001,
+    )
 
     entry = get_entry(conn, str(pdf_path.resolve()))
     assert entry is not None
@@ -241,6 +266,9 @@ def test_run_processes_new_file_and_records_success(client, tmp_path, monkeypatc
     assert entry.output_path is not None
     assert Path(entry.output_path).is_file()
     assert Path(entry.output_path).name == "lecture_01.llm.md"
+    assert entry.llm_input_tokens == 100
+    assert entry.llm_output_tokens == 50
+    assert entry.llm_cost_estimate == 0.001
 
     markdown_path = paths_config.cache_dir / "class_1" / "lecture_01.mathpix.md"
     assert markdown_path.is_file()
@@ -297,13 +325,25 @@ def test_run_unchanged_and_stale_triggers_llm_only_reprocessing(client, tmp_path
 
     summary = run(paths_config, conn, client=client, llm_config=_make_llm_config())
 
-    assert summary == RunSummary(processed=0, skipped=0, errors=0, ungrouped=0, llm_reprocessed=1)
+    assert summary == RunSummary(
+        processed=0,
+        skipped=0,
+        errors=0,
+        ungrouped=0,
+        llm_reprocessed=1,
+        total_input_tokens=100,
+        total_output_tokens=50,
+        total_cost_estimate=0.001,
+    )
     assert not submit_route.called
 
     entry = get_entry(conn, str(pdf_path.resolve()))
     assert entry.llm_status == "success"
     assert entry.llm_model == "fake-llm-model"
     assert entry.output_path is not None
+    assert entry.llm_input_tokens == 100
+    assert entry.llm_output_tokens == 50
+    assert entry.llm_cost_estimate == 0.001
     # Mathpix-stage fields were untouched by this LLM-only rerun.
     assert entry.mathpix_status == "success"
 
@@ -334,7 +374,16 @@ def test_run_force_llm_reprocesses_up_to_date_entry(client, tmp_path, monkeypatc
         paths_config, conn, client=client, llm_config=_make_llm_config(), force_llm=True
     )
 
-    assert summary == RunSummary(processed=0, skipped=0, errors=0, ungrouped=0, llm_reprocessed=1)
+    assert summary == RunSummary(
+        processed=0,
+        skipped=0,
+        errors=0,
+        ungrouped=0,
+        llm_reprocessed=1,
+        total_input_tokens=100,
+        total_output_tokens=50,
+        total_cost_estimate=0.001,
+    )
     assert len(llm_calls) == 1
 
 
@@ -368,7 +417,16 @@ def test_run_continues_after_one_file_fails(client, tmp_path, monkeypatch):
 
     summary = run(paths_config, conn, client=client, llm_config=_make_llm_config())
 
-    assert summary == RunSummary(processed=1, skipped=0, errors=1, ungrouped=0, llm_reprocessed=0)
+    assert summary == RunSummary(
+        processed=1,
+        skipped=0,
+        errors=1,
+        ungrouped=0,
+        llm_reprocessed=0,
+        total_input_tokens=100,
+        total_output_tokens=50,
+        total_cost_estimate=0.001,
+    )
 
     bad_entry = get_entry(conn, str(bad_pdf.resolve()))
     assert bad_entry.mathpix_status == "failed"
@@ -413,7 +471,14 @@ def test_run_second_pass_is_full_noop(client, tmp_path, monkeypatch):
 
     first_summary = run(paths_config, conn, client=client, llm_config=_make_llm_config())
     assert first_summary == RunSummary(
-        processed=1, skipped=0, errors=0, ungrouped=0, llm_reprocessed=0
+        processed=1,
+        skipped=0,
+        errors=0,
+        ungrouped=0,
+        llm_reprocessed=0,
+        total_input_tokens=100,
+        total_output_tokens=50,
+        total_cost_estimate=0.001,
     )
     assert submit_route.call_count == 1
 
@@ -445,7 +510,16 @@ def test_run_target_source_path_restricts_to_one_file_in_course(client, tmp_path
         target_source_path=target_pdf,
     )
 
-    assert summary == RunSummary(processed=1, skipped=0, errors=0, ungrouped=0, llm_reprocessed=0)
+    assert summary == RunSummary(
+        processed=1,
+        skipped=0,
+        errors=0,
+        ungrouped=0,
+        llm_reprocessed=0,
+        total_input_tokens=100,
+        total_output_tokens=50,
+        total_cost_estimate=0.001,
+    )
 
     target_entry = get_entry(conn, str(target_pdf.resolve()))
     assert target_entry is not None
@@ -479,7 +553,16 @@ def test_run_target_source_path_force_processes_ungrouped_file(client, tmp_path,
 
     # Unlike the normal run (which skips ungrouped files entirely), a
     # directly-targeted ungrouped file is force-processed.
-    assert summary == RunSummary(processed=1, skipped=0, errors=0, ungrouped=0, llm_reprocessed=0)
+    assert summary == RunSummary(
+        processed=1,
+        skipped=0,
+        errors=0,
+        ungrouped=0,
+        llm_reprocessed=0,
+        total_input_tokens=100,
+        total_output_tokens=50,
+        total_cost_estimate=0.001,
+    )
 
     entry = get_entry(conn, str(stray_pdf.resolve()))
     assert entry is not None
@@ -524,7 +607,16 @@ def test_run_target_source_path_with_force_llm_reprocesses_only_that_file(
         target_source_path=target_pdf,
     )
 
-    assert summary == RunSummary(processed=0, skipped=0, errors=0, ungrouped=0, llm_reprocessed=1)
+    assert summary == RunSummary(
+        processed=0,
+        skipped=0,
+        errors=0,
+        ungrouped=0,
+        llm_reprocessed=1,
+        total_input_tokens=100,
+        total_output_tokens=50,
+        total_cost_estimate=0.001,
+    )
     assert not submit_route.called
     assert len(llm_calls) == 1
 
@@ -555,7 +647,13 @@ def test_main_returns_zero_and_prints_summary_even_with_errors(monkeypatch, tmp_
         main_module,
         "run",
         lambda paths_config, conn, client=None: RunSummary(
-            processed=1, skipped=2, errors=1, ungrouped=0
+            processed=1,
+            skipped=2,
+            errors=1,
+            ungrouped=0,
+            total_input_tokens=1234,
+            total_output_tokens=987,
+            total_cost_estimate=0.0041,
         ),
     )
 
@@ -564,4 +662,7 @@ def test_main_returns_zero_and_prints_summary_even_with_errors(monkeypatch, tmp_
     out = capsys.readouterr().out
     assert exit_code == 0
     assert "Processed:       1" in out
+    assert "Input tokens:    1234" in out
+    assert "Output tokens:   987" in out
+    assert "Est. cost:       $0.0041" in out
     assert "Errors:          1" in out

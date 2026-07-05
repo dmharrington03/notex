@@ -82,6 +82,9 @@ def _print_summary(
     original: str,
     cleaned: str,
     validation_result,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    cost: float | None,
 ) -> None:
     ratio = (len(cleaned) / len(original)) if original else float("nan")
 
@@ -98,6 +101,10 @@ def _print_summary(
         print(f"    - {name}: {status}")
     overall = "PASSED" if validation_result.passed else "FAILED"
     print(f"  overall: {overall}")
+    print(f"  input tokens:     {input_tokens if input_tokens is not None else 'unknown'}")
+    print(f"  output tokens:    {output_tokens if output_tokens is not None else 'unknown'}")
+    cost_str = f"${cost:.4f}" if cost is not None else "unknown"
+    print(f"  est. cost:        {cost_str}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -117,7 +124,8 @@ def main(argv: list[str] | None = None) -> int:
 
         print(f"Running LLM cleanup on {args.mathpix_md_path} ...")
         client = LLMClient(model=llm_config.model)
-        cleaned_markdown = client.complete(system_prompt, raw_markdown)
+        completion_result = client.complete(system_prompt, raw_markdown)
+        cleaned_markdown = completion_result.content
 
         validation_result = validate_cleanup(
             raw_markdown,
@@ -135,6 +143,9 @@ def main(argv: list[str] | None = None) -> int:
         raw_markdown,
         cleaned_markdown,
         validation_result,
+        completion_result.input_tokens,
+        completion_result.output_tokens,
+        completion_result.cost,
     )
 
     if args.out is not None:

@@ -1,9 +1,12 @@
 """
-LLM cleanup client — Phase 3, issues #15-#17.
+LLM cleanup client — Phase 3, issues #15-#17, #21.
 
 Thin wrapper around litellm.completion() plus prompt-text loading,
 post-cleanup validation, and end-to-end per-file orchestration:
 
+    - CompletionResult        result of LLMClient.complete() -- content plus
+                              best-effort input/output token counts and a
+                              cost estimate (issue #21)
     - LLMClient               thin, injectable litellm.completion() wrapper
     - LLMError                raised on completion failures / bad responses
     - load_prompt_text()      reads prompts/{prompt_version}.txt
@@ -16,10 +19,13 @@ post-cleanup validation, and end-to-end per-file orchestration:
                               classify_pdf() -- see AGENTS.md)
 
 Implementation status:
-    - LLMClient / complete()   implemented (issue #15)
+    - LLMClient / complete()   implemented (issue #15; return type changed
+                                from str to CompletionResult in issue #21)
     - load_prompt_text()       implemented (issue #15)
     - validate_cleanup()       implemented (issue #16)
-    - cleanup_pdf()            implemented (issue #17)
+    - cleanup_pdf()            implemented (issue #17; threads
+                                input/output token counts + cost estimate
+                                through LLMResult as of issue #21)
     - needs_llm_reprocessing() implemented (issue #17)
 """
 
@@ -53,6 +59,26 @@ class LLMError(Exception):
     prompt file for a configured prompt_version."""
 
 
+@dataclass(frozen=True)
+class CompletionResult:
+    """
+    Result of LLMClient.complete() (issue #21).
+
+    input_tokens/output_tokens/cost are captured directly from the real
+    litellm.completion() response (response.usage.prompt_tokens/
+    .completion_tokens, and litellm.completion_cost()) -- exact/billed
+    figures, not a separate re-tokenization pass. All three are best-effort
+    and independently fall back to None if the response lacks a usable
+    `usage` attribute, or if completion_cost() raises (e.g. an unpriced
+    model) -- neither failure raises LLMError.
+    """
+
+    content: str
+    input_tokens: int | None
+    output_tokens: int | None
+    cost: float | None
+
+
 class LLMClient:
     """
     Thin wrapper around litellm.completion().
@@ -84,10 +110,10 @@ class LLMClient:
         # AGENTS.md's "no credential-loading logic in config.py" note.
         load_dotenv()
 
-    def complete(self, system_prompt: str, user_content: str) -> str:
+    def complete(self, system_prompt: str, user_content: str) -> CompletionResult:
         """
         Run a single chat completion and return the assistant's response
-        text.
+        text plus best-effort token usage / cost metadata.
 
         Args:
             system_prompt: the system message content (e.g. the loaded
@@ -96,7 +122,15 @@ class LLMClient:
                 Markdown to clean up).
 
         Returns:
-            The completion's message content, verbatim.
+            A CompletionResult with the completion's message content
+            (verbatim) plus input_tokens/output_tokens/cost -- each of the
+            latter three is best-effort and falls back to None (never
+            raises LLMError) if the response object lacks a usable
+            `usage` attribute, or if litellm.completion_cost() raises for
+            any reason (e.g. a model missing from litellm's pricing map).
+            Token/cost figures come from the real API response's own
+            usage reporting (issue #21), not a separate re-tokenization
+            pass.
 
         Raises:
             LLMError: if completion_fn raises for any reason, if the
@@ -122,7 +156,27 @@ class LLMClient:
         if not content or not content.strip():
             raise LLMError("LLM completion returned empty content")
 
-        return content
+        input_tokens: int | None = None
+        output_tokens: int | None = None
+        try:
+            usage = response.usage
+            input_tokens = usage.prompt_tokens
+            output_tokens = usage.completion_tokens
+        except AttributeError:
+            pass
+
+        cost: float | None = None
+        try:
+            cost = litellm.completion_cost(completion_response=response, model=self.model)
+        except Exception:
+            cost = None
+
+        return CompletionResult(
+            content=content,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost=cost,
+        )
 
 
 def load_prompt_text(
@@ -270,6 +324,14 @@ class LLMResult:
           dest_dir/{lecture_stem}.llm.md.
         - llm_validation_result is the JSON-serialized (passing) checks
           dict from ValidationResult.
+
+    llm_input_tokens / llm_output_tokens / llm_cost_estimate (issue #21):
+    populated from the CompletionResult whenever the completion call
+    actually happened and returned -- i.e. on success AND on the
+    validation-failure fallback (the API call still happened and cost real
+    money even though the cleaned output was discarded), but NOT on an
+    LLMError fallback (no completion was ever returned, so there's no
+    usage to report -- all three stay None).
     """
 
     llm_model: str | None
@@ -278,6 +340,9 @@ class LLMResult:
     llm_validation_result: str | None
     output_path: Path
     processed_at: datetime
+    llm_input_tokens: int | None = None
+    llm_output_tokens: int | None = None
+    llm_cost_estimate: float | None = None
 
 
 def cleanup_pdf(
@@ -345,7 +410,7 @@ def cleanup_pdf(
         client = LLMClient(model=llm_config.model)
 
     try:
-        cleaned_markdown = client.complete(system_prompt, raw_markdown)
+        completion_result = client.complete(system_prompt, raw_markdown)
     except LLMError:
         return LLMResult(
             llm_model=None,
@@ -355,6 +420,8 @@ def cleanup_pdf(
             output_path=mathpix_markdown_path,
             processed_at=datetime.now(timezone.utc),
         )
+
+    cleaned_markdown = completion_result.content
 
     validation_result = validate_cleanup(
         raw_markdown,
@@ -371,6 +438,9 @@ def cleanup_pdf(
             llm_validation_result=json.dumps(validation_result.checks),
             output_path=mathpix_markdown_path,
             processed_at=datetime.now(timezone.utc),
+            llm_input_tokens=completion_result.input_tokens,
+            llm_output_tokens=completion_result.output_tokens,
+            llm_cost_estimate=completion_result.cost,
         )
 
     dest_dir = Path(dest_dir)
@@ -385,6 +455,9 @@ def cleanup_pdf(
         llm_validation_result=json.dumps(validation_result.checks),
         output_path=output_path,
         processed_at=datetime.now(timezone.utc),
+        llm_input_tokens=completion_result.input_tokens,
+        llm_output_tokens=completion_result.output_tokens,
+        llm_cost_estimate=completion_result.cost,
     )
 
 

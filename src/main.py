@@ -81,6 +81,12 @@ RunSummary.errors > 0 -- per-file Mathpix/LLM failures are recorded in
 state.db and reflected in the printed summary, not treated as a fatal run
 failure. main() only returns non-zero for something that prevents the run
 from starting at all (e.g. ConfigError from a missing/invalid config.yaml).
+
+RunSummary also aggregates this run's LLM token usage / cost estimate
+(total_input_tokens/total_output_tokens/total_cost_estimate -- issue #21),
+summed from each LLMResult's llm_input_tokens/llm_output_tokens/
+llm_cost_estimate (a None from any individual LLMResult contributes 0 to
+the running total rather than breaking accumulation).
 """
 
 from __future__ import annotations
@@ -141,6 +147,9 @@ class RunSummary:
     errors: int
     ungrouped: int
     llm_reprocessed: int = 0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_cost_estimate: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -152,6 +161,9 @@ class _FileOutcome:
     skipped: int = 0
     errors: int = 0
     llm_reprocessed: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_estimate: float = 0.0
 
 
 def _process_file(
@@ -239,9 +251,18 @@ def _process_file(
             llm_validation_result=llm_result.llm_validation_result,
             llm_processed_at=llm_result.processed_at,
             output_path=str(llm_result.output_path),
+            llm_input_tokens=llm_result.llm_input_tokens,
+            llm_output_tokens=llm_result.llm_output_tokens,
+            llm_cost_estimate=llm_result.llm_cost_estimate,
         )
         errors = 0 if llm_result.llm_status == "success" else 1
-        return _FileOutcome(processed=1, errors=errors)
+        return _FileOutcome(
+            processed=1,
+            errors=errors,
+            input_tokens=llm_result.llm_input_tokens or 0,
+            output_tokens=llm_result.llm_output_tokens or 0,
+            cost_estimate=llm_result.llm_cost_estimate or 0.0,
+        )
 
     # Classification.UNCHANGED from here on.
     entry = get_entry(conn, result.source_path)
@@ -288,9 +309,18 @@ def _process_file(
         llm_validation_result=llm_result.llm_validation_result,
         llm_processed_at=llm_result.processed_at,
         output_path=str(llm_result.output_path),
+        llm_input_tokens=llm_result.llm_input_tokens,
+        llm_output_tokens=llm_result.llm_output_tokens,
+        llm_cost_estimate=llm_result.llm_cost_estimate,
     )
     errors = 0 if llm_result.llm_status == "success" else 1
-    return _FileOutcome(llm_reprocessed=1, errors=errors)
+    return _FileOutcome(
+        llm_reprocessed=1,
+        errors=errors,
+        input_tokens=llm_result.llm_input_tokens or 0,
+        output_tokens=llm_result.llm_output_tokens or 0,
+        cost_estimate=llm_result.llm_cost_estimate or 0.0,
+    )
 
 
 def run(
@@ -347,6 +377,9 @@ def run(
     errors = 0
     ungrouped = 0
     llm_reprocessed = 0
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_cost_estimate = 0.0
 
     try:
         if target_source_path is not None:
@@ -378,6 +411,9 @@ def run(
             skipped += outcome.skipped
             errors += outcome.errors
             llm_reprocessed += outcome.llm_reprocessed
+            total_input_tokens += outcome.input_tokens
+            total_output_tokens += outcome.output_tokens
+            total_cost_estimate += outcome.cost_estimate
         else:
             results_by_course = discover_pdfs(paths_config.input_root, conn)
 
@@ -409,6 +445,9 @@ def run(
                     skipped += outcome.skipped
                     errors += outcome.errors
                     llm_reprocessed += outcome.llm_reprocessed
+                    total_input_tokens += outcome.input_tokens
+                    total_output_tokens += outcome.output_tokens
+                    total_cost_estimate += outcome.cost_estimate
     finally:
         if owns_client:
             client.close()
@@ -419,6 +458,9 @@ def run(
         errors=errors,
         ungrouped=ungrouped,
         llm_reprocessed=llm_reprocessed,
+        total_input_tokens=total_input_tokens,
+        total_output_tokens=total_output_tokens,
+        total_cost_estimate=total_cost_estimate,
     )
 
 
@@ -430,6 +472,9 @@ def _print_summary(summary: RunSummary) -> None:
     print(f"  Errors:          {summary.errors}")
     print(f"  Ungrouped:       {summary.ungrouped}")
     print(f"  LLM reprocessed: {summary.llm_reprocessed}")
+    print(f"  Input tokens:    {summary.total_input_tokens}")
+    print(f"  Output tokens:   {summary.total_output_tokens}")
+    print(f"  Est. cost:       ${summary.total_cost_estimate:.4f}")
 
 
 def main(argv: list[str] | None = None) -> int:

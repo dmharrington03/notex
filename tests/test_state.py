@@ -85,6 +85,9 @@ def test_upsert_entry_inserts_and_round_trips_all_fields(tmp_path):
         mathpix_processed_at=processed_at,
         llm_processed_at=processed_at,
         vault_written_at=processed_at,
+        llm_input_tokens=1500,
+        llm_output_tokens=900,
+        llm_cost_estimate=0.0087,
     )
 
     entry = get_entry(conn, source_path)
@@ -105,6 +108,9 @@ def test_upsert_entry_inserts_and_round_trips_all_fields(tmp_path):
         mathpix_processed_at=processed_at,
         llm_processed_at=processed_at,
         vault_written_at=processed_at,
+        llm_input_tokens=1500,
+        llm_output_tokens=900,
+        llm_cost_estimate=0.0087,
     )
 
 
@@ -132,6 +138,9 @@ def test_upsert_entry_insert_with_no_optional_fields(tmp_path):
         mathpix_processed_at=None,
         llm_processed_at=None,
         vault_written_at=None,
+        llm_input_tokens=None,
+        llm_output_tokens=None,
+        llm_cost_estimate=None,
     )
 
 
@@ -167,6 +176,35 @@ def test_upsert_entry_partial_update_preserves_other_columns(tmp_path):
     assert entry.mathpix_processed_at == mathpix_processed_at
     assert entry.llm_status == "success"
     assert entry.llm_model == "gpt-4o-mini"
+
+
+def test_upsert_entry_partial_update_preserves_token_and_cost_columns(tmp_path):
+    # Issue #21's llm_input_tokens/llm_output_tokens/llm_cost_estimate
+    # columns follow the same partial-upsert convention as every other
+    # column: a later, unrelated call must not null them out.
+    conn = init_db(tmp_path / "state.db")
+    source_path = "/notes_raw/class_1/lecture_01.pdf"
+
+    upsert_entry(
+        conn,
+        source_path,
+        llm_status="success",
+        llm_input_tokens=1000,
+        llm_output_tokens=400,
+        llm_cost_estimate=0.0056,
+    )
+
+    # A later call touching only mathpix_* fields must not disturb the
+    # token/cost columns written above.
+    upsert_entry(conn, source_path, mathpix_status="success", mathpix_pdf_id="pdf_xyz")
+
+    entry = get_entry(conn, source_path)
+
+    assert entry.llm_input_tokens == 1000
+    assert entry.llm_output_tokens == 400
+    assert entry.llm_cost_estimate == 0.0056
+    assert entry.mathpix_status == "success"
+    assert entry.mathpix_pdf_id == "pdf_xyz"
 
 
 def test_upsert_entry_update_overwrites_previous_value(tmp_path):

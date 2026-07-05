@@ -17,6 +17,14 @@ implement change-detection logic (that's `src/discovery.py`).
 Full column set (matching docs/spec.md's State Management table) is created
 upfront now even though the `llm_*` / `output_path` / `vault_written_at`
 columns stay NULL until Phases 3-5 populate them.
+
+Issue #21 added three further nullable columns for LLM-stage token usage /
+cost tracking: `llm_input_tokens`, `llm_output_tokens`,
+`llm_cost_estimate`. No schema-migration logic is provided for these (or
+any other column) -- `init_db()` only ever runs `CREATE TABLE IF NOT
+EXISTS`, so an existing local `state.db` predating a column addition must
+be deleted and left to rebuild rather than migrated in place (cheap given
+this project's real data volume -- see AGENTS.md's issue #21 notes).
 """
 
 from __future__ import annotations
@@ -51,6 +59,9 @@ _VALUE_COLUMNS = (
     "mathpix_processed_at",
     "llm_processed_at",
     "vault_written_at",
+    "llm_input_tokens",
+    "llm_output_tokens",
+    "llm_cost_estimate",
 )
 
 _ALL_COLUMNS = ("source_path",) + _VALUE_COLUMNS
@@ -71,7 +82,10 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     output_path            TEXT,
     mathpix_processed_at   TEXT,
     llm_processed_at       TEXT,
-    vault_written_at       TEXT
+    vault_written_at       TEXT,
+    llm_input_tokens       INTEGER,
+    llm_output_tokens      INTEGER,
+    llm_cost_estimate      REAL
 );
 """
 
@@ -93,6 +107,9 @@ class StateEntry:
     mathpix_processed_at: datetime | None
     llm_processed_at: datetime | None
     vault_written_at: datetime | None
+    llm_input_tokens: int | None
+    llm_output_tokens: int | None
+    llm_cost_estimate: float | None
 
 
 def init_db(path: str | Path) -> sqlite3.Connection:
