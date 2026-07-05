@@ -16,6 +16,10 @@ Implementation status:
     - fetch_and_extract()   implemented (issue #3)
     - process_pdf()         implemented (issue #4)
     - on_status callback    implemented (issue #6, for scripts/smoke_test_mathpix.py)
+    - page_count            implemented (issue #22): process_pdf() reads
+      poll_until_complete()'s terminal payload's "num_pages" field (no new
+      API call) into ProcessResult.page_count, best-effort (None if the key
+      is unexpectedly missing) -- never fails an otherwise-successful call.
 """
 
 from __future__ import annotations
@@ -93,6 +97,13 @@ class ProcessResult:
     State Management / AGENTS.md issue #4 notes): pdf_path -> source_path,
     pdf_id -> mathpix_pdf_id, figure_count -> figure_count, processed_at ->
     mathpix_processed_at.
+
+    page_count (issue #22) is read from poll_until_complete()'s terminal
+    payload's "num_pages" field -- no new API call. It is best-effort: None
+    if that key is unexpectedly missing from a real response, mirroring the
+    established best-effort pattern for llm_input_tokens/llm_output_tokens
+    (issue #21) -- a missing/unexpected field here never raises
+    MathpixError.
     """
 
     pdf_path: Path
@@ -100,6 +111,7 @@ class ProcessResult:
     markdown_path: Path
     figures_dir: Path | None
     figure_count: int
+    page_count: int | None
     processed_at: datetime
 
 
@@ -619,7 +631,7 @@ def process_pdf(
 
     try:
         pdf_id = client.submit(pdf_path)
-        client.poll_until_complete(
+        pdf_status_payload = client.poll_until_complete(
             pdf_id,
             poll_interval_seconds=poll_interval_seconds,
             max_poll_attempts=max_poll_attempts,
@@ -643,5 +655,6 @@ def process_pdf(
         markdown_path=fetch_result.markdown_path,
         figures_dir=fetch_result.figures_dir,
         figure_count=fetch_result.figure_count,
+        page_count=pdf_status_payload.get("num_pages"),
         processed_at=datetime.now(timezone.utc),
     )

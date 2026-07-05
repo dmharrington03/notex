@@ -20,11 +20,13 @@ columns stay NULL until Phases 3-5 populate them.
 
 Issue #21 added three further nullable columns for LLM-stage token usage /
 cost tracking: `llm_input_tokens`, `llm_output_tokens`,
-`llm_cost_estimate`. No schema-migration logic is provided for these (or
-any other column) -- `init_db()` only ever runs `CREATE TABLE IF NOT
-EXISTS`, so an existing local `state.db` predating a column addition must
-be deleted and left to rebuild rather than migrated in place (cheap given
-this project's real data volume -- see AGENTS.md's issue #21 notes).
+`llm_cost_estimate`. Issue #22 added one more, `page_count` (the source
+PDF's page count, from Mathpix's own status payload). No schema-migration
+logic is provided for these (or any other column) -- `init_db()` only ever
+runs `CREATE TABLE IF NOT EXISTS`, so an existing local `state.db`
+predating a column addition must be deleted and left to rebuild rather
+than migrated in place (cheap given this project's real data volume --
+see AGENTS.md's issue #21 notes).
 """
 
 from __future__ import annotations
@@ -55,6 +57,7 @@ _VALUE_COLUMNS = (
     "llm_status",
     "llm_validation_result",
     "figure_count",
+    "page_count",
     "output_path",
     "mathpix_processed_at",
     "llm_processed_at",
@@ -79,6 +82,7 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     llm_status             TEXT,
     llm_validation_result  TEXT,
     figure_count           INTEGER,
+    page_count             INTEGER,
     output_path            TEXT,
     mathpix_processed_at   TEXT,
     llm_processed_at       TEXT,
@@ -103,6 +107,7 @@ class StateEntry:
     llm_status: str | None
     llm_validation_result: str | None
     figure_count: int | None
+    page_count: int | None
     output_path: str | None
     mathpix_processed_at: datetime | None
     llm_processed_at: datetime | None

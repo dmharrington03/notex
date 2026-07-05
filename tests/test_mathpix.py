@@ -682,7 +682,7 @@ def _mock_submit_poll_and_fetch_happy_path():
         return_value=httpx.Response(200, json={"pdf_id": "abc123"})
     )
     respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123").mock(
-        return_value=_status_response("completed", md="# Lecture")
+        return_value=_status_response("completed", md="# Lecture", num_pages=1)
     )
     respx.get(f"{MATHPIX_BASE_URL}/v3/converter/abc123").mock(
         return_value=_converter_status_response("completed")
@@ -714,6 +714,7 @@ def test_process_pdf_happy_path(polling_client, sleep_calls, fake_pdf, tmp_path)
     assert result.markdown_path.is_file()
     assert result.figures_dir == cache_dir / "figures"
     assert result.figure_count == 2
+    assert result.page_count == 1
     assert before <= result.processed_at <= after
     # Nothing here should have needed to sleep -- every poll response is
     # immediately terminal.
@@ -737,6 +738,37 @@ def test_process_pdf_uses_lecture_stem_from_pdf_path(polling_client, tmp_path):
     )
 
     assert result.markdown_path == cache_dir / "lecture_07.mathpix.md"
+
+
+@respx.mock
+def test_process_pdf_page_count_none_when_num_pages_missing(
+    polling_client, fake_pdf, tmp_path
+):
+    """A completed payload that unexpectedly omits num_pages should yield
+    page_count=None rather than raising (issue #22's best-effort
+    requirement)."""
+    respx.post(f"{MATHPIX_BASE_URL}/v3/pdf").mock(
+        return_value=httpx.Response(200, json={"pdf_id": "abc123"})
+    )
+    respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123").mock(
+        return_value=_status_response("completed", md="# Lecture")
+    )
+    respx.get(f"{MATHPIX_BASE_URL}/v3/converter/abc123").mock(
+        return_value=_converter_status_response("completed")
+    )
+    respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123.md.zip").mock(
+        return_value=httpx.Response(200, content=SAMPLE_MD_ZIP.read_bytes())
+    )
+
+    result = process_pdf(
+        fake_pdf,
+        tmp_path / "cache",
+        client=polling_client,
+        poll_interval_seconds=1,
+        max_poll_attempts=5,
+    )
+
+    assert result.page_count is None
 
 
 @respx.mock

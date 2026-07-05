@@ -87,6 +87,13 @@ RunSummary also aggregates this run's LLM token usage / cost estimate
 summed from each LLMResult's llm_input_tokens/llm_output_tokens/
 llm_cost_estimate (a None from any individual LLMResult contributes 0 to
 the running total rather than breaking accumulation).
+
+RunSummary also aggregates total_pages_processed (issue #22) -- a per-run
+total of pages actually OCR'd this run, summed only from files classified
+NEW/CHANGED/RETRY that succeeded (ProcessResult.page_count, or 0 if
+unexpectedly None). Skipped/unchanged files are not re-counted, since
+their pages were already tallied in whichever prior run actually
+processed them -- this avoids double-counting across runs.
 """
 
 from __future__ import annotations
@@ -150,6 +157,7 @@ class RunSummary:
     total_input_tokens: int = 0
     total_output_tokens: int = 0
     total_cost_estimate: float = 0.0
+    total_pages_processed: int = 0
 
 
 @dataclass(frozen=True)
@@ -164,6 +172,7 @@ class _FileOutcome:
     input_tokens: int = 0
     output_tokens: int = 0
     cost_estimate: float = 0.0
+    pages: int = 0
 
 
 def _process_file(
@@ -244,6 +253,7 @@ def _process_file(
             mathpix_status="success",
             mathpix_pdf_id=process_result.pdf_id,
             figure_count=process_result.figure_count,
+            page_count=process_result.page_count,
             mathpix_processed_at=process_result.processed_at,
             llm_model=llm_result.llm_model,
             llm_prompt_version=llm_result.llm_prompt_version,
@@ -262,6 +272,7 @@ def _process_file(
             input_tokens=llm_result.llm_input_tokens or 0,
             output_tokens=llm_result.llm_output_tokens or 0,
             cost_estimate=llm_result.llm_cost_estimate or 0.0,
+            pages=process_result.page_count or 0,
         )
 
     # Classification.UNCHANGED from here on.
@@ -361,7 +372,8 @@ def run(
 
     Returns:
         A RunSummary with processed/skipped/errors/ungrouped/llm_reprocessed
-        counts.
+        counts (plus this run's aggregated LLM token/cost totals and
+        total_pages_processed).
     """
     owns_client = client is None
     if client is None:
@@ -380,6 +392,7 @@ def run(
     total_input_tokens = 0
     total_output_tokens = 0
     total_cost_estimate = 0.0
+    total_pages_processed = 0
 
     try:
         if target_source_path is not None:
@@ -414,6 +427,7 @@ def run(
             total_input_tokens += outcome.input_tokens
             total_output_tokens += outcome.output_tokens
             total_cost_estimate += outcome.cost_estimate
+            total_pages_processed += outcome.pages
         else:
             results_by_course = discover_pdfs(paths_config.input_root, conn)
 
@@ -448,6 +462,7 @@ def run(
                     total_input_tokens += outcome.input_tokens
                     total_output_tokens += outcome.output_tokens
                     total_cost_estimate += outcome.cost_estimate
+                    total_pages_processed += outcome.pages
     finally:
         if owns_client:
             client.close()
@@ -461,20 +476,22 @@ def run(
         total_input_tokens=total_input_tokens,
         total_output_tokens=total_output_tokens,
         total_cost_estimate=total_cost_estimate,
+        total_pages_processed=total_pages_processed,
     )
 
 
 def _print_summary(summary: RunSummary) -> None:
     print()
     print("Done.")
-    print(f"  Processed:       {summary.processed}")
-    print(f"  Skipped:         {summary.skipped}")
-    print(f"  Errors:          {summary.errors}")
-    print(f"  Ungrouped:       {summary.ungrouped}")
-    print(f"  LLM reprocessed: {summary.llm_reprocessed}")
-    print(f"  Input tokens:    {summary.total_input_tokens}")
-    print(f"  Output tokens:   {summary.total_output_tokens}")
-    print(f"  Est. cost:       ${summary.total_cost_estimate:.4f}")
+    print(f"  {'Documents processed:':<21}{summary.processed}")
+    print(f"  {'Pages processed:':<21}{summary.total_pages_processed}")
+    print(f"  {'Skipped:':<21}{summary.skipped}")
+    print(f"  {'Errors:':<21}{summary.errors}")
+    print(f"  {'Ungrouped:':<21}{summary.ungrouped}")
+    print(f"  {'LLM reprocessed:':<21}{summary.llm_reprocessed}")
+    print(f"  {'Input tokens:':<21}{summary.total_input_tokens}")
+    print(f"  {'Output tokens:':<21}{summary.total_output_tokens}")
+    print(f"  {'Est. cost:':<21}${summary.total_cost_estimate:.4f}")
 
 
 def main(argv: list[str] | None = None) -> int:

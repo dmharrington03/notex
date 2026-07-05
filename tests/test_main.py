@@ -51,6 +51,12 @@ Covered here (issue #18):
     - run(): target_source_path combined with force_llm=True reprocesses
       just that one file's LLM stage, leaving a sibling file's state.db row
       (including its llm_processed_at) completely untouched.
+
+Covered here (issue #22 — page_count tracking):
+    - A successfully-processed file's state.db row gets page_count from the
+      mocked completed payload's num_pages field, and RunSummary's
+      total_pages_processed reflects the sum of pages actually processed
+      this run (0 for any skip/LLM-only-rerun/failure path).
 """
 
 from __future__ import annotations
@@ -212,7 +218,7 @@ def _mock_happy_path(pdf_id: str = "abc123"):
         return_value=httpx.Response(200, json={"pdf_id": pdf_id})
     )
     respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/{pdf_id}").mock(
-        return_value=httpx.Response(200, json={"status": "completed"})
+        return_value=httpx.Response(200, json={"status": "completed", "num_pages": 2})
     )
     respx.get(f"{MATHPIX_BASE_URL}/v3/converter/{pdf_id}").mock(
         return_value=_converter_status_response("completed")
@@ -245,6 +251,7 @@ def test_run_processes_new_file_and_records_success(client, tmp_path, monkeypatc
         total_input_tokens=100,
         total_output_tokens=50,
         total_cost_estimate=0.001,
+        total_pages_processed=2,
     )
 
     entry = get_entry(conn, str(pdf_path.resolve()))
@@ -252,6 +259,7 @@ def test_run_processes_new_file_and_records_success(client, tmp_path, monkeypatc
     assert entry.mathpix_status == "success"
     assert entry.mathpix_pdf_id == "abc123"
     assert entry.figure_count == 2
+    assert entry.page_count == 2
     assert entry.mathpix_processed_at is not None
     stat = pdf_path.stat()
     assert entry.source_mtime == stat.st_mtime
@@ -405,7 +413,7 @@ def test_run_continues_after_one_file_fails(client, tmp_path, monkeypatch):
         ]
     )
     respx.get(f"{MATHPIX_BASE_URL}/v3/pdf/abc123").mock(
-        return_value=httpx.Response(200, json={"status": "completed"})
+        return_value=httpx.Response(200, json={"status": "completed", "num_pages": 3})
     )
     respx.get(f"{MATHPIX_BASE_URL}/v3/converter/abc123").mock(
         return_value=_converter_status_response("completed")
@@ -426,16 +434,19 @@ def test_run_continues_after_one_file_fails(client, tmp_path, monkeypatch):
         total_input_tokens=100,
         total_output_tokens=50,
         total_cost_estimate=0.001,
+        total_pages_processed=3,
     )
 
     bad_entry = get_entry(conn, str(bad_pdf.resolve()))
     assert bad_entry.mathpix_status == "failed"
     assert bad_entry.mathpix_pdf_id is None
+    assert bad_entry.page_count is None
     assert bad_entry.llm_status is None
 
     good_entry = get_entry(conn, str(good_pdf.resolve()))
     assert good_entry.mathpix_status == "success"
     assert good_entry.mathpix_pdf_id == "abc123"
+    assert good_entry.page_count == 3
     assert good_entry.llm_status == "success"
 
 
@@ -479,6 +490,7 @@ def test_run_second_pass_is_full_noop(client, tmp_path, monkeypatch):
         total_input_tokens=100,
         total_output_tokens=50,
         total_cost_estimate=0.001,
+        total_pages_processed=2,
     )
     assert submit_route.call_count == 1
 
@@ -519,11 +531,13 @@ def test_run_target_source_path_restricts_to_one_file_in_course(client, tmp_path
         total_input_tokens=100,
         total_output_tokens=50,
         total_cost_estimate=0.001,
+        total_pages_processed=2,
     )
 
     target_entry = get_entry(conn, str(target_pdf.resolve()))
     assert target_entry is not None
     assert target_entry.mathpix_status == "success"
+    assert target_entry.page_count == 2
     assert target_entry.llm_status == "success"
 
     markdown_path = paths_config.cache_dir / "class_1" / "lecture_01.mathpix.md"
@@ -562,11 +576,13 @@ def test_run_target_source_path_force_processes_ungrouped_file(client, tmp_path,
         total_input_tokens=100,
         total_output_tokens=50,
         total_cost_estimate=0.001,
+        total_pages_processed=2,
     )
 
     entry = get_entry(conn, str(stray_pdf.resolve()))
     assert entry is not None
     assert entry.mathpix_status == "success"
+    assert entry.page_count == 2
     assert entry.llm_status == "success"
 
     markdown_path = paths_config.cache_dir / "_ungrouped" / "stray.mathpix.md"
@@ -654,6 +670,7 @@ def test_main_returns_zero_and_prints_summary_even_with_errors(monkeypatch, tmp_
             total_input_tokens=1234,
             total_output_tokens=987,
             total_cost_estimate=0.0041,
+            total_pages_processed=7,
         ),
     )
 
@@ -661,8 +678,9 @@ def test_main_returns_zero_and_prints_summary_even_with_errors(monkeypatch, tmp_
 
     out = capsys.readouterr().out
     assert exit_code == 0
-    assert "Processed:       1" in out
-    assert "Input tokens:    1234" in out
-    assert "Output tokens:   987" in out
-    assert "Est. cost:       $0.0041" in out
-    assert "Errors:          1" in out
+    assert "Documents processed: 1" in out
+    assert "Pages processed:     7" in out
+    assert "Input tokens:        1234" in out
+    assert "Output tokens:       987" in out
+    assert "Est. cost:           $0.0041" in out
+    assert "Errors:              1" in out

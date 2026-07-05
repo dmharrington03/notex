@@ -372,6 +372,7 @@ def _state_entry(**overrides) -> StateEntry:
         llm_status=None,
         llm_validation_result=None,
         figure_count=0,
+        page_count=None,
         output_path=None,
         mathpix_processed_at=None,
         llm_processed_at=None,

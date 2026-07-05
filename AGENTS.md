@@ -1409,6 +1409,93 @@ validation is what unblocks pushing to `origin`.
     repo root) so `from src.mathpix import ...` resolves without needing
     the project installed as a package or invoked via `python -m`.
 
+- **Issue #22 (page_count tracking in state.db + run summary total) —
+  VALIDATED — complete.** A `phase-1`-labeled followup opened after Phase 1
+  was already validated/closed (#1-#6) —
+  same shape as issue #21's followup to Phase 3. Implemented across
+  `src/mathpix.py`, `src/state.py`, and `src/main.py`; tested in
+  `tests/test_mathpix.py` (2 cases — happy path now asserts
+  `ProcessResult.page_count`, plus a new case confirming a completed
+  payload missing `num_pages` yields `page_count=None` rather than
+  raising), `tests/test_state.py` (1 new dedicated partial-upsert-preserves
+  case, matching the issue #21 precedent, plus the existing round-trip/
+  no-optional-fields/other-columns-preserved cases extended to cover
+  `page_count`), and `tests/test_main.py` (existing mocked "completed"
+  payloads extended with `num_pages`, `RunSummary.total_pages_processed`
+  and `StateEntry.page_count` asserted alongside the pre-existing
+  token/cost assertions) — no network, full suite is 125 passing.
+  Implementation matched the issue body's pre-confirmed design exactly, no
+  further decisions needed during implementation:
+  - **`process_pdf()` now captures `poll_until_complete()`'s return value**
+    (previously discarded entirely) and reads
+    `payload.get("num_pages")` into a new `ProcessResult.page_count: int |
+    None` field, placed immediately alongside `figure_count` — no new API
+    call, per the issue's explicit design. Best-effort: a completed
+    payload unexpectedly missing `num_pages` yields `page_count=None`
+    rather than raising `MathpixError`, mirroring issue #21's
+    `llm_input_tokens`/`llm_output_tokens` best-effort precedent.
+  - **`state.db` gained one new nullable column, `page_count INTEGER`**,
+    added to `_VALUE_COLUMNS`, `_CREATE_TABLE_SQL`, and `StateEntry`
+    immediately alongside `figure_count` — same "no schema-migration
+    logic, delete-and-rebuild" convention as every prior column addition
+    (issue #21's three columns, etc.).
+  - **Only written on the actionable NEW/CHANGED/RETRY success path** in
+    `_process_file()`'s `upsert_entry()` call, exactly mirroring
+    `figure_count`'s existing treatment — left untouched on a Mathpix
+    failure (no completed payload to read it from) and on the
+    UNCHANGED-file LLM-only-rerun path (no Mathpix call happens there, so
+    partial-upsert semantics mean the column just keeps whatever a prior
+    successful run already wrote).
+  - **`RunSummary` gained `total_pages_processed: int = 0`** — a
+    **per-run** total (pages actually OCR'd *this* run only), accumulated
+    via a new `_FileOutcome.pages` field populated only on the actionable
+    path (`process_result.page_count or 0`) — the LLM-only-rerun path's
+    `_FileOutcome` doesn't set `pages` (defaults to `0`), consistent with
+    "no Mathpix call, nothing new to report" above. Flows through both the
+    normal per-course loop and the `target_source_path` branch since both
+    share `_process_file()`. `_print_summary()` prints a new
+    `Pages processed:` line, placed directly under `Processed:` (later
+    renamed `Documents processed:` — see the follow-up bullet below; a
+    deliberate placement choice, confirmed with the user, since page count
+    is the natural per-file-count companion metric to `Processed`, ahead
+    of the token/cost lines).
+  - Skipped/fully-unchanged files are deliberately *not* re-counted into
+    `total_pages_processed` (their pages were already tallied whichever
+    prior run actually processed them) — avoids double-counting across
+    runs, same reasoning as issue #21's per-run (not all-time) token/cost
+    totals.
+  - **Real-API validation (per AGENTS.md's issue #12/#20 precedent) — done.**
+    The local `state.db` was deleted (per the user's explicit go-ahead) and
+    `python -m src.main` was run for real against `notes_raw/class_1`'s two
+    PDFs (2 of a self-imposed 5-run budget for this validation session).
+    **Cold run:** both files classified `new`, processed through Mathpix +
+    LLM successfully — console summary `Documents processed: 2, Pages
+    processed: 2, Skipped: 0, Errors: 0`. `state.db` recorded
+    `page_count=1` for both rows (each source PDF is genuinely one page),
+    alongside real `mathpix_pdf_id`s, correct `figure_count` (0 for
+    `lecture_01.pdf`, 1 for `lecture_02.pdf`), and successful
+    `llm_status="success"` with all four validation checks passing.
+    **Immediate rerun** (2nd of the 5-run budget): true no-op — `Documents
+    processed: 0, Pages processed: 0, Skipped: 2`, and every `state.db`
+    column (including `page_count` and both `*_processed_at` timestamps)
+    was confirmed byte-identical to the cold run, i.e. no re-processing,
+    no re-tallying of `total_pages_processed` for already-processed files.
+    This confirms `ProcessResult.page_count` reads a real `num_pages`
+    value from the live Mathpix API (not just mocked test payloads) and
+    that the per-run (not cumulative) `total_pages_processed` semantics
+    hold against real data. Only 2 of the 5 allotted runs were used.
+  - **Follow-up (post-implementation): `_print_summary()`'s `Processed:`
+    label was renamed to `Documents processed:`**, at the user's request,
+    to read unambiguously alongside the new `Pages processed:` line
+    (`Processed` alone was ambiguous once both a document count and a page
+    count appear in the same summary). All eight summary lines' label
+    widths were made consistent (`f"  {{label:<21}}{{value}}"`) rather than
+    hand-spaced per line, so the columns stay aligned regardless of label
+    length. Only the printed label changed -- `RunSummary.processed` /
+    `_FileOutcome.processed` (the field names) are untouched. Updated
+    `tests/test_main.py`'s `test_main_returns_zero_and_prints_summary_even_with_errors`
+    assertions to match the new label text and column widths.
+
 ## Mathpix API notes
 
 These correct assumptions in the original planning spec, verified against

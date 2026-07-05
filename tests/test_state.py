@@ -7,6 +7,8 @@ Covered here (issue #7 — state.db schema + CRUD):
     - upsert_entry() inserts a new row, round-tripping all field types
       (including datetime <-> ISO 8601 string)
     - upsert_entry() partial updates leave previously-set columns intact
+      (including issue #21's llm_input_tokens/llm_output_tokens/
+      llm_cost_estimate and issue #22's page_count columns)
     - upsert_entry() rejects unknown field names
 
 No respx/mocking needed - all sqlite, using tmp_path files.
@@ -81,6 +83,7 @@ def test_upsert_entry_inserts_and_round_trips_all_fields(tmp_path):
         llm_status="success",
         llm_validation_result="ok",
         figure_count=2,
+        page_count=3,
         output_path="/vault/class_1/Lecture 01.md",
         mathpix_processed_at=processed_at,
         llm_processed_at=processed_at,
@@ -104,6 +107,7 @@ def test_upsert_entry_inserts_and_round_trips_all_fields(tmp_path):
         llm_status="success",
         llm_validation_result="ok",
         figure_count=2,
+        page_count=3,
         output_path="/vault/class_1/Lecture 01.md",
         mathpix_processed_at=processed_at,
         llm_processed_at=processed_at,
@@ -134,6 +138,7 @@ def test_upsert_entry_insert_with_no_optional_fields(tmp_path):
         llm_status=None,
         llm_validation_result=None,
         figure_count=None,
+        page_count=None,
         output_path=None,
         mathpix_processed_at=None,
         llm_processed_at=None,
@@ -158,6 +163,7 @@ def test_upsert_entry_partial_update_preserves_other_columns(tmp_path):
         mathpix_pdf_id="pdf_xyz",
         mathpix_status="success",
         figure_count=1,
+        page_count=2,
         mathpix_processed_at=mathpix_processed_at,
     )
 
@@ -173,6 +179,7 @@ def test_upsert_entry_partial_update_preserves_other_columns(tmp_path):
     assert entry.mathpix_pdf_id == "pdf_xyz"
     assert entry.mathpix_status == "success"
     assert entry.figure_count == 1
+    assert entry.page_count == 2
     assert entry.mathpix_processed_at == mathpix_processed_at
     assert entry.llm_status == "success"
     assert entry.llm_model == "gpt-4o-mini"
@@ -205,6 +212,33 @@ def test_upsert_entry_partial_update_preserves_token_and_cost_columns(tmp_path):
     assert entry.llm_cost_estimate == 0.0056
     assert entry.mathpix_status == "success"
     assert entry.mathpix_pdf_id == "pdf_xyz"
+
+
+def test_upsert_entry_partial_update_preserves_page_count_column(tmp_path):
+    # Issue #22's page_count column follows the same partial-upsert
+    # convention as every other column: a later, unrelated call must not
+    # null it out.
+    conn = init_db(tmp_path / "state.db")
+    source_path = "/notes_raw/class_1/lecture_01.pdf"
+
+    upsert_entry(
+        conn,
+        source_path,
+        mathpix_status="success",
+        mathpix_pdf_id="pdf_xyz",
+        page_count=5,
+    )
+
+    # A later call touching only llm_* fields must not disturb page_count.
+    upsert_entry(conn, source_path, llm_status="success", llm_model="gpt-4o-mini")
+
+    entry = get_entry(conn, source_path)
+
+    assert entry.page_count == 5
+    assert entry.mathpix_status == "success"
+    assert entry.mathpix_pdf_id == "pdf_xyz"
+    assert entry.llm_status == "success"
+    assert entry.llm_model == "gpt-4o-mini"
 
 
 def test_upsert_entry_update_overwrites_previous_value(tmp_path):
