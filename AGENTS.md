@@ -333,12 +333,35 @@ the user so far:**
 
 ### Phase 5 progress
 
-**Phase 5 status: planned, issues opened, implementation not yet started.**
-Scoped into 7 issues (#26-#32, `phase-5` label), matching the granularity of
-Phase 3/4's issue breakdown:
+**Phase 5 status: in progress.** Scoped into 7 issues (#26-#32, `phase-5`
+label), matching the granularity of Phase 3/4's issue breakdown:
 
-- **#26** — `src/config.py`: extend `load_paths_config()` to read
-  `paths.vault_root` (required, no default).
+- **Issue #26 (`src/config.py`: extend `load_paths_config()` to read
+  `paths.vault_root`) — done.** Implemented in `src/config.py`, tested in
+  `tests/test_config.py` (2 new cases — `vault_root` present/round-tripped
+  through the happy-path and optional-fallback tests, plus a new dedicated
+  `test_paths_config_raises_when_vault_root_missing_or_blank` mirroring
+  `input_root`'s existing required-field coverage — full suite is 139
+  passing). Matched the issue's pre-confirmed design exactly:
+  - `PathsConfig` gained `vault_root: Path`, immediately after
+    `input_root`.
+  - **Required, no default** — same treatment as `input_root`: a missing
+    `config.yaml`, a missing `paths:` section, or a missing/blank
+    `vault_root` key all raise `ConfigError`. Confirmed with the user:
+    when *both* `input_root` and `vault_root` are missing/blank, the
+    raised error reports `input_root` first (checked in that order, no
+    change needed to `test_paths_config_raises_when_paths_section_missing`,
+    which already raises on the file/section check before either field is
+    read).
+  - No filesystem validation (existence check, etc.) added — stays a thin
+    config loader, matching the module's existing convention.
+  - `config.yaml`/`config.example.yaml` needed no changes — both already
+    had `paths.vault_root` populated since Phase 2 (added ahead of when
+    any code read it, per AGENTS.md's original Phase 2/4 notes).
+  - `tests/test_main.py`'s `_make_paths_config()` helper (constructs
+    `PathsConfig` directly, bypassing `load_paths_config()`) was updated
+    to pass `vault_root=tmp_path / "vault"`, since the field is now
+    required with no dataclass default.
 - **#27** — `src/postprocess.py`: `parse_lecture_filename()` +
   `build_frontmatter()`.
 - **#28** — `src/postprocess.py`: `scan_delimiter_issues()` warning scan.

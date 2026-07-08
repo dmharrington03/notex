@@ -4,17 +4,15 @@ Phase 1/2/3 config loading.
 Responsible for loading MATHPIX_APP_ID / MATHPIX_APP_KEY from .env, the
 mathpix: poll_interval_seconds / max_poll_attempts settings from config.yaml
 (falling back to hardcoded defaults if config.yaml or the section/keys are
-absent), the paths: input_root / cache_dir / state_db settings from
-config.yaml (input_root is required, cache_dir/state_db fall back to
-hardcoded defaults), and the llm: model / prompt_version /
+absent), the paths: input_root / vault_root / cache_dir / state_db settings
+from config.yaml (input_root/vault_root are required, cache_dir/state_db
+fall back to hardcoded defaults), and the llm: model / prompt_version /
 validation.min_length_ratio / validation.max_length_ratio settings from
 config.yaml (all optional, same fully-optional fallback pattern as the
 mathpix: section).
 
-paths.vault_root (already present in config.yaml/config.example.yaml) stays
-unread until Phase 4/5. Full config.yaml wiring for the remaining sections
-(per-course tags, etc.) arrives in Phase 6 — kept out of scope here
-intentionally.
+Full config.yaml wiring for the remaining sections (per-course tags, etc.)
+arrives in Phase 6 — kept out of scope here intentionally.
 """
 
 from __future__ import annotations
@@ -68,6 +66,7 @@ class MathpixPollingConfig:
 @dataclass(frozen=True)
 class PathsConfig:
     input_root: Path
+    vault_root: Path
     cache_dir: Path
     state_db: Path
 
@@ -152,8 +151,8 @@ def load_mathpix_polling_config(
 
 def load_paths_config(config_path: str | Path | None = None) -> PathsConfig:
     """
-    Load the paths: input_root / cache_dir / state_db settings from
-    config.yaml.
+    Load the paths: input_root / vault_root / cache_dir / state_db settings
+    from config.yaml.
 
     Args:
         config_path: optional explicit path to config.yaml. If not given,
@@ -162,17 +161,16 @@ def load_paths_config(config_path: str | Path | None = None) -> PathsConfig:
             the CLI from the repo root.
 
     Unlike load_mathpix_polling_config(), config.yaml itself is *not*
-    optional here: paths.input_root has no sensible default, so a missing
-    file, a missing paths: section, or a missing/blank input_root key all
-    raise ConfigError. cache_dir/state_db are optional and independently
-    fall back to DEFAULT_CACHE_DIR/DEFAULT_STATE_DB when absent.
-
-    paths.vault_root is deliberately not read here (unneeded until
-    Phase 4/5) even though it's already present in config.yaml.
+    optional here: paths.input_root and paths.vault_root have no sensible
+    default, so a missing file, a missing paths: section, or a missing/blank
+    input_root or vault_root key all raise ConfigError. cache_dir/state_db
+    are optional and independently fall back to
+    DEFAULT_CACHE_DIR/DEFAULT_STATE_DB when absent.
 
     Raises:
         ConfigError: if config.yaml is missing, the paths: section is
-            missing, or paths.input_root is missing/blank.
+            missing, or paths.input_root or paths.vault_root is
+            missing/blank (input_root is checked first).
     """
     path = Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
 
@@ -188,11 +186,16 @@ def load_paths_config(config_path: str | Path | None = None) -> PathsConfig:
     if not input_root:
         raise ConfigError(f"Missing required paths.input_root in {path}")
 
+    vault_root = str(paths_section.get("vault_root", "")).strip()
+    if not vault_root:
+        raise ConfigError(f"Missing required paths.vault_root in {path}")
+
     cache_dir = paths_section.get("cache_dir") or DEFAULT_CACHE_DIR
     state_db = paths_section.get("state_db") or DEFAULT_STATE_DB
 
     return PathsConfig(
         input_root=Path(input_root),
+        vault_root=Path(vault_root),
         cache_dir=Path(cache_dir),
         state_db=Path(state_db),
     )

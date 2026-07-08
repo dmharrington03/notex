@@ -90,6 +90,7 @@ def _make_paths_config(tmp_path: Path) -> PathsConfig:
     input_root.mkdir()
     return PathsConfig(
         input_root=input_root,
+        vault_root=tmp_path / "vault",
         cache_dir=tmp_path / "_cache",
         state_db=tmp_path / "state.db",
     )
