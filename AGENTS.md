@@ -156,9 +156,20 @@ newly-requested features (this planning round) naturally belong there.
 
 Scope: copy each processed file's cached figures
 (`_cache/{course}/figures/*.jpg`) into `vault/{course}/figures/`, and rewrite
-the LLM-cleaned (or raw-fallback) Markdown's image references from the
-cache-relative `![](figures/...)` form into Obsidian's `![[filename.jpg]]`
-wikilink form.
+the LLM-cleaned (or raw-fallback) Markdown's cache-relative
+`![](figures/...)` image references to inject a numbered placeholder
+caption (and, optionally, a dark-mode marker) into the alt-text slot.
+
+**Correction to this section, per issue #24 (see its Phase 4 progress
+entry below for the full decision record):** this section originally
+called for rewriting `![](figures/...)` into Obsidian's `![[filename.jpg]]`
+wikilink form. That was overridden per explicit user direction during
+implementation — the actual, implemented behavior keeps standard Markdown
+`![alt](path)` syntax throughout; only the alt-text slot is rewritten
+(numbered `Figure N` caption, plus `@darkmode` when enabled), and the image
+path itself is left completely untouched. Every "wikilink" reference below
+in this section describes the original (superseded) plan, not the
+implemented behavior.
 
 - Likely new module `src/figures.py` (matches docs/spec.md's original file
   layout) — a figure-copy function and a Markdown image-reference rewriter.
@@ -1841,8 +1852,10 @@ notes, one hand-drawn figure) — see `_cache/smoke_test/lecture_02.mathpix.md`
   `fetch_and_extract()` figure-handling behavior established in issue #3.
   Mathpix supplied no alt text for the figure (empty `![]()`); Phase 4/5
   may want to decide whether to inject a placeholder caption (e.g.
-  "Figure 1") when rewriting these as Obsidian wikilinks, since empty alt
-  text isn't very useful on its own.
+  "Figure 1") into the alt-text slot, since empty alt text isn't very
+  useful on its own. (Resolved in issue #24 — see its Phase 4 progress
+  entry: implemented as a numbered caption injected into standard
+  Markdown `![alt](path)` syntax, not an Obsidian wikilink rewrite.)
 - **Systematic domain-vocabulary misreads, not just random noise:** the
   word "parity" was misread as "party" *consistently*, every single time
   it appeared (9 occurrences: "party ergenstate", "party odd", "party

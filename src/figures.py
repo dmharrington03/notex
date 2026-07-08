@@ -74,7 +74,7 @@ def copy_figures_to_vault(
     does not touch state.db at all.
 
     Returns a sorted list of the destination Paths actually written (not
-    a bare count), so callers such as issue #24's wikilink rewriter or
+    a bare count), so callers such as issue #24's reference rewriter or
     Phase 5's vault.py have the real filenames to work with.
     """
     cache_figures_dir = Path(cache_figures_dir)
