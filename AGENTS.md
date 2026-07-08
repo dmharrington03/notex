@@ -64,78 +64,60 @@ Dependencies are tracked in `environment.yml` (reproduce with
 
 ## Current Phase
 
-**Phase 5 — Post-processing (vault-facing) — VALIDATED, complete.** Scope
-was: YAML frontmatter injection, a final delimiter-balance warning scan
-(never auto-fix), and assembling + writing finished Markdown into
-`vault/{course}/Lecture NN.md`, per docs/spec.md Stage 5
-(corrected/detailed below). Phase 6 (full config wiring + end-to-end
-validation) is next up — not yet started/planned in detail beyond the
-"Remaining Work" outline below. See `docs/spec.md` for the full 7-phase
-roadmap (note: follow this file, AGENTS.md, not spec.md, where they
-disagree).
+**Phase 6 — Full config wiring + end-to-end validation — in progress.**
+Phase 5 is VALIDATED — complete (see "Phase 5" under "Phase Progress" below
+for its confirmed design/findings). Phase 6's scope: wire the remaining
+still-hardcoded config values (`output.base_tags`/`course_tags`,
+`output.date_format`, `output.figures_dark_mode_flag`, `naming.lecture_prefix`)
+into real `config.yaml` reads, then validate the complete pipeline
+end-to-end on real data. See `docs/spec.md` for the full original roadmap
+(note: follow this file, AGENTS.md, not spec.md, where they disagree).
 
-Concretely, this phase covers:
-- `src/config.py`: `load_paths_config()` reads `paths.vault_root` into
-  `PathsConfig`. **Required, no default** (same treatment as `input_root`).
-- `src/postprocess.py`:
-  - `parse_lecture_filename()` — extracts lecture number (regex
-    `lecture[_-]?(\d+)`, optional trailing `_<topic>`, case-insensitive) and
-    course name (PDF's parent folder name, underscores → spaces). Raises
-    `PostprocessError` on an unparseable filename rather than guessing.
-  - `build_frontmatter()` — assembles YAML frontmatter
-    (`title`/`course`/`date`/`lecture_number`/`tags`/`source_pdf`/
-    `processed`). `date` is sourced from the source PDF's filesystem mtime
-    only (no filename-date parsing). `tags` defaults to a hardcoded
-    `["lecture-notes"]` constant; real `output.base_tags`/`course_tags`
-    config wiring is Phase 6. Output-filename prefix ("Lecture") is likewise
-    a hardcoded default pending Phase 6.
-  - `scan_delimiter_issues()` — warn-only diagnostic scan (never
-    auto-fixes) of content about to be written to the vault: reuses
-    `validate_cleanup()`'s `$`/`$$` and `\left`/`\right` balance checks,
-    plus a check for literal `\(...\)`/`\[...\]` delimiters slipping
-    through. Returns warning strings; printing them is the caller's job.
-- `src/vault.py`: `write_lecture_note()` orchestrates
-  `parse_lecture_filename()` + Phase 4's `copy_figures_to_vault()`/
-  `rewrite_image_references()` + `build_frontmatter()`/
-  `scan_delimiter_issues()` into the final `vault/{course}/Lecture NN.md`,
-  overwriting unconditionally on rerun.
-- `src/state.py`: two new nullable columns — `vault_status`
-  (`"success"`/`"failed"`) and `vault_path`. Kept deliberately separate from
-  the existing `output_path` column, which keeps its Phase 3 meaning
-  unchanged (the cache-stage `.llm.md`/`.mathpix.md` path). The already-
-  reserved `vault_written_at` column (present since Phase 2, always `NULL`
-  until now) is populated for the first time.
-- `src/main.py`: wire `write_lecture_note()` in right after `cleanup_pdf()`
-  succeeds (or falls back) on the actionable NEW/CHANGED/RETRY path, **and**
-  on the UNCHANGED-file LLM-only-rerun path (reprocessed LLM content needs
-  to reach the vault too).
+**Scope correction — course index generation is permanently dropped, not
+deferred.** docs/spec.md's Stage 6 (`_index.md` per course, a regenerated
+Markdown table of lectures) and this file's own prior planning both
+described index generation as part of Phase 6. Per explicit user direction,
+**this feature is cancelled entirely** — no `_index.md` file, wikilink
+table, or per-course index regeneration will be built at any point in this
+project, in any future phase. This is a deliberate divergence from
+docs/spec.md, not a rewording — ignore spec.md's Stage 6 section going
+forward; it's retained in that file purely as historical/superseded
+reference.
 
-**Correction to docs/spec.md's Error Handling table:** spec.md's original
-wording for a malformed/unparseable filename is "skip file, do not add to
-state log" — written for a single-stage pipeline. By Phase 5, a file's
-Mathpix and LLM stages may already have succeeded and been recorded in
-`state.db` before vault-writing looks at the filename. Corrected behavior: a
-`PostprocessError` is caught per-file, `vault_status="failed"` is recorded,
-but that file's already-successful `mathpix_status`/`llm_status`/
-`output_path` are left untouched — a vault-write failure must never
-retroactively erase an earlier stage's recorded success. Counts toward
-`RunSummary.errors`; the run continues.
+Concretely, Phase 6 covers:
+- `src/config.py`: `load_output_config()` — reads `output.base_tags`,
+  `output.course_tags` (dict keyed by the **raw course folder name**,
+  underscores not converted to spaces; when present for a course, **fully
+  replaces** `base_tags` for that course, no union), `output.date_format`,
+  `output.figures_dark_mode_flag`. `load_naming_config()` — reads
+  `naming.lecture_prefix` (a **single global value**, no per-course
+  override). Both follow the fully-optional pattern already established by
+  `load_llm_config()`: a missing file/section/key silently falls back to
+  today's hardcoded defaults, never raises.
+- `src/postprocess.py`: `build_frontmatter()` gains a configurable
+  `date_format` param (replacing the hardcoded `DATE_FORMAT` constant) and
+  a configurable `lecture_prefix` param for the `title` field (replacing
+  `DEFAULT_LECTURE_PREFIX`); tag resolution (course_tags-overrides-
+  base_tags) is a separate helper, not a change to `build_frontmatter()`'s
+  existing `tags` param.
+- `src/vault.py`: `write_lecture_note()` gains a `lecture_prefix` param,
+  threaded to **both** the output filename and `build_frontmatter()`'s
+  title, so the two can never disagree with each other.
+- `src/main.py`: `run()` loads `OutputConfig`/`NamingConfig` internally
+  when not passed in (same optional-param pattern already used for
+  `llm_config`), threading both down through `_process_file()` /
+  `_write_to_vault()` into `write_lecture_note()`.
+- Real-data validation pass against `notes_raw/class_1` with a populated
+  `output:`/`naming:` config (including a `course_tags` override), same
+  precedent as every prior phase's closing validation issue.
 
-Still out of scope this phase: course index generation (`_index.md` per
-course, Stage 6), and remaining `config.yaml` sections nothing reads yet
-(`output.base_tags`/`course_tags`, `naming.lecture_prefix`,
-`output.figures_dark_mode_flag`) — those are Phase 6. Also out of scope: a
-`needs_vault_rewrite()`-style independent staleness/retry check for a
-`vault_status == "failed"` row — currently only retried incidentally
-whenever that file's Mathpix+LLM stage runs again; a possible fast-follow.
-
-Tracked in issues #26-#32 (`phase-5` label). See "Phase 5 progress" below
-for status.
+Tracked in issues #33-#38 (`phase-6` label). See "Phase Progress" below for
+status as issues complete.
 
 ## Remaining Work — Phases 4-7 Plan
 
-Living, forward-looking plan for the rest of the pipeline. Phase 4 is
-VALIDATED — complete; Phase 5 is current (see "Current Phase" above for the
+Living, forward-looking plan for the rest of the pipeline. Phase 5 is
+VALIDATED — complete; Phase 6 is current (see "Current Phase" above for the
 confirmed design). Phases 6-7 below are still unimplemented forward-looking
 plan only. Phase numbers match docs/spec.md's original roadmap.
 
@@ -178,16 +160,19 @@ design.
 
 Scope: wire up the remaining `config.yaml` sections nothing reads yet
 (`output.base_tags`/`course_tags`, `naming.lecture_prefix`, the new
-`output.figures_dark_mode_flag`), add course index generation, and validate
-the complete pipeline end-to-end on a real course.
+`output.figures_dark_mode_flag`), and validate the complete pipeline
+end-to-end on a real course. See "Current Phase" above for the full
+confirmed design and tracked issue numbers.
 
-- Course index generation (`_index.md` per course, Stage 6): always fully
-  regenerated (not incremental) after a course's files are processed, so it
-  stays correct even after reprocessing/renames. Likely lives alongside the
-  per-lecture writer in `src/vault.py`.
+**Course index generation is explicitly out of scope, permanently — not a
+Phase 6 deferral.** docs/spec.md's Stage 6 (`_index.md` per course) is
+cancelled per explicit user direction; see the "Current Phase" section
+above for the full correction note. Nothing in the codebase implements or
+plans for this, and no future phase revives it.
+
 - Real-data validation pass, same shape as prior phases' precedent: run for
   real against `notes_raw/class_1`, confirming idempotency extends
-  correctly to the new vault-writing/index stages.
+  correctly to the newly-wired config values.
 
 ### Phase 7 — CLI polish + new feature requests
 
@@ -263,6 +248,11 @@ planning.
 
 Brief status only — see each issue's GitHub comments for implementation
 narrative and real-data-validation findings.
+
+### Phase 6 (in progress, issues #33-#38)
+
+- **#33-#38 (not yet started)** — see "Current Phase" above for the full
+  scope. Status lines will be added here as each issue completes.
 
 ### Phase 5 (VALIDATED — complete, issues #26-#32)
 
@@ -465,7 +455,7 @@ notex/                      ← repo root
 │   ├── main.py             ← CLI orchestration entry point (RunSummary, run, main) — wires discovery + state.db + process_pdf() into a runnable pass over input_root
 │   ├── figures.py          ← figure copy-to-vault + Markdown image-reference caption rewriter (copy_figures_to_vault, rewrite_image_references)
 │   ├── postprocess.py      ← filename parsing + YAML frontmatter builder (parse_lecture_filename, build_frontmatter); delimiter-balance warning scan (scan_delimiter_issues)
-│   ├── vault.py            ← [Phase 5/6, not yet implemented] assembles + writes final per-lecture vault .md; course index generation
+│   ├── vault.py            ← assembles + writes final per-lecture vault .md (write_lecture_note)
 │   └── reporting.py        ← [Phase 7, not yet implemented] Reporter interface (PlainReporter/RichReporter) for progress UI
 ├── scripts/
 │   ├── smoke_test_mathpix.py   ← manual, real-API Mathpix validation
