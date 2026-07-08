@@ -162,7 +162,7 @@ wikilink form.
 
 - Likely new module `src/figures.py` (matches docs/spec.md's original file
   layout) — a figure-copy function and a Markdown image-reference rewriter.
-- **New feature — dark-mode figure alt text.** New `output.figures_dark_mode:
+- **New feature — dark-mode figure alt text.** New `output.figures_dark_mode_flag:
   true|false` key in `config.yaml` — confirmed as a **single global toggle**
   (no per-course override, matching the feature's stated simplicity). When
   enabled, this same rewrite step appends `@darkmode` to every figure's alt
@@ -173,8 +173,8 @@ wikilink form.
   `config.example.yaml` gets a matching commented-out key.
   - Also worth revisiting here per the Phase 1 smoke test findings: Mathpix
     supplies no alt text at all for figures — consider injecting a
-    placeholder caption (e.g. "Figure 1") when `figures_dark_mode` is off
-    too, so alt text isn't just empty.
+    placeholder caption (e.g. "Figure 1") when `figures_dark_mode_flag` is
+    off too, so alt text isn't just empty.
 
 ### Phase 5 — Post-processing (vault-facing)
 
@@ -195,8 +195,8 @@ finished Markdown into `vault/{course}/Lecture NN.md`.
 
 Scope: wire up the remaining `config.yaml` sections nothing reads yet
 (`output.base_tags`/`course_tags`, `naming.lecture_prefix`, the new
-`output.figures_dark_mode`), add course index generation, and validate the
-complete pipeline end-to-end on a real course.
+`output.figures_dark_mode_flag`), add course index generation, and validate
+the complete pipeline end-to-end on a real course.
 
 - Course index generation (`_index.md` per course, docs/spec.md Stage 6):
   always fully regenerated (not incremental) after a course's files are
@@ -345,10 +345,67 @@ the user so far:**
     scope.
   - **Returns a sorted `list[Path]` of the destination files actually
     written**, not a bare count — confirmed with the user as the more
-    useful shape for issue #24's wikilink rewriter and Phase 5's
+    useful shape for issue #24's reference rewriter and Phase 5's
     `vault.py` caller to consume directly.
   - Not yet exercised against real cached figures — that's issue #25's
     real-data validation scope, run after #24 also lands.
+
+- **Issue #24 (`src/figures.py`: Markdown image-reference caption
+  rewriter + dark mode + placeholder alt text) — done.** Implemented in
+  `src/figures.py`, tested in `tests/test_figures.py` (8 new pure-string
+  cases — single/multiple refs, dark mode, same-image-twice numbering,
+  non-figures/ content untouched, discarded existing alt text, no-op on no
+  references — no mocking, no network, full suite is 138 passing).
+  **Significant deviation from the issue's original text, confirmed with
+  the user during implementation:** the issue as written called for
+  rewriting `![](figures/...)` references into Obsidian's `![[filename.jpg]]`
+  wikilink form. Per explicit user direction, this was overridden to keep
+  **standard Markdown `![alt](path)` syntax instead** — only the
+  alt-text slot is rewritten; the underlying design goals (numbered
+  placeholder caption, dark-mode marker) are otherwise implemented exactly
+  as scoped. Decisions made:
+  - `rewrite_image_references(markdown_text, dark_mode=False) -> str`
+    matches the issue's exact signature. Internally uses a new
+    `_FIGURE_REF_PATTERN` regex (`!\[[^\]]*\]\((figures/[^)\s]+)\)`) — same
+    `![alt](path)` shape as `fetch_and_extract()`'s existing image-reference
+    parsing (`src/mathpix.py`, issue #3), but scoped specifically to the
+    `figures/` prefix, per the issue's explicit requirement that only
+    recognized `![](figures/...)` references are touched. Everything else
+    in the Markdown (prose, math, headings, non-`figures/` image
+    references such as an external URL) is left byte-for-byte untouched.
+  - **The image path itself is left completely untouched** — confirmed
+    with the user as the specific consequence of dropping the wikilink
+    approach: `figures/lecture_02_fig_001.jpg` stays exactly that, since
+    it already correctly resolves relative to where Phase 5 will write
+    the vault note (`vault/{course}/Lecture NN.md` sitting alongside
+    `vault/{course}/figures/`). Only the alt-text slot changes:
+    `![](figures/x.jpg)` → `![Figure 1](figures/x.jpg)`.
+  - **Any pre-existing alt text is unconditionally discarded and replaced**
+    with the numbered placeholder caption — Mathpix supplies no alt text
+    at all in practice (`![]()`), so this is a non-issue in real output,
+    but the function doesn't attempt to preserve/append to whatever alt
+    text (if any) happened to be there.
+  - **Caption numbering is per-occurrence, not per-unique-path** —
+    confirmed with the user: a plain sequential counter
+    (`itertools.count(1)`) advances on every regex match in document
+    order, so if the same image file is (unusually) referenced twice, each
+    occurrence still gets its own incrementing number (`Figure 1`,
+    `Figure 2`, ...) rather than sharing one — matches the issue's literal
+    "numbered by order of appearance in the document" wording and needs no
+    path-tracking bookkeeping.
+  - **Combined dark-mode syntax, confirmed with the user:**
+    `" @darkmode"` is appended directly to the caption inside the same
+    alt-text slot, space-separated — e.g. `![Figure 1 @darkmode](figures/x.jpg)`.
+  - `config.yaml`/`config.example.yaml` both gained a new commented-out
+    `output:` section (`figures_dark_mode_flag: false`), documenting the
+    intent per AGENTS.md's own Phase 4 bullet — `dark_mode` stays a plain
+    function parameter here; wiring a real `load_output_config()` reader
+    and threading the config value through an actual call site is still
+    deferred to Phase 6, per the issue's explicit scope note. (Key renamed
+    from an original `figures_dark_mode` to `figures_dark_mode_flag`,
+    per user request after initial implementation.)
+  - Not yet exercised against real cached `.llm.md`/`.mathpix.md` output —
+    that's issue #25's real-data validation scope, run after this issue.
 
 ### Phase 3 progress
 
@@ -1880,7 +1937,7 @@ notex/                      ← repo root
 │   ├── discovery.py        ← per-file two-tier change classification + recursive multi-course walk (Classification, ClassificationResult, classify_pdf, compute_sha256, discover_pdfs, UNGROUPED_COURSE_KEY)
 │   ├── llm.py              ← LLM cleanup client + prompt loading + orchestration (LLMClient, LLMError, load_prompt_text, validate_cleanup, cleanup_pdf, needs_llm_reprocessing — issues #15-#17)
 │   ├── main.py             ← CLI orchestration entry point (RunSummary, run, main) — wires discovery + state.db + process_pdf() into a runnable pass over input_root
-│   ├── figures.py          ← figure copy-to-vault (copy_figures_to_vault, issue #23); Markdown image-reference wikilink rewriter [Phase 4, issue #24, not yet implemented]
+│   ├── figures.py          ← figure copy-to-vault + Markdown image-reference caption rewriter (copy_figures_to_vault, rewrite_image_references — issues #23-#24)
 │   ├── postprocess.py      ← [Phase 5, not yet implemented] YAML frontmatter builder + delimiter-balance warning scan
 │   ├── vault.py            ← [Phase 5/6, not yet implemented] assembles + writes final per-lecture vault .md; course index generation
 │   └── reporting.py        ← [Phase 7, not yet implemented] Reporter interface (PlainReporter/RichReporter) for progress UI

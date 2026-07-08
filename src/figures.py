@@ -1,26 +1,42 @@
 """
-Figure handling (vault-facing) — Phase 4, issue #23.
+Figure handling (vault-facing) — Phase 4, issues #23-#24.
 
-Copies a course's cached Mathpix figures into the Obsidian vault, and (a
-later issue) rewrites the LLM-cleaned/raw-fallback Markdown's cache-relative
-image references into Obsidian wikilink form.
+Copies a course's cached Mathpix figures into the Obsidian vault, and
+rewrites the LLM-cleaned/raw-fallback Markdown's cache-relative image
+references to add a numbered placeholder caption (and an optional dark-mode
+marker).
 
     - copy_figures_to_vault()     copies every file from a course's cached
                                    figures/ dir into vault/{course}/figures/
+    - rewrite_image_references()  injects a numbered "Figure N" caption (and
+                                   optionally " @darkmode") into each
+                                   ![](figures/...) reference's alt-text slot
 
 Implementation status:
     - copy_figures_to_vault()      implemented (issue #23)
-    - rewrite_image_references()   not yet implemented (issue #24)
+    - rewrite_image_references()   implemented (issue #24)
 
 Deliberately no config.py reading / vault_root lookup here — both functions
-take explicit source/dest Path params, matching cleanup_pdf()'s
-dest_dir-as-param precedent from Phase 3 (src/llm.py). Real wiring of
-paths_config.vault_root into an actual call site is Phase 5/6's job.
+take explicit source/dest Path params (or a plain dark_mode bool), matching
+cleanup_pdf()'s dest_dir-as-param precedent from Phase 3 (src/llm.py). Real
+wiring of paths_config.vault_root / output.figures_dark_mode_flag into an actual
+call site is Phase 5/6's job.
+
+Note on issue #24's implementation: the issue as originally written called
+for rewriting references into Obsidian's ![[filename.jpg]] wikilink form.
+Per explicit user direction during implementation, this was overridden to
+keep standard Markdown ![alt](path) syntax instead -- only the alt-text
+slot is rewritten (to the numbered placeholder caption, plus the darkmode
+marker when requested); the path itself is left completely untouched, since
+it already correctly points at vault/{course}/figures/... relative to where
+Phase 5 will write the note file.
 """
 
 from __future__ import annotations
 
+import re
 import shutil
+from itertools import count
 from pathlib import Path
 
 
@@ -80,3 +96,56 @@ def copy_figures_to_vault(
         copied.append(dest_path)
 
     return sorted(copied)
+
+
+# Matches standard Markdown image syntax, restricted to cache-relative
+# figures/ references only: ![alt text](figures/...). Same ![alt](path)
+# regex shape as MathpixClient.fetch_and_extract()'s existing image-reference
+# parsing (src/mathpix.py, issue #3), but scoped to the figures/ prefix so
+# that only recognized figure references are touched -- everything else in
+# the Markdown (prose, math, non-figures/ image references) is left as-is.
+_FIGURE_REF_PATTERN = re.compile(r"!\[[^\]]*\]\((figures/[^)\s]+)\)")
+
+
+def rewrite_image_references(markdown_text: str, dark_mode: bool = False) -> str:
+    """
+    Rewrite every ![alt](figures/...) reference in markdown_text to carry a
+    numbered placeholder caption in its alt-text slot, e.g.:
+
+        ![](figures/lecture_02_fig_001.jpg)
+            -> ![Figure 1](figures/lecture_02_fig_001.jpg)
+
+    Mathpix supplies no alt text at all for figures (![]()), so any existing
+    alt text is discarded and replaced with "Figure N", numbered strictly by
+    order of appearance in the document (the Nth ![](figures/...) reference
+    encountered gets "Figure N" -- if the same image is referenced more than
+    once, each occurrence still gets its own, incrementing number, rather
+    than sharing one).
+
+    The image path itself is left completely untouched -- this stays
+    standard Markdown syntax (![alt](path)), not Obsidian's ![[...]]
+    wikilink form, since the figures/... relative path already correctly
+    points at vault/{course}/figures/... relative to where Phase 5 will
+    write the note file.
+
+    When dark_mode is True, " @darkmode" is appended to every caption (e.g.
+    "Figure 1 @darkmode"), so the vault's Obsidian renderer/CSS can key off
+    that marker for dark-mode display. dark_mode is a plain parameter here,
+    not read from config.yaml -- wiring the real output.figures_dark_mode_flag
+    config value through to an actual call site is Phase 6's job.
+
+    Only ![alt](figures/...) references are recognized and rewritten;
+    anything else in markdown_text (prose, math, headings, non-figures/
+    image references such as an external URL) is left byte-for-byte
+    untouched.
+    """
+    counter = count(1)
+
+    def _replace(match: re.Match[str]) -> str:
+        path = match.group(1)
+        caption = f"Figure {next(counter)}"
+        if dark_mode:
+            caption += " @darkmode"
+        return f"![{caption}]({path})"
+
+    return _FIGURE_REF_PATTERN.sub(_replace, markdown_text)

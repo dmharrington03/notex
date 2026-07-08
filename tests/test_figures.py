@@ -9,10 +9,20 @@ Covered here (issue #23 — figure copy-to-vault function):
     - hidden files in the cache dir are skipped
     - copied file content matches the source byte-for-byte
 
+Also covered (issue #24 — Markdown image-reference caption rewriter):
+    - single/multiple ![](figures/...) refs get a numbered "Figure N"
+      caption, path left untouched
+    - dark_mode=True appends " @darkmode" to every caption
+    - the same image referenced twice still gets two distinct, incrementing
+      numbers (per-occurrence, not per-path, numbering)
+    - non-figures/ content (prose, math, unrelated image refs) is left
+      byte-for-byte untouched
+    - any pre-existing alt text is discarded, not preserved
+
 All tmp_path-backed, no mocking, no network.
 """
 
-from src.figures import copy_figures_to_vault
+from src.figures import copy_figures_to_vault, rewrite_image_references
 
 
 def test_missing_cache_dir_is_noop(tmp_path):
@@ -103,3 +113,91 @@ def test_empty_cache_figures_dir_creates_empty_vault_dir(tmp_path):
     assert result == []
     assert vault_figures_dir.is_dir()
     assert list(vault_figures_dir.iterdir()) == []
+
+
+def test_rewrite_single_image_reference_gets_figure_1_caption():
+    markdown = "Some text.\n\n![](figures/lecture_02_fig_001.jpg)\n\nMore text."
+
+    result = rewrite_image_references(markdown)
+
+    assert result == (
+        "Some text.\n\n![Figure 1](figures/lecture_02_fig_001.jpg)\n\nMore text."
+    )
+
+
+def test_rewrite_multiple_image_references_numbered_sequentially():
+    markdown = (
+        "![](figures/lecture_02_fig_001.jpg)\n"
+        "text in between\n"
+        "![](figures/lecture_02_fig_002.jpg)\n"
+        "![](figures/lecture_02_fig_003.jpg)\n"
+    )
+
+    result = rewrite_image_references(markdown)
+
+    assert result == (
+        "![Figure 1](figures/lecture_02_fig_001.jpg)\n"
+        "text in between\n"
+        "![Figure 2](figures/lecture_02_fig_002.jpg)\n"
+        "![Figure 3](figures/lecture_02_fig_003.jpg)\n"
+    )
+
+
+def test_rewrite_dark_mode_appends_marker_to_every_caption():
+    markdown = (
+        "![](figures/lecture_02_fig_001.jpg)\n"
+        "![](figures/lecture_02_fig_002.jpg)\n"
+    )
+
+    result = rewrite_image_references(markdown, dark_mode=True)
+
+    assert result == (
+        "![Figure 1 @darkmode](figures/lecture_02_fig_001.jpg)\n"
+        "![Figure 2 @darkmode](figures/lecture_02_fig_002.jpg)\n"
+    )
+
+
+def test_rewrite_same_image_referenced_twice_gets_distinct_numbers():
+    markdown = (
+        "![](figures/lecture_02_fig_001.jpg)\n"
+        "some text\n"
+        "![](figures/lecture_02_fig_001.jpg)\n"
+    )
+
+    result = rewrite_image_references(markdown)
+
+    assert result == (
+        "![Figure 1](figures/lecture_02_fig_001.jpg)\n"
+        "some text\n"
+        "![Figure 2](figures/lecture_02_fig_001.jpg)\n"
+    )
+
+
+def test_rewrite_leaves_non_figures_content_untouched():
+    markdown = (
+        "# Lecture 1\n\n"
+        "Some prose with $E=mc^2$ inline math.\n\n"
+        "![an external image](https://example.com/image.png)\n\n"
+        "![diagram](other/path/image.png)\n\n"
+        "$$\n\\left(x\\right)\n$$\n"
+    )
+
+    result = rewrite_image_references(markdown)
+
+    assert result == markdown
+
+
+def test_rewrite_discards_existing_alt_text():
+    markdown = "![some existing alt text](figures/lecture_02_fig_001.jpg)"
+
+    result = rewrite_image_references(markdown)
+
+    assert result == "![Figure 1](figures/lecture_02_fig_001.jpg)"
+
+
+def test_rewrite_no_figure_references_is_noop():
+    markdown = "Just plain text with no images at all."
+
+    result = rewrite_image_references(markdown)
+
+    assert result == markdown
