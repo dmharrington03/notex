@@ -21,7 +21,11 @@ columns stay NULL until Phases 3-5 populate them.
 Issue #21 added three further nullable columns for LLM-stage token usage /
 cost tracking: `llm_input_tokens`, `llm_output_tokens`,
 `llm_cost_estimate`. Issue #22 added one more, `page_count` (the source
-PDF's page count, from Mathpix's own status payload). No schema-migration
+PDF's page count, from Mathpix's own status payload). Issue #30 added two
+more, `vault_status` (`"success"`/`"failed"`, same per-stage-status
+convention as `mathpix_status`/`llm_status`) and `vault_path` (the final
+vault `.md` path -- distinct from `output_path`, which keeps its Phase 3
+meaning as the cache-stage `.llm.md`/`.mathpix.md` path). No schema-migration
 logic is provided for these (or any other column) -- `init_db()` only ever
 runs `CREATE TABLE IF NOT EXISTS`, so an existing local `state.db`
 predating a column addition must be deleted and left to rebuild rather
@@ -59,6 +63,8 @@ _VALUE_COLUMNS = (
     "figure_count",
     "page_count",
     "output_path",
+    "vault_status",
+    "vault_path",
     "mathpix_processed_at",
     "llm_processed_at",
     "vault_written_at",
@@ -84,6 +90,8 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     figure_count           INTEGER,
     page_count             INTEGER,
     output_path            TEXT,
+    vault_status           TEXT,
+    vault_path             TEXT,
     mathpix_processed_at   TEXT,
     llm_processed_at       TEXT,
     vault_written_at       TEXT,
@@ -109,6 +117,8 @@ class StateEntry:
     figure_count: int | None
     page_count: int | None
     output_path: str | None
+    vault_status: str | None
+    vault_path: str | None
     mathpix_processed_at: datetime | None
     llm_processed_at: datetime | None
     vault_written_at: datetime | None

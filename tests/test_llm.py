@@ -374,6 +374,8 @@ def _state_entry(**overrides) -> StateEntry:
         figure_count=0,
         page_count=None,
         output_path=None,
+        vault_status=None,
+        vault_path=None,
         mathpix_processed_at=None,
         llm_processed_at=None,
         vault_written_at=None,

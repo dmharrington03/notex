@@ -274,9 +274,13 @@ narrative and real-data-validation findings.
   `mkdir(parents=True, exist_ok=True)`'d (needed for the zero-figure case,
   since `copy_figures_to_vault()` only creates the `figures/` subdir when
   there are actual figures — that sub-behavior is untouched).
-- **#30-#32 (pending)** — `state.py`'s `vault_status`/`vault_path` columns,
-  wiring into `run()`, and real-data validation. Full design already
-  confirmed under "Current Phase" above.
+- **#30 (done)** — `state.py`: `vault_status`/`vault_path` nullable
+  columns added (`_VALUE_COLUMNS`, `_CREATE_TABLE_SQL`, `StateEntry`),
+  placed right after `output_path`. No schema-migration logic, same
+  precedent as #21/#22.
+- **#31-#32 (pending)** — wiring `write_lecture_note()` into `run()`, and
+  real-data validation. Full design already confirmed under "Current
+  Phase" above.
 
 ### Phase 4 (VALIDATED — complete, issues #23-#25)
 

@@ -8,7 +8,8 @@ Covered here (issue #7 — state.db schema + CRUD):
       (including datetime <-> ISO 8601 string)
     - upsert_entry() partial updates leave previously-set columns intact
       (including issue #21's llm_input_tokens/llm_output_tokens/
-      llm_cost_estimate and issue #22's page_count columns)
+      llm_cost_estimate, issue #22's page_count, and issue #30's
+      vault_status/vault_path columns)
     - upsert_entry() rejects unknown field names
 
 No respx/mocking needed - all sqlite, using tmp_path files.
@@ -84,7 +85,9 @@ def test_upsert_entry_inserts_and_round_trips_all_fields(tmp_path):
         llm_validation_result="ok",
         figure_count=2,
         page_count=3,
-        output_path="/vault/class_1/Lecture 01.md",
+        output_path="/_cache/class_1/lecture_01.llm.md",
+        vault_status="success",
+        vault_path="/vault/class_1/Lecture 01.md",
         mathpix_processed_at=processed_at,
         llm_processed_at=processed_at,
         vault_written_at=processed_at,
@@ -108,7 +111,9 @@ def test_upsert_entry_inserts_and_round_trips_all_fields(tmp_path):
         llm_validation_result="ok",
         figure_count=2,
         page_count=3,
-        output_path="/vault/class_1/Lecture 01.md",
+        output_path="/_cache/class_1/lecture_01.llm.md",
+        vault_status="success",
+        vault_path="/vault/class_1/Lecture 01.md",
         mathpix_processed_at=processed_at,
         llm_processed_at=processed_at,
         vault_written_at=processed_at,
@@ -140,6 +145,8 @@ def test_upsert_entry_insert_with_no_optional_fields(tmp_path):
         figure_count=None,
         page_count=None,
         output_path=None,
+        vault_status=None,
+        vault_path=None,
         mathpix_processed_at=None,
         llm_processed_at=None,
         vault_written_at=None,
@@ -239,6 +246,76 @@ def test_upsert_entry_partial_update_preserves_page_count_column(tmp_path):
     assert entry.mathpix_pdf_id == "pdf_xyz"
     assert entry.llm_status == "success"
     assert entry.llm_model == "gpt-4o-mini"
+
+
+def test_upsert_entry_partial_update_preserves_vault_columns(tmp_path):
+    # Issue #30's vault_status/vault_path columns follow the same
+    # partial-upsert convention as every other column: a later, unrelated
+    # call must not null them out, and vice versa.
+    conn = init_db(tmp_path / "state.db")
+    source_path = "/notes_raw/class_1/lecture_01.pdf"
+
+    upsert_entry(
+        conn,
+        source_path,
+        vault_status="success",
+        vault_path="/vault/class_1/Lecture 01.md",
+    )
+
+    # A later call touching only mathpix_*/llm_* fields must not disturb
+    # the vault columns written above.
+    upsert_entry(
+        conn,
+        source_path,
+        mathpix_status="success",
+        mathpix_pdf_id="pdf_xyz",
+        llm_status="success",
+        llm_model="gpt-4o-mini",
+    )
+
+    entry = get_entry(conn, source_path)
+
+    assert entry.vault_status == "success"
+    assert entry.vault_path == "/vault/class_1/Lecture 01.md"
+    assert entry.mathpix_status == "success"
+    assert entry.mathpix_pdf_id == "pdf_xyz"
+    assert entry.llm_status == "success"
+    assert entry.llm_model == "gpt-4o-mini"
+
+
+def test_upsert_entry_partial_update_preserves_other_columns_when_vault_written(
+    tmp_path,
+):
+    # Reverse direction of the above: a vault-only upsert (the shape a real
+    # vault-write stage performs) must not disturb previously-written
+    # mathpix_*/llm_* columns.
+    conn = init_db(tmp_path / "state.db")
+    source_path = "/notes_raw/class_1/lecture_01.pdf"
+
+    upsert_entry(
+        conn,
+        source_path,
+        mathpix_status="success",
+        mathpix_pdf_id="pdf_xyz",
+        llm_status="success",
+        llm_model="gpt-4o-mini",
+    )
+
+    upsert_entry(
+        conn,
+        source_path,
+        vault_status="success",
+        vault_path="/vault/class_1/Lecture 01.md",
+    )
+
+    entry = get_entry(conn, source_path)
+
+    assert entry.mathpix_status == "success"
+    assert entry.mathpix_pdf_id == "pdf_xyz"
+    assert entry.llm_status == "success"
+    assert entry.llm_model == "gpt-4o-mini"
+    assert entry.vault_status == "success"
+    assert entry.vault_path == "/vault/class_1/Lecture 01.md"
 
 
 def test_upsert_entry_update_overwrites_previous_value(tmp_path):
