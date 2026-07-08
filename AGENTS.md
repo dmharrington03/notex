@@ -297,10 +297,58 @@ the user so far:**
    - `rich` will need to be added to `environment.yml`
      (`conda install -n notex -c conda-forge rich`), per the conda-only
      rule — not yet installed.
-   - Testing convention (to establish when implemented): tests inject a
-     fake/no-op `Reporter`, matching every other injectable-dependency
-     precedent in this codebase (`http_client=`, `completion_fn=`,
-     `sleep_fn=`) — no test ever asserts on actual Rich terminal rendering.
+    - Testing convention (to establish when implemented): tests inject a
+      fake/no-op `Reporter`, matching every other injectable-dependency
+      precedent in this codebase (`http_client=`, `completion_fn=`,
+      `sleep_fn=`) — no test ever asserts on actual Rich terminal rendering.
+
+### Phase 4 progress
+
+- **Issue #23 (`src/figures.py`: figure copy-to-vault function) — done.**
+  Implemented in new module `src/figures.py`, tested in
+  `tests/test_figures.py` (6 tmp_path-backed cases, no mocking, all
+  passing — full suite is 131 passing). Conventions established here that
+  the rest of Phase 4 (#24, #25) should follow:
+  - `copy_figures_to_vault(cache_figures_dir, vault_figures_dir) ->
+    list[Path]` takes explicit source/dest `Path` params — no
+    `config.py` reading, no `paths_config.vault_root` lookup — matching
+    `cleanup_pdf()`'s `dest_dir`-as-param precedent from Phase 3
+    (`src/llm.py`). Real wiring of `vault_root` into an actual call site
+    is still Phase 5/6's job.
+  - **Zero-figure case is a no-op, not an error**: when
+    `cache_figures_dir` doesn't exist at all (e.g. `lecture_01.pdf`, which
+    has no figures), the function returns `[]` immediately and does
+    **not** create `vault_figures_dir` — mirrors
+    `fetch_and_extract()`'s existing zero-figure handling (issue #3),
+    where no `figures/` directory is created when there's nothing to put
+    in it. An *existing-but-empty* `cache_figures_dir` is treated
+    differently: `vault_figures_dir` is still created (mkdir), just with
+    nothing copied into it, since in that case the caller-observable
+    input state is "a figures dir exists" rather than "no figures stage
+    ran at all."
+  - **No extension filtering** — every non-hidden regular file in
+    `cache_figures_dir` is copied regardless of extension, confirmed with
+    the user: `cache_figures_dir` is entirely cache-managed by
+    `fetch_and_extract()` and only ever contains real figure files
+    (currently always `.jpg`, per AGENTS.md's Mathpix API notes), so
+    filtering would be unnecessary complexity for no real guardrail
+    benefit.
+  - **Hidden files (names starting with `.`, e.g. a stray `.DS_Store`)
+    are skipped**, confirmed with the user — matches
+    `src/discovery.py`'s existing hidden-file-skipping convention for
+    course/PDF discovery.
+  - Copies via `shutil.copy2` (preserves file metadata, not just bytes),
+    overwriting any existing file of the same name — keeps reruns
+    idempotent (same deterministic filename in, same file overwritten,
+    no duplication) without any `state.db` bookkeeping. `src/figures.py`
+    does not touch `state.db` at all, matching the issue's explicit
+    scope.
+  - **Returns a sorted `list[Path]` of the destination files actually
+    written**, not a bare count — confirmed with the user as the more
+    useful shape for issue #24's wikilink rewriter and Phase 5's
+    `vault.py` caller to consume directly.
+  - Not yet exercised against real cached figures — that's issue #25's
+    real-data validation scope, run after #24 also lands.
 
 ### Phase 3 progress
 
@@ -1832,7 +1880,7 @@ notex/                      ← repo root
 │   ├── discovery.py        ← per-file two-tier change classification + recursive multi-course walk (Classification, ClassificationResult, classify_pdf, compute_sha256, discover_pdfs, UNGROUPED_COURSE_KEY)
 │   ├── llm.py              ← LLM cleanup client + prompt loading + orchestration (LLMClient, LLMError, load_prompt_text, validate_cleanup, cleanup_pdf, needs_llm_reprocessing — issues #15-#17)
 │   ├── main.py             ← CLI orchestration entry point (RunSummary, run, main) — wires discovery + state.db + process_pdf() into a runnable pass over input_root
-│   ├── figures.py          ← [Phase 4, not yet implemented] figure copy-to-vault + Markdown image-reference rewriter (incl. dark-mode alt-text)
+│   ├── figures.py          ← figure copy-to-vault (copy_figures_to_vault, issue #23); Markdown image-reference wikilink rewriter [Phase 4, issue #24, not yet implemented]
 │   ├── postprocess.py      ← [Phase 5, not yet implemented] YAML frontmatter builder + delimiter-balance warning scan
 │   ├── vault.py            ← [Phase 5/6, not yet implemented] assembles + writes final per-lecture vault .md; course index generation
 │   └── reporting.py        ← [Phase 7, not yet implemented] Reporter interface (PlainReporter/RichReporter) for progress UI
@@ -1847,7 +1895,8 @@ notex/                      ← repo root
 │   ├── test_discovery.py
 │   ├── test_config.py
 │   ├── test_llm.py
-│   └── test_main.py
+│   ├── test_main.py
+│   └── test_figures.py
 ├── state.db                ← SQLite state log, gitignored, created at runtime
 └── _cache/                 ← gitignored, created at runtime
 ```
