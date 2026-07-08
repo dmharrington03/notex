@@ -315,6 +315,14 @@ the user so far:**
 
 ### Phase 4 progress
 
+**Phase 4 status: VALIDATED — complete.** All Phase 4 issues (#23-#25) are
+implemented and unit-tested (tmp_path-backed, no mocking — 138 tests
+passing), and the figure-copy + image-reference-rewrite functions have
+additionally been exercised for real against `_cache/class_1`'s actual
+cached output (issue #25) — see its entry below for findings. Real wiring
+into an actual pipeline call site (`vault_root`, a config-driven
+`dark_mode` value) remains Phase 5/6's job.
+
 - **Issue #23 (`src/figures.py`: figure copy-to-vault function) — done.**
   Implemented in new module `src/figures.py`, tested in
   `tests/test_figures.py` (6 tmp_path-backed cases, no mocking, all
@@ -417,6 +425,65 @@ the user so far:**
     per user request after initial implementation.)
   - Not yet exercised against real cached `.llm.md`/`.mathpix.md` output —
     that's issue #25's real-data validation scope, run after this issue.
+
+- **Issue #25 (real-data validation: figure copy + image-reference rewrite
+  against `notes_raw/class_1`) — done.** Exercised via ad hoc `python -c`
+  calls against the real `_cache/class_1` output (no new source file, no
+  mocking) — matching the #12/#20/#22 real-data-validation precedent. No
+  code changes were needed; every function behaved exactly as documented.
+  **Note on scope vs. the issue's original text:** the issue as originally
+  written (opened before #24 landed) asks to validate a wikilink rewrite
+  and to visually confirm rendering "in Obsidian." Per #24's already-
+  documented correction, the implemented behavior is standard Markdown
+  `![alt](path)`, not a wikilink — this validation pass tests that actual
+  behavior. The Obsidian-open visual-confirmation step was explicitly
+  descoped by the user for this pass (see below) in favor of a structural
+  path-resolution check.
+  - **`copy_figures_to_vault()`**: run for real against
+    `_cache/class_1/figures/lecture_02_fig_001.jpg` into
+    `vault/class_1/figures/` (per `config.yaml`'s configured `vault_root`).
+    SHA-256 of source and copied file matched exactly (byte-for-byte).
+    Rerunning the identical call was confirmed idempotent: the destination
+    directory still contained exactly one file afterward (no duplication),
+    with unchanged content.
+  - **`rewrite_image_references()`**: run against the real cached
+    `lecture_01.llm.md` (zero figures) and confirmed a true no-op — output
+    byte-for-byte identical to input, since the file has no `figures/`
+    references at all. Run against the real `lecture_02.llm.md` (one
+    figure): `dark_mode=False` rewrote
+    `![](figures/lecture_02_fig_001.jpg)` to
+    `![Figure 1](figures/lecture_02_fig_001.jpg)`, with a line-by-line diff
+    confirming that was the *only* line in the entire document that
+    changed; `dark_mode=True` produced
+    `![Figure 1 @darkmode](figures/lecture_02_fig_001.jpg)`. Both match the
+    implementation's documented behavior exactly.
+  - **Path-resolution check (in place of an Obsidian visual open,
+    confirmed with the user as sufficient for this pass):** confirmed
+    programmatically that the rewritten reference's relative path
+    (`figures/lecture_02_fig_001.jpg`), resolved from a hypothetical
+    `vault/class_1/*.md` note location (i.e. sibling to
+    `vault/class_1/figures/`), points at exactly the file
+    `copy_figures_to_vault()` wrote in the step above. Actually opening the
+    vault in Obsidian to visually confirm rendering was explicitly
+    descoped: since #24 emits standard Markdown alt text rather than an
+    Obsidian wikilink, and no caption-rendering plugin/CSS is configured
+    in this vault, Obsidian wouldn't display the "Figure N"/`@darkmode`
+    caption text as a visible caption by default anyway (only in the
+    underlying `alt` attribute) — revisit if/when a caption
+    plugin/CSS snippet is set up (no current phase plan requires one).
+  - **Invariants confirmed:** no `state.db` writes occurred during this
+    validation (`state.db`'s mtime was unchanged before/after — this
+    validation never imports or calls `src.main`/`src.state`, per the
+    issue's explicit requirement); `notes_raw/class_1`'s two source PDFs'
+    mtimes were also unchanged throughout.
+  - Full `pytest` suite reconfirmed passing (138 passed) after this
+    validation — no code changes were made, so this is a pure sanity
+    check.
+  - Confirms **Phase 4 is standalone/unwired**: nothing from `src/figures.py`
+    is called from `src/main.py`/`run()` yet — real wiring into an actual
+    pipeline call site (with a real `vault_root`-derived destination and a
+    real config-driven `dark_mode` value) is Phase 5/6's job, per
+    AGENTS.md's existing Phase 4/5/6 scope notes.
 
 ### Phase 3 progress
 
