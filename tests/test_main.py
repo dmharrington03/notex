@@ -285,6 +285,15 @@ def test_run_processes_new_file_and_records_success(client, tmp_path, monkeypatc
     assert llm_calls[0]["mathpix_markdown_path"] == markdown_path
     assert llm_calls[0]["lecture_stem"] == "lecture_01"
 
+    # Vault-writing (issue #31) ran immediately after the LLM stage.
+    assert entry.vault_status == "success"
+    assert entry.vault_path is not None
+    assert Path(entry.vault_path).is_file()
+    assert entry.vault_written_at is not None
+    vault_path = paths_config.vault_root / "class_1" / "Lecture 01.md"
+    assert Path(entry.vault_path) == vault_path
+    assert "cleaned markdown" in vault_path.read_text(encoding="utf-8")
+
 
 @respx.mock
 def test_run_skips_unchanged_and_current_file_entirely(client, tmp_path, monkeypatch):
@@ -359,6 +368,13 @@ def test_run_unchanged_and_stale_triggers_llm_only_reprocessing(client, tmp_path
     assert len(llm_calls) == 1
     assert llm_calls[0]["mathpix_markdown_path"] == cached_markdown
     assert llm_calls[0]["lecture_stem"] == "lecture_01"
+
+    # The reprocessed LLM content triggered a vault rewrite too (issue #31).
+    assert entry.vault_status == "success"
+    vault_path = paths_config.vault_root / "class_1" / "Lecture 01.md"
+    assert Path(entry.vault_path) == vault_path
+    assert vault_path.is_file()
+    assert "cleaned markdown" in vault_path.read_text(encoding="utf-8")
 
 
 @respx.mock
@@ -452,6 +468,50 @@ def test_run_continues_after_one_file_fails(client, tmp_path, monkeypatch):
 
 
 @respx.mock
+def test_run_unparseable_filename_records_vault_failure_only(client, tmp_path, monkeypatch):
+    """
+    A filename that doesn't match parse_lecture_filename()'s
+    lecture[_-]?<digits> pattern still succeeds at the Mathpix/LLM stages,
+    but write_lecture_note() raises PostprocessError -- vault_status is
+    recorded as "failed" without touching the already-successful
+    mathpix_status/llm_status/output_path fields, and RunSummary.errors is
+    incremented (issue #31).
+    """
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "not_a_lecture_filename.pdf")
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    summary = run(paths_config, conn, client=client, llm_config=_make_llm_config())
+
+    assert summary == RunSummary(
+        processed=1,
+        skipped=0,
+        errors=1,
+        ungrouped=0,
+        llm_reprocessed=0,
+        total_input_tokens=100,
+        total_output_tokens=50,
+        total_cost_estimate=0.001,
+        total_pages_processed=2,
+    )
+
+    entry = get_entry(conn, str(pdf_path.resolve()))
+    assert entry is not None
+    assert entry.mathpix_status == "success"
+    assert entry.llm_status == "success"
+    assert entry.output_path is not None
+    assert entry.vault_status == "failed"
+    assert entry.vault_path is None
+    assert entry.vault_written_at is None
+    assert not (paths_config.vault_root / "class_1").exists()
+
+
+@respx.mock
 def test_run_skips_ungrouped_pdfs_without_writing_state(client, tmp_path, monkeypatch):
     paths_config = _make_paths_config(tmp_path)
     conn = init_db(paths_config.state_db)
@@ -476,7 +536,7 @@ def test_run_second_pass_is_full_noop(client, tmp_path, monkeypatch):
     conn = init_db(paths_config.state_db)
     course_dir = paths_config.input_root / "class_1"
     course_dir.mkdir()
-    _write_pdf(course_dir / "lecture_01.pdf")
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
 
     submit_route = _mock_happy_path()
     _install_fake_cleanup_pdf(monkeypatch, status="success")
@@ -495,12 +555,23 @@ def test_run_second_pass_is_full_noop(client, tmp_path, monkeypatch):
     )
     assert submit_route.call_count == 1
 
+    vault_path = paths_config.vault_root / "class_1" / "Lecture 01.md"
+    assert vault_path.is_file()
+    first_run_mtime = vault_path.stat().st_mtime_ns
+
     second_summary = run(paths_config, conn, client=client, llm_config=_make_llm_config())
 
     assert second_summary == RunSummary(
         processed=0, skipped=1, errors=0, ungrouped=0, llm_reprocessed=0
     )
     assert submit_route.call_count == 1
+    # A true no-op -- the vault file wasn't rewritten by the second,
+    # fully-skipped pass over the unchanged file.
+    assert vault_path.stat().st_mtime_ns == first_run_mtime
+
+    entry = get_entry(conn, str(pdf_path.resolve()))
+    assert entry.vault_status == "success"
+    assert Path(entry.vault_path) == vault_path
 
 
 @respx.mock
@@ -567,11 +638,15 @@ def test_run_target_source_path_force_processes_ungrouped_file(client, tmp_path,
     )
 
     # Unlike the normal run (which skips ungrouped files entirely), a
-    # directly-targeted ungrouped file is force-processed.
+    # directly-targeted ungrouped file is force-processed. Its filename
+    # ("stray.pdf") doesn't match parse_lecture_filename()'s
+    # lecture[_-]?<digits> pattern, though, so the Mathpix/LLM stages
+    # still succeed but the vault-write stage (issue #31) genuinely fails
+    # -- counted as an error.
     assert summary == RunSummary(
         processed=1,
         skipped=0,
-        errors=0,
+        errors=1,
         ungrouped=0,
         llm_reprocessed=0,
         total_input_tokens=100,
@@ -585,6 +660,8 @@ def test_run_target_source_path_force_processes_ungrouped_file(client, tmp_path,
     assert entry.mathpix_status == "success"
     assert entry.page_count == 2
     assert entry.llm_status == "success"
+    assert entry.vault_status == "failed"
+    assert entry.vault_path is None
 
     markdown_path = paths_config.cache_dir / "_ungrouped" / "stray.mathpix.md"
     assert markdown_path.is_file()

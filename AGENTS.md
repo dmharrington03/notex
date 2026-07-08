@@ -278,9 +278,25 @@ narrative and real-data-validation findings.
   columns added (`_VALUE_COLUMNS`, `_CREATE_TABLE_SQL`, `StateEntry`),
   placed right after `output_path`. No schema-migration logic, same
   precedent as #21/#22.
-- **#31-#32 (pending)** — wiring `write_lecture_note()` into `run()`, and
-  real-data validation. Full design already confirmed under "Current
-  Phase" above.
+- **#31 (done)** — `src/main.py`: wired `write_lecture_note()` into
+  `_process_file()` via a new `_write_to_vault()` helper, called after the
+  LLM stage on both the actionable NEW/CHANGED/RETRY path and the
+  UNCHANGED-file LLM-only-rerun path. `run()` computes `vault_course_dir`
+  (`paths_config.vault_root / course`, or the `_ungrouped` sentinel)
+  alongside each existing `cache_dir` computation. `PostprocessError`/
+  `OSError` from `write_lecture_note()` are caught, recording
+  `vault_status="failed"` only (mathpix/llm fields untouched); success
+  records `vault_status`/`vault_path`/`vault_written_at` (reusing
+  `llm_result.processed_at`, no fresh timestamp). No new `RunSummary`
+  field — folds into the existing `errors` count, matching #18's
+  precedent. Found and fixed a pre-existing test gap:
+  `test_run_target_source_path_force_processes_ungrouped_file`'s
+  `stray.pdf` fixture doesn't match `parse_lecture_filename()`'s pattern,
+  so real vault-writing now correctly surfaces that as an error
+  (`vault_status="failed"`) — updated the test's expectations rather than
+  masking it.
+- **#32 (pending)** — real-data validation. Full design already confirmed
+  under "Current Phase" above.
 
 ### Phase 4 (VALIDATED — complete, issues #23-#25)
 

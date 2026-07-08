@@ -1,9 +1,10 @@
 """
-Phase 2/3 orchestration entry point.
+Phase 2/3/5 orchestration entry point.
 
 Wires discovery (src/discovery.py, issues #8/#9) + the state log
 (src/state.py, issue #7) + Phase 1's process_pdf() (src/mathpix.py) + Phase
-3's cleanup_pdf() (src/llm.py, issues #15-#17) into a single runnable pass
+3's cleanup_pdf() (src/llm.py, issues #15-#17) + Phase 5's
+write_lecture_note() (src/vault.py, issue #29) into a single runnable pass
 over paths.input_root. No CLI flags yet (--dry-run / --force / --course /
 --verbose, and the eventual --refresh-llm-prompt / --file flags, are Phase 7
 per docs/spec.md's roadmap).
@@ -26,20 +27,32 @@ Per-file flow (see AGENTS.md issue #11/#18 notes):
       discovery.py). If the file's state.db entry has mathpix_status ==
       "success" and its LLM stage is stale (needs_llm_reprocessing()) or
       force_llm=True, the LLM stage alone is (re)run against the cached
-      .mathpix.md -- no Mathpix API call. Otherwise fully skipped. Tallied
-      as "skipped" or "llm_reprocessed" respectively.
+      .mathpix.md -- no Mathpix API call -- immediately followed by another
+      write_lecture_note() call (issue #31), since a reprocessed LLM stage
+      produces new content that needs to reach the vault too. Otherwise
+      fully skipped (no LLM call, no vault rewrite). Tallied as "skipped" or
+      "llm_reprocessed" respectively.
     - Classification.NEW / CHANGED / RETRY: process_pdf() is called against
       a per-course cache_dir (paths.cache_dir / course, mirroring the
-      vault's eventual per-course structure). On success, cleanup_pdf() is
-      immediately run against the freshly-produced .mathpix.md (same
-      cache_dir), and upsert_entry() records both the mathpix_* fields and
-      the llm_*/output_path fields in one go. On MathpixError /
+      vault's per-course structure at paths.vault_root / course). On
+      success, cleanup_pdf() is immediately run against the
+      freshly-produced .mathpix.md (same cache_dir), followed by
+      write_lecture_note() (issue #31) against whichever path
+      cleanup_pdf()'s LLMResult.output_path points at (the .llm.md on
+      success, or the raw .mathpix.md fallback), and upsert_entry() records
+      the mathpix_*/llm_*/output_path fields and the vault_*/
+      vault_written_at fields in one go. On MathpixError /
       httpx.HTTPStatusError / FileNotFoundError, upsert_entry() instead
       records mathpix_status="failed" (still refreshing hash/mtime/size so
-      tier-1 change detection is correct next run), the LLM stage is never
-      attempted for that file this run, and the run continues to the next
-      file -- one bad file never aborts the whole run (per docs/spec.md's
-      Error Handling table).
+      tier-1 change detection is correct next run), neither the LLM nor
+      vault-writing stage is ever attempted for that file this run, and the
+      run continues to the next file -- one bad file never aborts the whole
+      run (per docs/spec.md's Error Handling table). A write_lecture_note()
+      failure (PostprocessError from an unparseable filename, or any
+      OSError) is likewise caught per-file: only vault_status="failed" is
+      recorded, leaving that file's already-successful
+      mathpix_status/llm_status/output_path completely untouched (a
+      correction to docs/spec.md's original wording -- see AGENTS.md).
     - UNGROUPED_COURSE_KEY files (PDFs directly under input_root, not in any
       course subfolder) are, in the normal (non-target_source_path) run,
       deliberately *not* processed: there's no course to mirror in
@@ -101,6 +114,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -122,7 +136,9 @@ from src.discovery import (
 )
 from src.llm import LLMClient, cleanup_pdf, needs_llm_reprocessing
 from src.mathpix import MathpixClient, MathpixError, process_pdf
+from src.postprocess import PostprocessError
 from src.state import get_entry, init_db, upsert_entry
+from src.vault import write_lecture_note
 
 # Reserved cache_dir subfolder name for a force-processed ungrouped
 # target_source_path file (see module docstring). Not a real course name --
@@ -175,9 +191,88 @@ class _FileOutcome:
     pages: int = 0
 
 
+def _write_to_vault(
+    conn: sqlite3.Connection,
+    source_path: str,
+    content_source_path: Path,
+    course_cache_figures_dir: Path,
+    vault_course_dir: Path,
+    source_mtime: float,
+    processed_at: datetime,
+    course_label: str,
+    filename: str,
+) -> int:
+    """
+    Write this file's final vault Markdown note (src/vault.py's
+    write_lecture_note(), issue #29) and record the outcome to state.db.
+
+    Args:
+        source_path: the source PDF's path (state.db's primary key) --
+            also passed to write_lecture_note() to derive lecture
+            number/course name.
+        content_source_path: the content to write -- whichever path
+            cleanup_pdf()'s LLMResult.output_path points at (the
+            LLM-cleaned .llm.md on success, or the raw .mathpix.md
+            fallback if the LLM stage failed -- no extra branching needed
+            here, see issue #31).
+        course_cache_figures_dir: this course's cached figures/ dir,
+            passed straight through to write_lecture_note().
+        vault_course_dir: this course's vault directory, passed straight
+            through to write_lecture_note().
+        source_mtime: forwarded to write_lecture_note()'s date field.
+        processed_at: forwarded to write_lecture_note()'s processed field
+            and, on success, recorded verbatim as state.db's
+            vault_written_at -- reuses the same timestamp as this file's
+            llm_processed_at rather than taking a fresh one.
+        course_label: display-only label for progress print lines.
+        filename: display-only source PDF filename for progress print
+            lines.
+
+    Returns:
+        1 if the vault write failed (counts toward the caller's
+        _FileOutcome.errors), 0 on success.
+
+    On a PostprocessError (source_path's filename doesn't match
+    lecture[_-]?<digits>) or any OSError (I/O failure), the write is
+    caught per-file: logged, and only vault_status="failed" is recorded --
+    this file's already-recorded mathpix_status/llm_status/output_path
+    fields from the same call are left completely untouched (confirmed
+    correction to docs/spec.md's original "skip file, no state log entry"
+    wording -- see issue #27/#31's notes). Any
+    scan_delimiter_issues() warnings on a successful write are printed but
+    never affect vault_status -- diagnostic only, per issue #28's design.
+    """
+    try:
+        result = write_lecture_note(
+            source_path,
+            content_source_path,
+            course_cache_figures_dir,
+            vault_course_dir,
+            source_mtime,
+            processed_at,
+        )
+    except (PostprocessError, OSError) as exc:
+        print(f"[{course_label}] {filename}: vault write FAILED: {exc}")
+        upsert_entry(conn, source_path, vault_status="failed")
+        return 1
+
+    for warning in result.delimiter_warnings:
+        print(f"[{course_label}] {filename}: WARNING: {warning}")
+
+    upsert_entry(
+        conn,
+        source_path,
+        vault_status="success",
+        vault_path=str(result.output_path),
+        vault_written_at=processed_at,
+    )
+    return 0
+
+
 def _process_file(
     result: ClassificationResult,
     cache_dir: Path,
+    vault_course_dir: Path,
     mathpix_client: MathpixClient,
     llm_client: LLMClient,
     llm_config: LLMConfig,
@@ -187,15 +282,20 @@ def _process_file(
 ) -> _FileOutcome:
     """
     Shared per-file processing body: Mathpix-stage handling, LLM-stage
-    handling, and the upsert_entry() calls that record their outcomes. Used
-    identically by run()'s normal per-course loop and its target_source_path
-    branch, so the two entry points are guaranteed to behave the same way.
+    handling, vault-writing (issue #31), and the upsert_entry() calls that
+    record their outcomes. Used identically by run()'s normal per-course
+    loop and its target_source_path branch, so the two entry points are
+    guaranteed to behave the same way.
 
     Args:
         result: a discovery.ClassificationResult for this file.
         cache_dir: the (course-specific, or _ungrouped-sentinel) cache
             directory to pass through as both process_pdf()'s and
-            cleanup_pdf()'s dest_dir.
+            cleanup_pdf()'s dest_dir. This course's cached figures/ dir
+            (cache_dir / "figures") is passed to write_lecture_note() too.
+        vault_course_dir: the (course-specific, or _ungrouped-sentinel)
+            vault directory to pass through to write_lecture_note() as its
+            vault_course_dir.
         mathpix_client: the run's shared MathpixClient.
         llm_client: the run's shared LLMClient.
         llm_config: the run's resolved LLMConfig.
@@ -266,6 +366,17 @@ def _process_file(
             llm_cost_estimate=llm_result.llm_cost_estimate,
         )
         errors = 0 if llm_result.llm_status == "success" else 1
+        errors += _write_to_vault(
+            conn,
+            result.source_path,
+            llm_result.output_path,
+            cache_dir / "figures",
+            vault_course_dir,
+            result.source_mtime,
+            llm_result.processed_at,
+            course_label,
+            filename,
+        )
         return _FileOutcome(
             processed=1,
             errors=errors,
@@ -325,6 +436,17 @@ def _process_file(
         llm_cost_estimate=llm_result.llm_cost_estimate,
     )
     errors = 0 if llm_result.llm_status == "success" else 1
+    errors += _write_to_vault(
+        conn,
+        result.source_path,
+        llm_result.output_path,
+        cache_dir / "figures",
+        vault_course_dir,
+        result.source_mtime,
+        llm_result.processed_at,
+        course_label,
+        filename,
+    )
     return _FileOutcome(
         llm_reprocessed=1,
         errors=errors,
@@ -405,14 +527,17 @@ def run(
 
             if course == UNGROUPED_COURSE_KEY:
                 cache_dir = paths_config.cache_dir / _UNGROUPED_CACHE_SUBDIR
+                vault_course_dir = paths_config.vault_root / _UNGROUPED_CACHE_SUBDIR
                 course_label = _UNGROUPED_CACHE_SUBDIR
             else:
                 cache_dir = paths_config.cache_dir / course
+                vault_course_dir = paths_config.vault_root / course
                 course_label = course
 
             outcome = _process_file(
                 result,
                 cache_dir,
+                vault_course_dir,
                 client,
                 llm_client,
                 llm_config,
@@ -443,11 +568,13 @@ def run(
                     continue
 
                 cache_dir = paths_config.cache_dir / course
+                vault_course_dir = paths_config.vault_root / course
 
                 for result in results:
                     outcome = _process_file(
                         result,
                         cache_dir,
+                        vault_course_dir,
                         client,
                         llm_client,
                         llm_config,
