@@ -54,103 +54,112 @@ Dependencies are tracked in `environment.yml` (reproduce with
 
 ## Current Phase
 
-**Phase 3 — LLM cleanup.** Scope: a single-call LLM pass over each cached
-Mathpix Markdown file (`src/llm.py`), with post-cleanup validation and a
-fallback-to-raw-output path on any failure, per docs/spec.md Stage 3 / LLM
-Cleanup. See `docs/spec.md` for the full 7-phase roadmap and stage-by-stage
-detail (note: follow this file, AGENTS.md, not spec.md, where they disagree
-— see below for a concrete correction this phase makes to spec.md's
-Reprocessing logic table).
+**Phase 5 — Post-processing (vault-facing).** Scope: YAML frontmatter
+injection, a final delimiter-balance warning scan (never auto-fix), and
+actually assembling + writing the finished Markdown into
+`vault/{course}/Lecture NN.md`, per docs/spec.md Stage 5 — as corrected/
+detailed below. Phase 4 (figure handling) is VALIDATED — complete; see
+"Phase 4 progress" below. See `docs/spec.md` for the full 7-phase roadmap
+(note: follow this file, AGENTS.md, not spec.md, where they disagree — see
+below for a concrete correction this phase makes to spec.md's Error
+Handling table).
 
 Concretely, this phase covers:
-- `src/config.py`: new `load_llm_config()` reading a new `llm:` section from
-  `config.yaml` (`model`, `prompt_version`, `validation.min_length_ratio`/
-  `max_length_ratio`), mirroring the `mathpix:` polling config precedent from
-  Phase 1 issue #2. **`prompt_version` is config-driven, not a hardcoded code
-  constant** — this is what lets the active prompt be swapped by editing
-  `config.yaml` alone, no code change required.
-- `prompts/cleanup_v1.txt`: the versioned system prompt (hard constraints,
-  bra-ket normalization guidance, a generic domain-vocabulary-misread hint,
-  and explicit permission to drop a single stray non-structural heading —
-  see "Smoke test findings" / "Phase 3 prompt design notes" below for what
-  motivates each of these).
-- `src/llm.py`: `LLMClient` (thin `litellm` wrapper, injectable for tests),
-  `validate_cleanup()` (length ratio, `$`/`$$` balance, `\left`/`\right`
-  count balance, a relaxed heading-count check), and `cleanup_pdf()`
-  (orchestrates cleanup + validation + fallback-to-raw-Mathpix-output on any
-  failure — unlike Phase 1's `process_pdf()`, this stage's fallback behavior
-  is intrinsic to it and does not raise on failure, per docs/spec.md).
-- `src/main.py`: `run()` extended to drive the LLM stage after Mathpix for
-  freshly-processed files, plus a separate staleness check
-  (`needs_llm_reprocessing()`) for files whose Mathpix stage is skipped
-  (UNCHANGED) but whose LLM stage has never succeeded. Also adds a
-  `force_llm` parameter to `run()` as forward-looking infrastructure for a
-  future forced-reprocessing CLI flag (see below), and a
-  `target_source_path` parameter as forward-looking infrastructure for a
-  future single-file rerun CLI flag (see below).
-- `scripts/smoke_test_llm.py`: manual real-API prompt-iteration script
-  against already-cached `.mathpix.md` output (no new Mathpix calls needed).
+- `src/config.py`: `load_paths_config()` extended to read the
+  previously-unread `paths.vault_root` from `config.yaml`, added to
+  `PathsConfig`. **Required, no default** (same treatment as `input_root`,
+  not `cache_dir`/`state_db`) — there's no sensible fallback location for a
+  user's Obsidian vault.
+- `src/postprocess.py` (new module):
+  - `parse_lecture_filename()` — extracts a lecture number (regex
+    `lecture[_-]?(\d+)`, optionally followed by a trailing `_<topic>`
+    segment, case-insensitive) and a course name (the PDF's immediate
+    parent folder name, underscores replaced with spaces) from a source PDF
+    path. Raises a new `PostprocessError` on an unparseable filename (no
+    lecture-number match) rather than silently guessing.
+  - `build_frontmatter()` — assembles the YAML frontmatter block
+    (`title`/`course`/`date`/`lecture_number`/`tags`/`source_pdf`/
+    `processed`). **`date` is sourced from the source PDF's filesystem
+    mtime only** — confirmed with the user: no filename-date parsing this
+    phase, since the real `notes_raw/class_1` files have no date segment in
+    their names and mtime is already relied on elsewhere (tier-1 change
+    detection). `tags` defaults to a hardcoded `["lecture-notes"]` module
+    constant (`output.base_tags`/`course_tags` real config wiring is Phase
+    6). The output-filename prefix ("Lecture") is likewise a hardcoded
+    default pending Phase 6's `naming.lecture_prefix` wiring.
+  - `scan_delimiter_issues()` — a warn-only diagnostic scan (never
+    auto-fixes anything) of the actual content about to be written to the
+    vault: reuses `validate_cleanup()`'s `$`/`$$` and `\left`/`\right`
+    count-balance check logic, plus a new check for any literal
+    `\(...\)`/`\[...\]` delimiters slipping through (docs/spec.md's
+    explicit Stage 5 ask, not covered by Phase 3's `validate_cleanup()`).
+    Returns a list of warning strings; printing them is the caller's
+    (`src/main.py`'s) job, matching this module's "pure function" pattern.
+- `src/vault.py` (new module): `write_lecture_note()` orchestrates
+  `postprocess.parse_lecture_filename()` + Phase 4's
+  `figures.copy_figures_to_vault()`/`rewrite_image_references()` +
+  `postprocess.build_frontmatter()`/`scan_delimiter_issues()` into the
+  final `vault/{course}/Lecture NN.md`, overwriting unconditionally on
+  rerun (per docs/spec.md's Error Handling table: "Output file already
+  exists in vault → Overwrite").
+- `src/state.py`: two new nullable columns — `vault_status`
+  (`"success"`/`"failed"`, same per-stage-status convention as
+  `mathpix_status`/`llm_status`) and `vault_path` (the final vault `.md`
+  location). **Kept deliberately separate from the existing `output_path`
+  column**, which keeps its Phase 3 meaning unchanged (the cache-stage
+  `.llm.md`/`.mathpix.md` path written by `cleanup_pdf()`) — confirmed
+  with the user rather than repurposing `output_path` and risking breaking
+  Phase 3's established semantics. The already-reserved `vault_written_at`
+  column (present since Phase 2, always `NULL` until now) is populated for
+  the first time.
+- `src/main.py`: `run()`/`_process_file()` wired to call
+  `write_lecture_note()` right after `cleanup_pdf()` succeeds (or falls
+  back) on the actionable NEW/CHANGED/RETRY path, **and** on the
+  UNCHANGED-file LLM-only-rerun path (reprocessed LLM content needs to
+  reach the vault too) — confirmed with the user that Phase 5 fully wires
+  vault-writing into a real pipeline run this phase, rather than leaving
+  `src/postprocess.py`/`src/vault.py` standalone/unwired the way Phase 4
+  initially left `src/figures.py` unwired until Phase 5/6.
 
-**Deliberate correction to docs/spec.md's Reprocessing logic table:** spec.md
-lists "PDF unchanged, prompt version updated → Re-run LLM stage only" as
-automatic behavior. This phase does **not** implement it that way — confirmed
-with the user. `needs_llm_reprocessing()` checks only `llm_status` (never-run
-or failed), never comparing the stored `llm_prompt_version` against the
-currently configured one. Switching `config.yaml`'s `llm.prompt_version` must
-never silently trigger mass reprocessing (and its associated LLM API cost) on
-the next ordinary run. Instead, `run()` gains a `force_llm: bool = False`
-parameter: when `True`, every eligible file's LLM stage is rerun with the
-currently configured prompt regardless of stored status/version. This is the
-infrastructure for an eventual CLI flag (planned name: `--refresh-llm-prompt`,
-still Phase 7 scope — `main()` hardcodes `force_llm=False` and does not parse
-it from `argv` yet). `state.db`'s `llm_prompt_version` column always records
-whichever version actually produced that row's currently-stored output,
-regardless of what `config.yaml` currently says.
+**Deliberate correction to docs/spec.md's Error Handling table**, confirmed
+with the user: spec.md's original wording for a malformed/unparseable
+filename is "skip file, do not add to state log" — written for a
+single-stage pipeline. By Phase 5, a file's Mathpix and LLM stages may
+already have succeeded and been recorded in `state.db` *before*
+vault-writing ever looks at the filename. The corrected behavior: a
+`PostprocessError` from an unparseable filename is caught per-file,
+`vault_status="failed"` is recorded, but that same file's already-successful
+`mathpix_status`/`llm_status`/`output_path` are left completely untouched —
+a vault-write failure must never retroactively erase or reinterpret an
+earlier stage's already-recorded success. Counts toward `RunSummary.errors`;
+the run continues to the next file.
 
-**Single-file rerun infrastructure:** confirmed use case — process a lecture
-PDF, notice an LLM cleanup error, manually tweak `prompts/cleanup_v1.txt` (or
-bump `llm.prompt_version`), and want to rerun *just that one file's* LLM
-stage rather than the whole corpus. `run()` gains a
-`target_source_path: str | Path | None = None` parameter: when given, it
-resolves the file's course, classifies just that one PDF directly (skipping
-the full `discover_pdfs()` walk), and runs it through the same per-file
-mathpix+LLM logic as an ordinary run — combined with `force_llm=True`, this
-gives exactly the single-file-reprocess workflow above. Like `force_llm`,
-this is infrastructure only: `main()` doesn't parse a `--file`-style flag
-yet (still Phase 7), but the parameter and code path are implemented and
-tested now.
+Still out of scope this phase: course index generation (`_index.md` per
+course, docs/spec.md Stage 6), and the remaining `config.yaml` sections
+nothing reads yet (`output.base_tags`/`course_tags`, `naming.lecture_prefix`,
+`output.figures_dark_mode_flag`) — those are Phase 6, per the "Remaining
+Work" plan below. Also out of scope: a `needs_vault_rewrite()`-style
+independent staleness/retry check for a `vault_status == "failed"` row
+(mirroring `needs_llm_reprocessing()`) — a failed vault-write is currently
+only retried incidentally, whenever that file's Mathpix+LLM stage happens to
+run again (e.g. a real content change, or `force_llm=True`); flagged as a
+possible fast-follow rather than built speculatively now, to be revisited if
+issue #32's real-data validation shows it's actually needed.
 
-Still out of scope: chunking for long documents (deferred — real lecture
-PDFs observed so far are 1-2 pages, well under any token threshold; revisit
-once a real long document is actually encountered rather than building
-untested speculative logic now), figure copy-to-vault, frontmatter/vault
-writing, course index generation, and CLI flags beyond the bare entry point
-— those arrive in Phases 4-7.
-
-**Also worth noting for validation design:** the Phase 1 smoke-test-derived
-idea of a "`\left`/`\right` *type*-matching balance check" turned out not to
-be mechanically checkable — `\left(...\right]` is syntactically valid LaTeX
-regardless of whether the delimiter shapes correspond, so there's no static
-rule distinguishing a real OCR mismatch from intentional mixed delimiters.
-This phase's `validate_cleanup()` implements a **count**-balance check for
-`\left`/`\right` (same shape as the `$`/`$$` check), not a semantic pairing
-check, and relies on the cleanup prompt itself (with bra-ket normalization
-guidance) to actually fix mismatched pairs on a best-effort basis.
-
-Tracked in issues #13-#20 (`phase-3` label). Issue #21 (LLM token usage +
-cost estimate tracking) was opened as a small `phase-3`-labeled followup
-after this phase was already validated/closed — see its entry in "Phase 3
-progress" below.
+Tracked in issues #26-#32 (`phase-5` label). See "Phase 5 progress" below
+for status as each issue lands.
 
 ## Remaining Work — Phases 4-7 Plan
 
-Living, forward-looking plan for the rest of the pipeline. Nothing described
-in this section is implemented yet (most recent completed work is Phase 3's
-issues #13-#22). Supersedes docs/spec.md's Phase 4-7 descriptions wherever a
-more specific decision has since been made (same "AGENTS.md wins on
-disagreement" rule as everywhere else in this file). Phase numbers below
-match docs/spec.md's original roadmap; each phase also folds in whichever
-newly-requested features (this planning round) naturally belong there.
+Living, forward-looking plan for the rest of the pipeline. Phase 4 is now
+VALIDATED — complete (issues #23-#25); Phase 5 is the current phase (issues
+#26-#32 — see "Current Phase" above for the confirmed, up-to-date design).
+Phases 6-7 below are still unimplemented forward-looking plan only.
+Supersedes docs/spec.md's Phase 4-7 descriptions wherever a more specific
+decision has since been made (same "AGENTS.md wins on disagreement" rule as
+everywhere else in this file). Phase numbers below match docs/spec.md's
+original roadmap; each phase also folds in whichever newly-requested
+features (this planning round) naturally belong there.
 
 ### Phase 4 — Figure handling (vault-facing)
 
@@ -188,6 +197,15 @@ implemented behavior.
     off too, so alt text isn't just empty.
 
 ### Phase 5 — Post-processing (vault-facing)
+
+**This is now the current phase — see "Current Phase" above for the full
+confirmed, up-to-date design (issues #26-#32).** The bullets below are the
+original forward-looking plan from before implementation started; retained
+for history, superseded by "Current Phase" wherever more specific decisions
+have since been made (e.g. course/lecture-number parsing lands in
+`src/postprocess.py`, not derived some other way; date is mtime-only, no
+filename-date parsing this phase; `vault_path`/`vault_status` are new
+columns kept separate from the existing `output_path`).
 
 Scope: YAML frontmatter injection, a final delimiter-balance validation pass
 (warn-only, per docs/spec.md — never auto-fix), and actually writing the
@@ -312,6 +330,39 @@ the user so far:**
       fake/no-op `Reporter`, matching every other injectable-dependency
       precedent in this codebase (`http_client=`, `completion_fn=`,
       `sleep_fn=`) — no test ever asserts on actual Rich terminal rendering.
+
+### Phase 5 progress
+
+**Phase 5 status: planned, issues opened, implementation not yet started.**
+Scoped into 7 issues (#26-#32, `phase-5` label), matching the granularity of
+Phase 3/4's issue breakdown:
+
+- **#26** — `src/config.py`: extend `load_paths_config()` to read
+  `paths.vault_root` (required, no default).
+- **#27** — `src/postprocess.py`: `parse_lecture_filename()` +
+  `build_frontmatter()`.
+- **#28** — `src/postprocess.py`: `scan_delimiter_issues()` warning scan.
+- **#29** — `src/vault.py`: `write_lecture_note()` (assembles frontmatter +
+  Phase 4's figure copy/rewrite + delimiter scan into the final vault
+  `.md`).
+- **#30** — `src/state.py`: new `vault_status`/`vault_path` columns
+  (reuses the already-existing `vault_written_at` column for the
+  timestamp, rather than adding a redundant one).
+- **#31** — `src/main.py`: wire the vault-writing stage into `run()`/
+  `_process_file()`, including the malformed-filename error-handling
+  correction described in "Current Phase" above.
+- **#32** — Real-data validation against `notes_raw/class_1` (same shape
+  as issues #12/#20/#22/#25's precedent), including an Obsidian visual
+  check of rendered frontmatter/figures and a real malformed-filename
+  exercise. Marks Phase 5 VALIDATED once complete.
+
+All design decisions listed under "Current Phase" above (the `vault_path`
+vs. reusing `output_path` question, the new `vault_status` column, the
+Error Handling table correction, mtime-only frontmatter dates, wiring
+directly into `run()` this phase rather than leaving it standalone, the
+hardcoded-default tags, and the delimiter-scan design) were confirmed with
+the user before any issue was opened, following the same "confirm major
+decisions up front" convention as Phases 3/4.
 
 ### Phase 4 progress
 
