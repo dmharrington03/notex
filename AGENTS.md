@@ -262,8 +262,19 @@ narrative and real-data-validation findings.
   `build_frontmatter()`. Unexpected: `date`/`processed` fields use **local
   time, not UTC** (deliberate — human-facing calendar fields, unlike the
   rest of the codebase's UTC convention).
-- **#28-#32 (pending)** — `scan_delimiter_issues()`, `src/vault.py`'s
-  `write_lecture_note()`, `state.py`'s `vault_status`/`vault_path` columns,
+- **#28 (done)** — `src/postprocess.py`: `scan_delimiter_issues()`
+  (warn-only `$`/`\left`/`\right`-balance + literal `\(...\)`/`\[...\]`
+  diagnostic scan).
+- **#29 (done)** — `src/vault.py`: `write_lecture_note()` +
+  `VaultWriteResult`. Orchestrates `parse_lecture_filename()` ->
+  `copy_figures_to_vault()` -> read content -> `rewrite_image_references()`
+  -> `scan_delimiter_issues()` (on the rewritten body) ->
+  `build_frontmatter()` -> write `vault/{course}/Lecture NN.md`
+  unconditionally overwriting. `vault_course_dir` is always explicitly
+  `mkdir(parents=True, exist_ok=True)`'d (needed for the zero-figure case,
+  since `copy_figures_to_vault()` only creates the `figures/` subdir when
+  there are actual figures — that sub-behavior is untouched).
+- **#30-#32 (pending)** — `state.py`'s `vault_status`/`vault_path` columns,
   wiring into `run()`, and real-data validation. Full design already
   confirmed under "Current Phase" above.
 
