@@ -64,11 +64,13 @@ Dependencies are tracked in `environment.yml` (reproduce with
 
 ## Current Phase
 
-**Phase 5 — Post-processing (vault-facing).** Scope: YAML frontmatter
-injection, a final delimiter-balance warning scan (never auto-fix), and
-assembling + writing finished Markdown into `vault/{course}/Lecture NN.md`,
-per docs/spec.md Stage 5 (corrected/detailed below). Phase 4 (figure
-handling) is VALIDATED — complete. See `docs/spec.md` for the full 7-phase
+**Phase 5 — Post-processing (vault-facing) — VALIDATED, complete.** Scope
+was: YAML frontmatter injection, a final delimiter-balance warning scan
+(never auto-fix), and assembling + writing finished Markdown into
+`vault/{course}/Lecture NN.md`, per docs/spec.md Stage 5
+(corrected/detailed below). Phase 6 (full config wiring + end-to-end
+validation) is next up — not yet started/planned in detail beyond the
+"Remaining Work" outline below. See `docs/spec.md` for the full 7-phase
 roadmap (note: follow this file, AGENTS.md, not spec.md, where they
 disagree).
 
@@ -137,6 +139,13 @@ VALIDATED — complete; Phase 5 is current (see "Current Phase" above for the
 confirmed design). Phases 6-7 below are still unimplemented forward-looking
 plan only. Phase numbers match docs/spec.md's original roadmap.
 
+**Follow-up carried forward from Phase 5's real-data validation (#32):**
+once Phase 6 wires up `output.figures_dark_mode_flag` for real, re-do the
+manual Obsidian visual check against a lecture with a figure (re-run with
+the flag on, confirm the `@darkmode`-suffixed alt text actually renders/
+behaves as intended in the configured renderer) — #32 only visually
+confirmed the flag-off default path.
+
 ### Phase 4 — Figure handling (vault-facing)
 
 Scope: copy each processed file's cached figures
@@ -162,7 +171,8 @@ is left untouched.
 
 ### Phase 5 — Post-processing (vault-facing)
 
-Current phase — see "Current Phase" above for the full confirmed design.
+VALIDATED — complete. See "Current Phase" above for the full confirmed
+design.
 
 ### Phase 6 — Full config wiring + end-to-end validation
 
@@ -254,7 +264,7 @@ planning.
 Brief status only — see each issue's GitHub comments for implementation
 narrative and real-data-validation findings.
 
-### Phase 5 (in progress, issues #26-#32, `phase-5` label)
+### Phase 5 (VALIDATED — complete, issues #26-#32)
 
 - **#26 (done)** — `vault_root` added to `PathsConfig` (required, no
   default).
@@ -295,8 +305,10 @@ narrative and real-data-validation findings.
   so real vault-writing now correctly surfaces that as an error
   (`vault_status="failed"`) — updated the test's expectations rather than
   masking it.
-- **#32 (pending)** — real-data validation. Full design already confirmed
-  under "Current Phase" above.
+- **#32 (done)** — real-data validation against `notes_raw/class_1`: cold
+  run, idempotent rerun, and the malformed-filename path all confirmed
+  working as designed (no code changes needed); full findings in the
+  issue's GitHub comments. Phase 5 is now marked VALIDATED — complete.
 
 ### Phase 4 (VALIDATED — complete, issues #23-#25)
 
