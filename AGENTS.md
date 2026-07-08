@@ -362,8 +362,65 @@ label), matching the granularity of Phase 3/4's issue breakdown:
     `PathsConfig` directly, bypassing `load_paths_config()`) was updated
     to pass `vault_root=tmp_path / "vault"`, since the field is now
     required with no dataclass default.
-- **#27** — `src/postprocess.py`: `parse_lecture_filename()` +
-  `build_frontmatter()`.
+- **Issue #27 (`src/postprocess.py`: `parse_lecture_filename()` +
+  `build_frontmatter()`) — done.** Implemented in new module
+  `src/postprocess.py`, tested in `tests/test_postprocess.py` (13 new
+  pure-function/tmp_path-backed cases, no mocking, no network — full suite
+  is 152 passing). Matched the issue's pre-confirmed design, with two
+  design decisions confirmed with the user beyond the issue's literal text:
+  - `_LECTURE_FILENAME_RE = re.compile(r"lecture[_-]?(\d+)(?:_(.+))?",
+    re.IGNORECASE)`, matched via `.search()` against `Path(pdf_path).stem`
+    (not `.match()` — leaves room for a filename that doesn't start with
+    "lecture", even though every real filename observed so far does).
+    `lecture_number` drops leading zeros (`int("01") == 1`), re-applied via
+    `:02d` formatting in `build_frontmatter()`'s `title` field. `topic`
+    captures the trailing `_<topic>` segment (e.g.
+    `Lecture_02_eigenvalues.pdf` -> `"eigenvalues"`) or `None`.
+    `course_name` is `pdf_path.parent.name.replace("_", " ")`.
+  - `PostprocessError` is a new base exception for this module, raised only
+    when `_LECTURE_FILENAME_RE` finds no match at all — per the issue
+    (and AGENTS.md's "Current Phase" Error Handling correction above),
+    callers are expected to catch this per-file and record
+    `vault_status="failed"` without touching that file's
+    `mathpix_status`/`llm_status` (not implemented by this issue —
+    `src/vault.py`/`src/main.py` wiring is issues #29/#31).
+  - **`build_frontmatter()`'s `date`/`processed` fields use *local* time,
+    not UTC — confirmed with the user, a deliberate deviation from the
+    rest of the codebase's `datetime.now(timezone.utc)` convention** (e.g.
+    `LLMResult.processed_at`). Rationale: these are human-facing "what
+    calendar day is this lecture/was this processed" fields, not machine
+    timestamps, so a UTC date could read as the wrong day for a non-UTC
+    user near midnight. `date` is
+    `datetime.fromtimestamp(source_mtime).strftime(DATE_FORMAT)` (no `tz`
+    arg — converts an epoch float straight to the local calendar date).
+    `processed` is `processed_at.astimezone().strftime(DATE_FORMAT)` —
+    `.astimezone()` normalizes both a tz-aware `datetime` (e.g. UTC) and a
+    naive one to local time before formatting, so both fields are always
+    consistent local-time calendar dates regardless of what tzinfo the
+    caller's `processed_at` happens to carry.
+  - **`build_frontmatter()`'s `topic` parameter is accepted but
+    intentionally unused in the rendered output — confirmed with the
+    user, exactly as the issue's literal signature specifies.** Kept for
+    forward-compatibility (e.g. a future "subtitle"-style frontmatter
+    field) rather than dropped now and re-added later.
+  - `DEFAULT_TAGS` is a **tuple** (`("lecture-notes",)`), not a list —
+    deliberate, so it can safely serve as `build_frontmatter()`'s default
+    parameter value without the classic Python mutable-default-argument
+    pitfall. `build_frontmatter()` internally does `list(tags)` before
+    serializing, so both a tuple and a list argument work identically.
+  - Frontmatter is rendered via `yaml.safe_dump(data, sort_keys=False,
+    default_flow_style=False)`, wrapped as `f"---\n{body}---\n"` — key
+    order (`title`/`course`/`date`/`lecture_number`/`tags`/`source_pdf`/
+    `processed`) matches docs/spec.md's Stage 5 example exactly, preserved
+    via `sort_keys=False` rather than relying on `yaml.safe_dump`'s
+    default alphabetical ordering.
+  - `source_pdf` is rendered as `str(Path(source_pdf_path).resolve())` —
+    matches `state.db`'s `source_path` convention (absolute, resolved)
+    elsewhere in the codebase.
+  - No filesystem I/O beyond `Path.resolve()`/`Path.stem`/`Path.parent`
+    reads — `src/postprocess.py` stays a pure building-block module, per
+    the issue's scope; actually writing a file into the vault is
+    `src/vault.py`'s job (issue #29).
 - **#28** — `src/postprocess.py`: `scan_delimiter_issues()` warning scan.
 - **#29** — `src/vault.py`: `write_lecture_note()` (assembles frontmatter +
   Phase 4's figure copy/rewrite + delimiter scan into the final vault
@@ -2092,7 +2149,7 @@ notex/                      ← repo root
 │   ├── llm.py              ← LLM cleanup client + prompt loading + orchestration (LLMClient, LLMError, load_prompt_text, validate_cleanup, cleanup_pdf, needs_llm_reprocessing — issues #15-#17)
 │   ├── main.py             ← CLI orchestration entry point (RunSummary, run, main) — wires discovery + state.db + process_pdf() into a runnable pass over input_root
 │   ├── figures.py          ← figure copy-to-vault + Markdown image-reference caption rewriter (copy_figures_to_vault, rewrite_image_references — issues #23-#24)
-│   ├── postprocess.py      ← [Phase 5, not yet implemented] YAML frontmatter builder + delimiter-balance warning scan
+│   ├── postprocess.py      ← filename parsing + YAML frontmatter builder (parse_lecture_filename, build_frontmatter — issue #27); delimiter-balance warning scan [Phase 5, not yet implemented — issue #28]
 │   ├── vault.py            ← [Phase 5/6, not yet implemented] assembles + writes final per-lecture vault .md; course index generation
 │   └── reporting.py        ← [Phase 7, not yet implemented] Reporter interface (PlainReporter/RichReporter) for progress UI
 ├── scripts/
