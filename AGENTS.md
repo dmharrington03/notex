@@ -274,7 +274,14 @@ narrative and real-data-validation findings.
   original description: no `base_tags`/global-default tag field at all —
   see the "Scope correction" note under "Current Phase" above. Also fixed
   #35's stale `base_tags`-fallback description to match.
-- **#34-#38 (not yet started)** — see "Current Phase" above for the full
+- **#34 (done)** — `src/config.py`: `NamingConfig` (`lecture_prefix`) +
+  `load_naming_config()`, same fully-optional pattern as
+  `load_llm_config()`/`load_output_config()`. `DEFAULT_LECTURE_PREFIX` is
+  duplicated in `config.py` (matches `postprocess.py`'s existing constant),
+  same no-cross-module-import precedent as `DEFAULT_DATE_FORMAT`. Added
+  `naming:` section to `config.example.yaml`. No deviations from the
+  issue's plan.
+- **#35-#38 (not yet started)** — see "Current Phase" above for the full
   scope. Status lines will be added here as each issue completes.
 
 ### Phase 5 (VALIDATED — complete, issues #26-#32)
