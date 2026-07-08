@@ -34,6 +34,14 @@ Also covered here (issue #33 — config.yaml output: settings):
     - there is no global/default tag list: a course with no course_tags
       entry gets no tags at all (deliberate divergence from docs/spec.md's
       base_tags concept, see AGENTS.md's Phase 6 notes)
+
+Also covered here (issue #34 — config.yaml naming: settings):
+    - load_naming_config() reads lecture_prefix from a config.yaml's
+      naming: section
+    - falls back to DEFAULT_LECTURE_PREFIX when the file is missing, the
+      naming: section is absent, or lecture_prefix itself is missing —
+      never raises ConfigError
+    - lecture_prefix is a single global value, no per-course override
 """
 
 from pathlib import Path
@@ -44,6 +52,7 @@ from src.config import (
     DEFAULT_CACHE_DIR,
     DEFAULT_DATE_FORMAT,
     DEFAULT_FIGURES_DARK_MODE_FLAG,
+    DEFAULT_LECTURE_PREFIX,
     DEFAULT_LLM_MODEL,
     DEFAULT_MAX_LENGTH_RATIO,
     DEFAULT_MAX_POLL_ATTEMPTS,
@@ -54,10 +63,12 @@ from src.config import (
     ConfigError,
     LLMConfig,
     MathpixPollingConfig,
+    NamingConfig,
     OutputConfig,
     PathsConfig,
     load_llm_config,
     load_mathpix_polling_config,
+    load_naming_config,
     load_output_config,
     load_paths_config,
 )
@@ -347,3 +358,40 @@ def test_output_config_course_tags_present_for_one_course_only(tmp_path):
     config = load_output_config(config_path)
 
     assert config.course_tags == {"class_1": ("class-1-only",)}
+
+
+def test_loads_naming_config_from_yaml(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text('naming:\n  lecture_prefix: "Lec"\n')
+
+    config = load_naming_config(config_path)
+
+    assert config == NamingConfig(lecture_prefix="Lec")
+
+
+def test_naming_config_falls_back_to_defaults_when_file_missing(tmp_path):
+    missing_path = tmp_path / "does_not_exist.yaml"
+
+    config = load_naming_config(missing_path)
+
+    assert config == NamingConfig(lecture_prefix=DEFAULT_LECTURE_PREFIX)
+
+
+def test_naming_config_falls_back_to_defaults_when_naming_section_missing(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("paths:\n  input_root: /tmp/notes_raw\n")
+
+    config = load_naming_config(config_path)
+
+    assert config == NamingConfig(lecture_prefix=DEFAULT_LECTURE_PREFIX)
+
+
+def test_naming_config_falls_back_to_defaults_when_lecture_prefix_key_missing(
+    tmp_path,
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("naming:\n  unrelated_key: \"foo\"\n")
+
+    config = load_naming_config(config_path)
+
+    assert config == NamingConfig(lecture_prefix=DEFAULT_LECTURE_PREFIX)

@@ -1,8 +1,5 @@
 # Copy this file to config.yaml and fill in real paths for your machine.
 # config.yaml is gitignored since these paths are machine-specific.
-#
-# Additional sections (naming:) are added in later phases as the code that
-# consumes them is implemented — see AGENTS.md for current phase status.
 
 paths:
   input_root: "/path/to/notes_raw"
@@ -30,3 +27,8 @@ output:
       - "linear-algebra"
       - "math"
   figures_dark_mode_flag: false
+
+naming:
+  # Global prefix used for both the vault filename ("Lecture 01.md") and the
+  # frontmatter title. No per-course override.
+  lecture_prefix: "Lecture"

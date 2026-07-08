@@ -9,13 +9,12 @@ from config.yaml (input_root/vault_root are required, cache_dir/state_db
 fall back to hardcoded defaults), the llm: model / prompt_version /
 validation.min_length_ratio / validation.max_length_ratio settings from
 config.yaml (all optional, same fully-optional fallback pattern as the
-mathpix: section), and the output: course_tags / date_format /
+mathpix: section), the output: course_tags / date_format /
 figures_dark_mode_flag settings from config.yaml (also fully optional, same
 pattern; course_tags has no global/default fallback — see OutputConfig's
-docstring).
-
-Full config.yaml wiring for the remaining sections (naming.lecture_prefix)
-arrives later in Phase 6 — kept out of scope here intentionally.
+docstring), and the naming: lecture_prefix setting from config.yaml (also
+fully optional, same pattern; a single global value, no per-course
+override).
 """
 
 from __future__ import annotations
@@ -59,6 +58,13 @@ DEFAULT_MAX_LENGTH_RATIO: float = 1.30
 # — see OutputConfig's docstring below for why.
 DEFAULT_DATE_FORMAT = "%Y-%m-%d"
 DEFAULT_FIGURES_DARK_MODE_FLAG = False
+
+# Phase 6 — naming: section default. Matches postprocess.py's
+# DEFAULT_LECTURE_PREFIX (a Phase 5 stand-in pending this real config
+# wiring; the constant is intentionally duplicated here rather than
+# imported, same no-cross-module-private-import precedent as
+# DEFAULT_DATE_FORMAT above).
+DEFAULT_LECTURE_PREFIX = "Lecture"
 
 
 class ConfigError(Exception):
@@ -105,6 +111,11 @@ class OutputConfig:
     course_tags: dict[str, tuple[str, ...]]
     date_format: str
     figures_dark_mode_flag: bool
+
+
+@dataclass(frozen=True)
+class NamingConfig:
+    lecture_prefix: str
 
 
 def load_mathpix_credentials(env_file: str | None = None) -> MathpixCredentials:
@@ -338,3 +349,35 @@ def load_output_config(config_path: str | Path | None = None) -> OutputConfig:
         date_format=date_format,
         figures_dark_mode_flag=figures_dark_mode_flag,
     )
+
+
+def load_naming_config(config_path: str | Path | None = None) -> NamingConfig:
+    """
+    Load the naming: lecture_prefix setting from config.yaml.
+
+    Args:
+        config_path: optional explicit path to config.yaml. If not given,
+            defaults to DEFAULT_CONFIG_PATH (config.yaml in the current
+            working directory), matching the project convention of running
+            the CLI from the repo root.
+
+    config.yaml (and the naming: section/key within it) is fully optional
+    here, same fallback pattern as load_llm_config()/load_output_config():
+    if the file doesn't exist, the naming: section is absent, or
+    lecture_prefix itself is missing, DEFAULT_LECTURE_PREFIX is used
+    instead. Never raises ConfigError.
+
+    lecture_prefix is a single global value — there is no per-course
+    override (confirmed design decision, see AGENTS.md's Phase 6 notes).
+    """
+    path = Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
+
+    lecture_prefix: str = DEFAULT_LECTURE_PREFIX
+
+    if path.is_file():
+        with path.open("r") as fh:
+            data: dict[str, Any] = yaml.safe_load(fh) or {}
+        naming_section = data.get("naming") or {}
+        lecture_prefix = naming_section.get("lecture_prefix", lecture_prefix)
+
+    return NamingConfig(lecture_prefix=lecture_prefix)
