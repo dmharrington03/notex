@@ -142,6 +142,166 @@ cost estimate tracking) was opened as a small `phase-3`-labeled followup
 after this phase was already validated/closed — see its entry in "Phase 3
 progress" below.
 
+## Remaining Work — Phases 4-7 Plan
+
+Living, forward-looking plan for the rest of the pipeline. Nothing described
+in this section is implemented yet (most recent completed work is Phase 3's
+issues #13-#22). Supersedes docs/spec.md's Phase 4-7 descriptions wherever a
+more specific decision has since been made (same "AGENTS.md wins on
+disagreement" rule as everywhere else in this file). Phase numbers below
+match docs/spec.md's original roadmap; each phase also folds in whichever
+newly-requested features (this planning round) naturally belong there.
+
+### Phase 4 — Figure handling (vault-facing)
+
+Scope: copy each processed file's cached figures
+(`_cache/{course}/figures/*.jpg`) into `vault/{course}/figures/`, and rewrite
+the LLM-cleaned (or raw-fallback) Markdown's image references from the
+cache-relative `![](figures/...)` form into Obsidian's `![[filename.jpg]]`
+wikilink form.
+
+- Likely new module `src/figures.py` (matches docs/spec.md's original file
+  layout) — a figure-copy function and a Markdown image-reference rewriter.
+- **New feature — dark-mode figure alt text.** New `output.figures_dark_mode:
+  true|false` key in `config.yaml` — confirmed as a **single global toggle**
+  (no per-course override, matching the feature's stated simplicity). When
+  enabled, this same rewrite step appends `@darkmode` to every figure's alt
+  text/wikilink so the user's Obsidian renderer handles dark-mode display —
+  purely a Markdown text transform, no image processing of any kind. Exact
+  wikilink alt-text syntax (`![[file.jpg|@darkmode]]` vs. an alt-text-bearing
+  variant) is a detail for implementation time, not decided now.
+  `config.example.yaml` gets a matching commented-out key.
+  - Also worth revisiting here per the Phase 1 smoke test findings: Mathpix
+    supplies no alt text at all for figures — consider injecting a
+    placeholder caption (e.g. "Figure 1") when `figures_dark_mode` is off
+    too, so alt text isn't just empty.
+
+### Phase 5 — Post-processing (vault-facing)
+
+Scope: YAML frontmatter injection, a final delimiter-balance validation pass
+(warn-only, per docs/spec.md — never auto-fix), and actually writing the
+finished Markdown into `vault/{course}/Lecture NN.md`.
+
+- Likely new module(s): `src/postprocess.py` (frontmatter builder +
+  delimiter warning scan) and `src/vault.py` (owns the "assemble and write
+  the final per-lecture file" responsibility: frontmatter + figures'
+  already-rewritten content + LLM/raw body).
+- `paths.vault_root` (already present in `config.yaml`/read into no config
+  loader function yet) gets consumed for the first time here.
+- Course/lecture-number/date parsing from the source filename (docs/spec.md's
+  Naming Convention section) also lands here, since frontmatter needs it.
+
+### Phase 6 — Full config wiring + end-to-end validation
+
+Scope: wire up the remaining `config.yaml` sections nothing reads yet
+(`output.base_tags`/`course_tags`, `naming.lecture_prefix`, the new
+`output.figures_dark_mode`), add course index generation, and validate the
+complete pipeline end-to-end on a real course.
+
+- Course index generation (`_index.md` per course, docs/spec.md Stage 6):
+  always fully regenerated (not incremental) after a course's files are
+  processed, so it stays correct even after reprocessing/renames. Likely
+  lives alongside the per-lecture writer in `src/vault.py`.
+- Real-data validation pass, same shape as issues #12/#20/#22's precedent:
+  run for real against `notes_raw/class_1`, confirming idempotency extends
+  correctly to the new vault-writing/index stages (e.g. rerunning doesn't
+  rewrite unchanged vault files or duplicate index rows).
+
+### Phase 7 — CLI polish + new feature requests
+
+Absorbs docs/spec.md's original CLI scope, the already-built-but-unwired
+`force_llm`/`target_source_path` infrastructure (issue #18 — this is where
+`main()` finally parses real flags for them), and every feature requested in
+this planning round.
+
+**Existing planned flags (docs/spec.md, still unimplemented):**
+- `--dry-run` — report what would be processed, no API calls.
+- `--force` — reprocess regardless of state.db.
+- `--course NAME` — restrict a run to one course.
+- `--refresh-llm-prompt` — CLI surface for `run()`'s existing `force_llm` param.
+- A single-file rerun flag (name TBD, e.g. `--file PATH`) — CLI surface for
+  `run()`'s existing `target_source_path` param.
+
+**New features (this planning round), with design decisions confirmed with
+the user so far:**
+
+1. **`--no-llm` flag** — bypasses the LLM cleanup stage entirely for the run.
+   - `run()`/`_process_file()` gain a `no_llm: bool` param, same shape as the
+     existing `force_llm` param. When set, `cleanup_pdf()` is never called
+     for actionable files; only `mathpix_*` fields are upserted this pass —
+     `llm_status`/`llm_*`/`output_path` are left exactly as-is in state.db
+     (confirmed: **no new `"skipped"` status value** — a freshly-processed
+     file just keeps `llm_status` NULL, identical to "LLM stage never
+     attempted").
+   - Confirmed consequence, requiring no extra state-machine logic: since
+     `needs_llm_reprocessing()` already treats `llm_status is None` as
+     "needs reprocessing," a file processed once with `--no-llm` is
+     automatically picked up and given a real LLM pass on the very next
+     normal run (no `--no-llm`) with zero special-casing.
+   - Open detail for implementation time: Phase 4/5's vault-writing step
+     needs a content source when `llm_status` is NULL for a file — reuse the
+     existing LLM-failure fallback-to-raw-`.mathpix.md` code path, just
+     triggered by "never attempted" rather than "attempted and failed."
+
+2. **Manual mode — exact source/destination file, no scanning.** Confirmed
+   design: a **separate script**, not a `main.py` flag.
+   - New `scripts/manual_convert.py`, following the existing
+     `scripts/smoke_test_*.py` convention (hits real APIs, not under
+     `pytest`) but — unlike those, which stop at the cache stage — covering
+     the **full pipeline through vault writing** (mathpix -> llm -> figures
+     -> frontmatter -> final `.md`), confirmed as in scope.
+   - Takes an explicit source PDF path and an explicit destination `.md`
+     path as CLI args. Never touches `state.db`, never calls
+     `discovery.py` — entirely stateless/untracked, for one-off conversions
+     outside (or overriding) the normal indexed corpus.
+   - Realistically built *after* Phase 4/5 land, since it reuses their
+     figure-copy/frontmatter functions directly as a library rather than
+     duplicating that logic.
+   - Open details, deliberately left for implementation time: where figures
+     land relative to an arbitrary destination path (likely a sibling
+     `figures/` dir next to the destination file); how frontmatter fields
+     normally derived from course-folder structure (course name, lecture
+     number) get supplied when there's no course folder to derive them from
+     (CLI args vs. best-effort parsing of the destination path).
+
+3. **`--verbose`/`-v` flag** — finer-grained per-stage progress detail
+   (Mathpix poll counts via the existing `on_status` hook in
+   `src/mathpix.py`, LLM token/cost per file, per-figure copy actions,
+   frontmatter/vault-write confirmation lines). Confirmed: **not a separate
+   output mode** — it controls detail level within whichever renderer
+   (plain or Rich, see below) is active for the run.
+
+4. **Rich Live CLI output.** Confirmed design: a shared reporting
+   abstraction threaded through the pipeline, not print statements
+   scattered across `main.py`/`mathpix.py`/`llm.py`.
+   - New module, likely `src/reporting.py`: a small `Reporter`
+     interface/protocol (e.g. `on_stage(file, stage)`, `on_detail(file,
+     message)`, `on_done(file, status)`) with two implementations:
+     - `PlainReporter` — today's `print()`-based behavior, gains
+       `--verbose`-gated extra detail lines.
+     - `RichReporter` — a `rich.live.Live` + `rich.table.Table`
+       pre-populated with every file `discover_pdfs()` identified (or the
+       single target file for a `target_source_path` run), updating each
+       row's status cell in place through stages such as waiting ->
+       submitting -> polling -> downloading -> cleaning -> writing vault ->
+       done/error.
+   - **Activation, confirmed:** auto-detected, not an explicit flag —
+     `RichReporter` is used when stdout is an interactive TTY and `rich` is
+     importable; falls back to `PlainReporter` otherwise (piped output, CI,
+     `rich` not installed).
+   - Plumbing: `run()` and `_process_file()` gain an optional `reporter`
+     param (defaulting to a no-op/plain instance, so existing tests are
+     unaffected), threaded down into `process_pdf()`'s existing `on_status`
+     callback param and into new equivalent hooks added to `cleanup_pdf()`
+     and Phase 4/5's figure-copy/vault-write functions.
+   - `rich` will need to be added to `environment.yml`
+     (`conda install -n notex -c conda-forge rich`), per the conda-only
+     rule — not yet installed.
+   - Testing convention (to establish when implemented): tests inject a
+     fake/no-op `Reporter`, matching every other injectable-dependency
+     precedent in this codebase (`http_client=`, `completion_fn=`,
+     `sleep_fn=`) — no test ever asserts on actual Rich terminal rendering.
+
 ### Phase 3 progress
 
 **Phase 3 status: VALIDATED — complete.** All Phase 3 issues (#13-#20) are
@@ -1671,10 +1831,15 @@ notex/                      ← repo root
 │   ├── state.py            ← state.db schema + CRUD (StateEntry, init_db, get_entry, upsert_entry)
 │   ├── discovery.py        ← per-file two-tier change classification + recursive multi-course walk (Classification, ClassificationResult, classify_pdf, compute_sha256, discover_pdfs, UNGROUPED_COURSE_KEY)
 │   ├── llm.py              ← LLM cleanup client + prompt loading + orchestration (LLMClient, LLMError, load_prompt_text, validate_cleanup, cleanup_pdf, needs_llm_reprocessing — issues #15-#17)
-│   └── main.py             ← CLI orchestration entry point (RunSummary, run, main) — wires discovery + state.db + process_pdf() into a runnable pass over input_root
+│   ├── main.py             ← CLI orchestration entry point (RunSummary, run, main) — wires discovery + state.db + process_pdf() into a runnable pass over input_root
+│   ├── figures.py          ← [Phase 4, not yet implemented] figure copy-to-vault + Markdown image-reference rewriter (incl. dark-mode alt-text)
+│   ├── postprocess.py      ← [Phase 5, not yet implemented] YAML frontmatter builder + delimiter-balance warning scan
+│   ├── vault.py            ← [Phase 5/6, not yet implemented] assembles + writes final per-lecture vault .md; course index generation
+│   └── reporting.py        ← [Phase 7, not yet implemented] Reporter interface (PlainReporter/RichReporter) for progress UI
 ├── scripts/
 │   ├── smoke_test_mathpix.py   ← manual, real-API Mathpix validation
-│   └── smoke_test_llm.py       ← manual, real-API LLM prompt-iteration script (issue #19)
+│   ├── smoke_test_llm.py       ← manual, real-API LLM prompt-iteration script (issue #19)
+│   └── manual_convert.py       ← [Phase 7, not yet implemented] manual mode: exact source PDF -> exact destination .md, full pipeline, stateless (no state.db/discovery.py)
 ├── tests/
 │   ├── fixtures/           ← fixture data for mocked tests
 │   ├── test_mathpix.py
