@@ -2149,7 +2149,7 @@ notex/                      ← repo root
 │   ├── llm.py              ← LLM cleanup client + prompt loading + orchestration (LLMClient, LLMError, load_prompt_text, validate_cleanup, cleanup_pdf, needs_llm_reprocessing — issues #15-#17)
 │   ├── main.py             ← CLI orchestration entry point (RunSummary, run, main) — wires discovery + state.db + process_pdf() into a runnable pass over input_root
 │   ├── figures.py          ← figure copy-to-vault + Markdown image-reference caption rewriter (copy_figures_to_vault, rewrite_image_references — issues #23-#24)
-│   ├── postprocess.py      ← filename parsing + YAML frontmatter builder (parse_lecture_filename, build_frontmatter — issue #27); delimiter-balance warning scan [Phase 5, not yet implemented — issue #28]
+│   ├── postprocess.py      ← filename parsing + YAML frontmatter builder (parse_lecture_filename, build_frontmatter — issue #27); delimiter-balance warning scan (scan_delimiter_issues — issue #28)
 │   ├── vault.py            ← [Phase 5/6, not yet implemented] assembles + writes final per-lecture vault .md; course index generation
 │   └── reporting.py        ← [Phase 7, not yet implemented] Reporter interface (PlainReporter/RichReporter) for progress UI
 ├── scripts/

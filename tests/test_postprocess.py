@@ -1,5 +1,5 @@
 """
-Unit tests for src/postprocess.py (issue #27).
+Unit tests for src/postprocess.py (issues #27, #28).
 
 Covered here:
     - parse_lecture_filename(): standard/single-digit/uppercase/hyphenated/
@@ -7,6 +7,9 @@ Covered here:
     - course-name derivation: underscore replacement
     - build_frontmatter(): full field round-trip, default-tags case,
       custom-tags-list case, and topic-is-not-leaked-into-output
+    - scan_delimiter_issues(): balanced content is a no-op; unbalanced $,
+      unbalanced \\left/\\right, and literal \\(...\\)/\\[...\\] each produce
+      exactly one warning; a combined case produces multiple warnings
 
 All pure-function/tmp_path-backed, no network, no mocking.
 """
@@ -22,6 +25,7 @@ from src.postprocess import (
     PostprocessError,
     build_frontmatter,
     parse_lecture_filename,
+    scan_delimiter_issues,
 )
 
 
@@ -169,3 +173,70 @@ def test_build_frontmatter_source_pdf_is_resolved(tmp_path):
     body = result[len("---\n") : -len("---\n")]
     data = yaml.safe_load(body)
     assert data["source_pdf"] == str(pdf_path.resolve())
+
+
+def test_scan_delimiter_issues_balanced_content_is_empty():
+    text = "Some prose with $x = 1$ and a display block:\n\n$$\ny = 2\n$$\n"
+
+    assert scan_delimiter_issues(text) == []
+
+
+def test_scan_delimiter_issues_unbalanced_dollar():
+    text = "This has an unbalanced $x = 1 sign."
+
+    warnings = scan_delimiter_issues(text)
+
+    assert len(warnings) == 1
+    assert "$" in warnings[0]
+
+
+def test_scan_delimiter_issues_unbalanced_left_right():
+    text = r"An expression \left( x + 1 \right) \right] is unbalanced."
+
+    warnings = scan_delimiter_issues(text)
+
+    assert len(warnings) == 1
+    assert "\\left" in warnings[0] and "\\right" in warnings[0]
+
+
+def test_scan_delimiter_issues_ignores_rightarrow_and_leftarrow():
+    text = r"$x \rightarrow y$ and $y \leftarrow x$ and $z \leftrightarrow w$"
+
+    assert scan_delimiter_issues(text) == []
+
+
+def test_scan_delimiter_issues_literal_paren_delimiters():
+    text = r"Some inline math \(x = 1\) using the wrong delimiters."
+
+    warnings = scan_delimiter_issues(text)
+
+    assert len(warnings) == 1
+    assert r"\(...\)" in warnings[0]
+
+
+def test_scan_delimiter_issues_literal_bracket_delimiters():
+    text = "Display math:\n\\[\nx = 1\n\\]\nusing the wrong delimiters."
+
+    warnings = scan_delimiter_issues(text)
+
+    assert len(warnings) == 1
+    assert r"\[...\]" in warnings[0]
+
+
+def test_scan_delimiter_issues_combined_multiple_issues():
+    text = (
+        r"Unbalanced $x = 1 and \left( y + 1 \right) \right] "
+        r"and \(z = 1\)."
+    )
+
+    warnings = scan_delimiter_issues(text)
+
+    assert len(warnings) == 3
+
+
+def test_scan_delimiter_issues_never_mutates_input():
+    text = "Balanced $x$ text."
+
+    scan_delimiter_issues(text)
+
+    assert text == "Balanced $x$ text."
