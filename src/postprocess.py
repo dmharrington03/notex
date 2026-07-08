@@ -60,8 +60,16 @@ _LECTURE_FILENAME_RE = re.compile(r"lecture[_-]?(\d+)(?:_(.+))?", re.IGNORECASE)
 # naming.lecture_prefix's real config wiring is Phase 6.
 DEFAULT_LECTURE_PREFIX = "Lecture"
 
-# Phase 5 stand-in for output.base_tags/course_tags, which aren't wired to
-# any config reader until Phase 6. A tuple (not a list) deliberately, so it
+# TEMPORARY Phase 5 stand-in, only until #35 wires real output.course_tags
+# resolution into build_frontmatter()'s callers. This constant itself will
+# NOT survive as a fallback once that lands: the final, real behavior is
+# that a course with no output.course_tags entry in config.yaml gets NO
+# tags at all (an empty tags list in the frontmatter) — there is no
+# global/default tag concept in the real config (see src/config.py's
+# OutputConfig docstring; this was a deliberate correction away from
+# docs/spec.md's base_tags idea, see AGENTS.md's Phase 6 notes). Until #35
+# lands, every note gets this hardcoded tuple since nothing reads
+# config.yaml's course_tags yet. A tuple (not a list) deliberately, so it
 # can safely serve as build_frontmatter()'s default parameter value without
 # the classic mutable-default-argument pitfall.
 DEFAULT_TAGS: tuple[str, ...] = ("lecture-notes",)
@@ -172,9 +180,15 @@ def build_frontmatter(
             local time before formatting, so "date"/"processed" are always
             consistent local-time calendar dates regardless of what
             tzinfo processed_at happens to carry.
-        tags: defaults to DEFAULT_TAGS (("lecture-notes",)) — the Phase 5
-            stand-in for real output.base_tags/course_tags config wiring
-            (Phase 6).
+        tags: defaults to DEFAULT_TAGS (("lecture-notes",)), a TEMPORARY
+            Phase 5 stand-in until #35 wires real output.course_tags
+            resolution through. This param itself doesn't change in #35 —
+            callers (src/vault.py) will start passing an explicitly
+            resolved tuple every time (empty `()` for a course with no
+            course_tags entry, per the final no-default-tags design — see
+            DEFAULT_TAGS's module-level comment and AGENTS.md's Phase 6
+            notes), making this default effectively dead code at that
+            point rather than something still relied on.
 
     Returns:
         A complete "---\\n...\\n---\\n" YAML frontmatter block with keys in

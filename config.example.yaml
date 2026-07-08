@@ -1,9 +1,8 @@
 # Copy this file to config.yaml and fill in real paths for your machine.
 # config.yaml is gitignored since these paths are machine-specific.
 #
-# Additional sections (output:, naming:) are added in later phases as
-# the code that consumes them is implemented — see AGENTS.md for current
-# phase status.
+# Additional sections (naming:) are added in later phases as the code that
+# consumes them is implemented — see AGENTS.md for current phase status.
 
 paths:
   input_root: "/path/to/notes_raw"
@@ -20,5 +19,14 @@ llm:
     min_length_ratio: 0.70
     max_length_ratio: 1.30
 
-# output:
-#   figures_dark_mode_flag: false
+output:
+  date_format: "%Y-%m-%d"
+  # Per-course tags, keyed by the raw course folder name (underscores, not
+  # spaces). There is no global/default tag list — a course with no entry
+  # here gets no tags at all.
+  course_tags:
+    18.06_Linear_Algebra:
+      - "lecture-notes"
+      - "linear-algebra"
+      - "math"
+  figures_dark_mode_flag: false

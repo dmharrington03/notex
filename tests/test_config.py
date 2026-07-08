@@ -24,6 +24,16 @@ Also covered here (issue #13 — config.yaml llm: settings):
       DEFAULT_MIN_LENGTH_RATIO / DEFAULT_MAX_LENGTH_RATIO when the file is
       missing, the llm: section is absent, the validation: subsection is
       absent, or individual keys are missing — never raises ConfigError
+
+Also covered here (issue #33 — config.yaml output: settings):
+    - load_output_config() reads course_tags / date_format /
+      figures_dark_mode_flag from a config.yaml's output: section
+    - falls back to {} / DEFAULT_DATE_FORMAT / DEFAULT_FIGURES_DARK_MODE_FLAG
+      when the file is missing, the output: section is absent, or
+      individual keys are missing — never raises ConfigError
+    - there is no global/default tag list: a course with no course_tags
+      entry gets no tags at all (deliberate divergence from docs/spec.md's
+      base_tags concept, see AGENTS.md's Phase 6 notes)
 """
 
 from pathlib import Path
@@ -32,6 +42,8 @@ import pytest
 
 from src.config import (
     DEFAULT_CACHE_DIR,
+    DEFAULT_DATE_FORMAT,
+    DEFAULT_FIGURES_DARK_MODE_FLAG,
     DEFAULT_LLM_MODEL,
     DEFAULT_MAX_LENGTH_RATIO,
     DEFAULT_MAX_POLL_ATTEMPTS,
@@ -42,9 +54,11 @@ from src.config import (
     ConfigError,
     LLMConfig,
     MathpixPollingConfig,
+    OutputConfig,
     PathsConfig,
     load_llm_config,
     load_mathpix_polling_config,
+    load_output_config,
     load_paths_config,
 )
 
@@ -252,3 +266,84 @@ def test_llm_config_falls_back_to_defaults_when_individual_validation_keys_missi
         min_length_ratio=0.6,
         max_length_ratio=DEFAULT_MAX_LENGTH_RATIO,
     )
+
+
+def test_loads_output_config_from_yaml(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "output:\n"
+        "  course_tags:\n"
+        "    18.06_Linear_Algebra:\n"
+        '      - "linear-algebra"\n'
+        "  date_format: \"%d-%m-%Y\"\n"
+        "  figures_dark_mode_flag: true\n"
+    )
+
+    config = load_output_config(config_path)
+
+    assert config == OutputConfig(
+        course_tags={"18.06_Linear_Algebra": ("linear-algebra",)},
+        date_format="%d-%m-%Y",
+        figures_dark_mode_flag=True,
+    )
+
+
+def test_output_config_falls_back_to_defaults_when_file_missing(tmp_path):
+    missing_path = tmp_path / "does_not_exist.yaml"
+
+    config = load_output_config(missing_path)
+
+    assert config == OutputConfig(
+        course_tags={},
+        date_format=DEFAULT_DATE_FORMAT,
+        figures_dark_mode_flag=DEFAULT_FIGURES_DARK_MODE_FLAG,
+    )
+
+
+def test_output_config_falls_back_to_defaults_when_output_section_missing(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("paths:\n  input_root: /tmp/notes_raw\n")
+
+    config = load_output_config(config_path)
+
+    assert config == OutputConfig(
+        course_tags={},
+        date_format=DEFAULT_DATE_FORMAT,
+        figures_dark_mode_flag=DEFAULT_FIGURES_DARK_MODE_FLAG,
+    )
+
+
+def test_output_config_falls_back_to_defaults_when_individual_keys_missing(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text('output:\n  date_format: "%d-%m-%Y"\n')
+
+    config = load_output_config(config_path)
+
+    assert config == OutputConfig(
+        course_tags={},
+        date_format="%d-%m-%Y",
+        figures_dark_mode_flag=DEFAULT_FIGURES_DARK_MODE_FLAG,
+    )
+
+
+def test_output_config_course_tags_absent_defaults_to_empty_dict(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text('output:\n  date_format: "%Y-%m-%d"\n')
+
+    config = load_output_config(config_path)
+
+    assert config.course_tags == {}
+
+
+def test_output_config_course_tags_present_for_one_course_only(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "output:\n"
+        "  course_tags:\n"
+        "    class_1:\n"
+        '      - "class-1-only"\n'
+    )
+
+    config = load_output_config(config_path)
+
+    assert config.course_tags == {"class_1": ("class-1-only",)}

@@ -1,18 +1,21 @@
 """
-Phase 1/2/3 config loading.
+Phase 1/2/3/6 config loading.
 
 Responsible for loading MATHPIX_APP_ID / MATHPIX_APP_KEY from .env, the
 mathpix: poll_interval_seconds / max_poll_attempts settings from config.yaml
 (falling back to hardcoded defaults if config.yaml or the section/keys are
 absent), the paths: input_root / vault_root / cache_dir / state_db settings
 from config.yaml (input_root/vault_root are required, cache_dir/state_db
-fall back to hardcoded defaults), and the llm: model / prompt_version /
+fall back to hardcoded defaults), the llm: model / prompt_version /
 validation.min_length_ratio / validation.max_length_ratio settings from
 config.yaml (all optional, same fully-optional fallback pattern as the
-mathpix: section).
+mathpix: section), and the output: course_tags / date_format /
+figures_dark_mode_flag settings from config.yaml (also fully optional, same
+pattern; course_tags has no global/default fallback — see OutputConfig's
+docstring).
 
-Full config.yaml wiring for the remaining sections (per-course tags, etc.)
-arrives in Phase 6 — kept out of scope here intentionally.
+Full config.yaml wiring for the remaining sections (naming.lecture_prefix)
+arrives later in Phase 6 — kept out of scope here intentionally.
 """
 
 from __future__ import annotations
@@ -46,6 +49,17 @@ DEFAULT_PROMPT_VERSION = "cleanup_v1"
 DEFAULT_MIN_LENGTH_RATIO: float = 0.70
 DEFAULT_MAX_LENGTH_RATIO: float = 1.30
 
+# Phase 6 — output: section defaults. date_format matches postprocess.py's
+# DATE_FORMAT (a Phase 5 stand-in pending this real config wiring; the
+# constant is intentionally duplicated here rather than imported, following
+# the same no-cross-module-private-import precedent as src/postprocess.py's
+# own duplicated regexes — see its module docstring).
+#
+# Note: there is deliberately no DEFAULT_BASE_TAGS / global default tag list
+# — see OutputConfig's docstring below for why.
+DEFAULT_DATE_FORMAT = "%Y-%m-%d"
+DEFAULT_FIGURES_DARK_MODE_FLAG = False
+
 
 class ConfigError(Exception):
     """Raised when required configuration is missing or invalid."""
@@ -77,6 +91,20 @@ class LLMConfig:
     prompt_version: str
     min_length_ratio: float
     max_length_ratio: float
+
+
+@dataclass(frozen=True)
+class OutputConfig:
+    """
+    There is no global/default tag list. A course only gets tags if it has
+    an explicit course_tags entry (see load_output_config()); a course with
+    no entry produces untagged notes. This is a deliberate divergence from
+    docs/spec.md's base_tags concept — see AGENTS.md's Phase 6 notes.
+    """
+
+    course_tags: dict[str, tuple[str, ...]]
+    date_format: str
+    figures_dark_mode_flag: bool
 
 
 def load_mathpix_credentials(env_file: str | None = None) -> MathpixCredentials:
@@ -249,4 +277,64 @@ def load_llm_config(config_path: str | Path | None = None) -> LLMConfig:
         prompt_version=prompt_version,
         min_length_ratio=min_length_ratio,
         max_length_ratio=max_length_ratio,
+    )
+
+
+def load_output_config(config_path: str | Path | None = None) -> OutputConfig:
+    """
+    Load the output: course_tags / date_format / figures_dark_mode_flag
+    settings from config.yaml.
+
+    Args:
+        config_path: optional explicit path to config.yaml. If not given,
+            defaults to DEFAULT_CONFIG_PATH (config.yaml in the current
+            working directory), matching the project convention of running
+            the CLI from the repo root.
+
+    config.yaml (and the output: section/keys within it) is fully optional
+    here, same fallback pattern as load_llm_config(): if the file doesn't
+    exist, the output: section is absent, or individual keys are missing,
+    the corresponding hardcoded default ({} / DEFAULT_DATE_FORMAT /
+    DEFAULT_FIGURES_DARK_MODE_FLAG) is used instead. Never raises
+    ConfigError.
+
+    course_tags is keyed by the **raw course folder name** (underscores,
+    not converted to spaces — matches discovery.py's course-subdirectory
+    key, e.g. "18.06_Linear_Algebra"). There is no global/default tag list:
+    a course only gets tags if it has an explicit entry here; a course with
+    no entry produces untagged notes (empty tags list) — see OutputConfig's
+    docstring. Applying course_tags to a note's frontmatter is a separate
+    helper consumed by src/postprocess.py, not this loader's job (see
+    AGENTS.md's Phase 6 design notes).
+
+    Each course_tags list value from yaml is converted to a tuple for
+    immutability, matching this dataclass's frozen convention — no other
+    validation/coercion is performed, consistent with every other
+    load_*_config() in this file trusting the yaml as-is.
+    """
+    path = Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
+
+    course_tags: dict[str, tuple[str, ...]] = {}
+    date_format: str = DEFAULT_DATE_FORMAT
+    figures_dark_mode_flag: bool = DEFAULT_FIGURES_DARK_MODE_FLAG
+
+    if path.is_file():
+        with path.open("r") as fh:
+            data: dict[str, Any] = yaml.safe_load(fh) or {}
+        output_section = data.get("output") or {}
+
+        raw_course_tags = output_section.get("course_tags") or {}
+        course_tags = {
+            course: tuple(tags) for course, tags in raw_course_tags.items()
+        }
+
+        date_format = output_section.get("date_format", date_format)
+        figures_dark_mode_flag = output_section.get(
+            "figures_dark_mode_flag", figures_dark_mode_flag
+        )
+
+    return OutputConfig(
+        course_tags=course_tags,
+        date_format=date_format,
+        figures_dark_mode_flag=figures_dark_mode_flag,
     )

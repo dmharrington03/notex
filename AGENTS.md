@@ -67,11 +67,28 @@ Dependencies are tracked in `environment.yml` (reproduce with
 **Phase 6 — Full config wiring + end-to-end validation — in progress.**
 Phase 5 is VALIDATED — complete (see "Phase 5" under "Phase Progress" below
 for its confirmed design/findings). Phase 6's scope: wire the remaining
-still-hardcoded config values (`output.base_tags`/`course_tags`,
-`output.date_format`, `output.figures_dark_mode_flag`, `naming.lecture_prefix`)
-into real `config.yaml` reads, then validate the complete pipeline
-end-to-end on real data. See `docs/spec.md` for the full original roadmap
-(note: follow this file, AGENTS.md, not spec.md, where they disagree).
+still-hardcoded config values (`output.course_tags`, `output.date_format`,
+`output.figures_dark_mode_flag`, `naming.lecture_prefix`) into real
+`config.yaml` reads, then validate the complete pipeline end-to-end on real
+data. See `docs/spec.md` for the full original roadmap (note: follow this
+file, AGENTS.md, not spec.md, where they disagree).
+
+**Scope correction — `output.base_tags` (a global/default tag list) is
+dropped entirely, not deferred.** docs/spec.md's `output:` schema and this
+file's own prior Phase 6 planning both included a `base_tags` global
+default tag list, with `course_tags` merging/overriding it per course. Per
+explicit user direction, **there is no global/default tag list at all** —
+a course only gets tags if it has an explicit `output.course_tags` entry
+for its raw folder name; a course with no entry produces untagged notes
+(empty `tags` list). This is a deliberate divergence from docs/spec.md,
+not a rewording — ignore spec.md's `base_tags` key going forward; it's
+retained in that file purely as historical/superseded reference.
+`src/config.py`'s `OutputConfig`/`load_output_config()` (issue #33) are
+already updated to this design — no `base_tags` field, no
+`DEFAULT_BASE_TAGS` constant. `src/postprocess.py`'s `DEFAULT_TAGS`
+constant is unaffected for now (still a Phase 5 stand-in pending #35's
+real wiring), but #35 must apply this same no-default rule when it wires
+`course_tags` resolution into `build_frontmatter()`.
 
 **Scope correction — course index generation is permanently dropped, not
 deferred.** docs/spec.md's Stage 6 (`_index.md` per course, a regenerated
@@ -85,10 +102,10 @@ forward; it's retained in that file purely as historical/superseded
 reference.
 
 Concretely, Phase 6 covers:
-- `src/config.py`: `load_output_config()` — reads `output.base_tags`,
-  `output.course_tags` (dict keyed by the **raw course folder name**,
-  underscores not converted to spaces; when present for a course, **fully
-  replaces** `base_tags` for that course, no union), `output.date_format`,
+- `src/config.py`: `load_output_config()` — reads `output.course_tags`
+  (dict keyed by the **raw course folder name**, underscores not converted
+  to spaces; no global/default tag list — a course with no entry gets no
+  tags, see the scope-correction note above), `output.date_format`,
   `output.figures_dark_mode_flag`. `load_naming_config()` — reads
   `naming.lecture_prefix` (a **single global value**, no per-course
   override). Both follow the fully-optional pattern already established by
@@ -97,9 +114,9 @@ Concretely, Phase 6 covers:
 - `src/postprocess.py`: `build_frontmatter()` gains a configurable
   `date_format` param (replacing the hardcoded `DATE_FORMAT` constant) and
   a configurable `lecture_prefix` param for the `title` field (replacing
-  `DEFAULT_LECTURE_PREFIX`); tag resolution (course_tags-overrides-
-  base_tags) is a separate helper, not a change to `build_frontmatter()`'s
-  existing `tags` param.
+  `DEFAULT_LECTURE_PREFIX`); tag resolution (course_tags-or-nothing, no
+  base_tags fallback) is a separate helper, not a change to
+  `build_frontmatter()`'s existing `tags` param.
 - `src/vault.py`: `write_lecture_note()` gains a `lecture_prefix` param,
   threaded to **both** the output filename and `build_frontmatter()`'s
   title, so the two can never disagree with each other.
@@ -159,7 +176,7 @@ design.
 ### Phase 6 — Full config wiring + end-to-end validation
 
 Scope: wire up the remaining `config.yaml` sections nothing reads yet
-(`output.base_tags`/`course_tags`, `naming.lecture_prefix`, the new
+(`output.course_tags`, `naming.lecture_prefix`, the new
 `output.figures_dark_mode_flag`), and validate the complete pipeline
 end-to-end on a real course. See "Current Phase" above for the full
 confirmed design and tracked issue numbers.

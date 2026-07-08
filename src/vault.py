@@ -17,9 +17,9 @@ Implementation status:
 
 Deliberately no config.py reading here — dark_mode/tags are taken as plain
 params (same precedent as src/figures.py's rewrite_image_references()'s
-dark_mode param); real output.figures_dark_mode_flag/base_tags/course_tags
-config wiring is Phase 6. Likewise, wiring this function into src/main.py's
-run() and state.db's vault_status/vault_path columns are separate issues
+dark_mode param); real output.figures_dark_mode_flag/course_tags config
+wiring is Phase 6. Likewise, wiring this function into src/main.py's run()
+and state.db's vault_status/vault_path columns are separate issues
 (#30/#31), not this module's job.
 """
 
@@ -101,7 +101,7 @@ def write_lecture_note(
             default) falls back to postprocess.DEFAULT_TAGS, matching
             build_frontmatter()'s own default -- same
             ("lecture-notes",) stand-in pending Phase 6's real
-            output.base_tags/course_tags config wiring.
+            output.course_tags config wiring.
 
     Returns:
         A VaultWriteResult recording the written output_path, the
