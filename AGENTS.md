@@ -268,7 +268,13 @@ narrative and real-data-validation findings.
 
 ### Phase 6 (in progress, issues #33-#38)
 
-- **#33-#38 (not yet started)** — see "Current Phase" above for the full
+- **#33 (done)** — `src/config.py`: `OutputConfig` (`course_tags`/
+  `date_format`/`figures_dark_mode_flag`) + `load_output_config()`, same
+  fully-optional pattern as `load_llm_config()`. Deviates from the issue's
+  original description: no `base_tags`/global-default tag field at all —
+  see the "Scope correction" note under "Current Phase" above. Also fixed
+  #35's stale `base_tags`-fallback description to match.
+- **#34-#38 (not yet started)** — see "Current Phase" above for the full
   scope. Status lines will be added here as each issue completes.
 
 ### Phase 5 (VALIDATED — complete, issues #26-#32)
