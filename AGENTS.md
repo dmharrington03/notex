@@ -464,3 +464,7 @@ Phase 1 is now validated, so local commits are pushed to `origin` going
 forward. Record detailed per-issue implementation notes and real-data
 validation results as comments on the relevant GitHub issue — see
 "Documentation Conventions" above.
+
+**Commits and pushes require explicit review — never automatic.** An agent
+must not run `git commit` or `git push` on its own initiative. Only do so
+when the user's prompt explicitly instructs it for that turn.
