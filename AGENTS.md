@@ -8,6 +8,29 @@ up the extracted text with an LLM, and writes organized Markdown into an
 Obsidian vault. It is run manually by the user, is fully idempotent, and never
 modifies its input.
 
+## Delegating Work to Subagents
+
+Prefer delegating exploration and multi-step work to subagents/the Task tool
+rather than doing it all in the main agent loop — this keeps the main
+context small and reduces token usage. Concretely:
+
+- Use a subagent for open-ended searches or questions about the codebase
+  (e.g. "where is X handled", "what's the current shape of Y") instead of
+  chaining multiple Read/Grep/Glob calls directly.
+- Use a subagent to execute self-contained, well-specified units of work
+  (e.g. implementing one issue's scope, writing a batch of tests, running
+  down a specific bug) when the task doesn't need to share live context
+  with the main conversation.
+- Launch multiple subagents in parallel when the work is independent (e.g.
+  investigating two unrelated issues, or researching one thing while
+  implementing another).
+- Give each subagent a precise, self-contained prompt — it starts with no
+  context — and tell it exactly what to return, since only its final
+  message is visible back in the main conversation.
+- Reserve doing the work directly (no subagent) for small, targeted edits
+  where the overhead of delegating would exceed the savings, or where the
+  task genuinely requires the main conversation's accumulated context.
+
 ## Documentation Conventions
 
 Keep issue-by-issue progress notes in this file **minimal** — a short status
