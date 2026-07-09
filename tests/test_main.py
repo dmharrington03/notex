@@ -57,6 +57,14 @@ Covered here (issue #22 — page_count tracking):
       mocked completed payload's num_pages field, and RunSummary's
       total_pages_processed reflects the sum of pages actually processed
       this run (0 for any skip/LLM-only-rerun/failure path).
+
+Covered here (issue #40 — manual vault-edit conflict detection):
+    - A vault note manually edited after a prior successful run is left
+      untouched on a later reprocessing run: the write is skipped,
+      vault_status is recorded as "conflict", vault_path/vault_written_at/
+      vault_content_hash are left unchanged from the prior run, and
+      RunSummary.vault_conflicts (not errors) reflects the skip -- the
+      reprocessed content still lands under _cache/ as normal.
 """
 
 from __future__ import annotations
@@ -579,6 +587,94 @@ def test_run_unparseable_filename_records_vault_failure_only(client, tmp_path, m
     assert entry.vault_path is None
     assert entry.vault_written_at is None
     assert not (paths_config.vault_root / "class_1").exists()
+
+
+@respx.mock
+def test_run_detects_manually_edited_vault_note_and_skips_overwrite(
+    client, tmp_path, monkeypatch
+):
+    """
+    Issue #40: a vault note manually edited after a prior successful run
+    must not be silently clobbered by a later reprocessing run.
+
+    Scenario: process a file successfully (vault note written, its
+    content hash recorded); manually mutate the written vault file
+    directly (bypassing the pipeline, simulating a user edit); change the
+    source PDF so the next run reprocesses it fully; assert the vault
+    file's content is untouched, vault_status == "conflict",
+    vault_path/vault_written_at/vault_content_hash are unchanged from the
+    first run, RunSummary.vault_conflicts == 1, RunSummary.errors is
+    unaffected, and the reprocessed content is present under _cache/.
+    """
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf", b"original pdf bytes")
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(monkeypatch, status="success", content="first cleaned markdown")
+
+    first_summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
+    assert first_summary.errors == 0
+    assert first_summary.vault_conflicts == 0
+
+    entry_after_first = get_entry(conn, str(pdf_path.resolve()))
+    assert entry_after_first.vault_status == "success"
+    assert entry_after_first.vault_content_hash is not None
+    vault_path = Path(entry_after_first.vault_path)
+    assert vault_path.is_file()
+    original_vault_path = entry_after_first.vault_path
+    original_vault_written_at = entry_after_first.vault_written_at
+    original_vault_content_hash = entry_after_first.vault_content_hash
+
+    # Simulate a manual edit to the vault note, bypassing the pipeline
+    # entirely.
+    manual_content = "MANUALLY EDITED -- do not clobber!\n"
+    vault_path.write_text(manual_content, encoding="utf-8")
+
+    # Change the source PDF so the next run reprocesses it fully (CHANGED
+    # classification -> full Mathpix + LLM + vault-write pipeline again).
+    _write_pdf(pdf_path, b"changed pdf bytes -- forces reprocessing")
+    _install_fake_cleanup_pdf(monkeypatch, status="success", content="second cleaned markdown")
+
+    second_summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
+
+    assert second_summary.processed == 1
+    assert second_summary.errors == 0
+    assert second_summary.vault_conflicts == 1
+
+    entry_after_second = get_entry(conn, str(pdf_path.resolve()))
+    assert entry_after_second.vault_status == "conflict"
+    # Untouched -- they still correctly describe the last file we
+    # actually wrote (the one the user is now editing).
+    assert entry_after_second.vault_path == original_vault_path
+    assert entry_after_second.vault_written_at == original_vault_written_at
+    assert entry_after_second.vault_content_hash == original_vault_content_hash
+
+    # The vault file itself must still hold the manual edit.
+    assert vault_path.read_text(encoding="utf-8") == manual_content
+
+    # The reprocessing itself succeeded and its output lives under _cache/.
+    assert entry_after_second.mathpix_status == "success"
+    assert entry_after_second.llm_status == "success"
+    cache_llm_path = Path(entry_after_second.output_path)
+    assert cache_llm_path.is_file()
+    assert "second cleaned markdown" in cache_llm_path.read_text(encoding="utf-8")
 
 
 @respx.mock

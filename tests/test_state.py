@@ -8,8 +8,9 @@ Covered here (issue #7 — state.db schema + CRUD):
       (including datetime <-> ISO 8601 string)
     - upsert_entry() partial updates leave previously-set columns intact
       (including issue #21's llm_input_tokens/llm_output_tokens/
-      llm_cost_estimate, issue #22's page_count, and issue #30's
-      vault_status/vault_path columns)
+      llm_cost_estimate, issue #22's page_count, issue #30's
+      vault_status/vault_path columns, and issue #40's
+      vault_content_hash column)
     - upsert_entry() rejects unknown field names
 
 No respx/mocking needed - all sqlite, using tmp_path files.
@@ -88,6 +89,7 @@ def test_upsert_entry_inserts_and_round_trips_all_fields(tmp_path):
         output_path="/_cache/class_1/lecture_01.llm.md",
         vault_status="success",
         vault_path="/vault/class_1/Lecture 01.md",
+        vault_content_hash="deadbeef" * 8,
         mathpix_processed_at=processed_at,
         llm_processed_at=processed_at,
         vault_written_at=processed_at,
@@ -114,6 +116,7 @@ def test_upsert_entry_inserts_and_round_trips_all_fields(tmp_path):
         output_path="/_cache/class_1/lecture_01.llm.md",
         vault_status="success",
         vault_path="/vault/class_1/Lecture 01.md",
+        vault_content_hash="deadbeef" * 8,
         mathpix_processed_at=processed_at,
         llm_processed_at=processed_at,
         vault_written_at=processed_at,
@@ -147,6 +150,7 @@ def test_upsert_entry_insert_with_no_optional_fields(tmp_path):
         output_path=None,
         vault_status=None,
         vault_path=None,
+        vault_content_hash=None,
         mathpix_processed_at=None,
         llm_processed_at=None,
         vault_written_at=None,
@@ -260,6 +264,7 @@ def test_upsert_entry_partial_update_preserves_vault_columns(tmp_path):
         source_path,
         vault_status="success",
         vault_path="/vault/class_1/Lecture 01.md",
+        vault_content_hash="abc123" * 10,
     )
 
     # A later call touching only mathpix_*/llm_* fields must not disturb
@@ -277,6 +282,7 @@ def test_upsert_entry_partial_update_preserves_vault_columns(tmp_path):
 
     assert entry.vault_status == "success"
     assert entry.vault_path == "/vault/class_1/Lecture 01.md"
+    assert entry.vault_content_hash == "abc123" * 10
     assert entry.mathpix_status == "success"
     assert entry.mathpix_pdf_id == "pdf_xyz"
     assert entry.llm_status == "success"
@@ -316,6 +322,33 @@ def test_upsert_entry_partial_update_preserves_other_columns_when_vault_written(
     assert entry.llm_model == "gpt-4o-mini"
     assert entry.vault_status == "success"
     assert entry.vault_path == "/vault/class_1/Lecture 01.md"
+
+
+def test_upsert_entry_partial_update_preserves_vault_content_hash_column(tmp_path):
+    # Issue #40's vault_content_hash column follows the same partial-upsert
+    # convention as every other column: a later, unrelated call must not
+    # null it out, and vice versa.
+    conn = init_db(tmp_path / "state.db")
+    source_path = "/notes_raw/class_1/lecture_01.pdf"
+
+    upsert_entry(
+        conn,
+        source_path,
+        vault_status="success",
+        vault_path="/vault/class_1/Lecture 01.md",
+        vault_content_hash="abc123" * 10,
+    )
+
+    # A later call recording a conflict (issue #40) touches only
+    # vault_status -- vault_path/vault_content_hash must survive untouched,
+    # since they still describe the last file actually written.
+    upsert_entry(conn, source_path, vault_status="conflict")
+
+    entry = get_entry(conn, source_path)
+
+    assert entry.vault_status == "conflict"
+    assert entry.vault_path == "/vault/class_1/Lecture 01.md"
+    assert entry.vault_content_hash == "abc123" * 10
 
 
 def test_upsert_entry_update_overwrites_previous_value(tmp_path):

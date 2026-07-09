@@ -105,6 +105,32 @@ permanent orphan. Found live during #38's validation; needs a real design
 decision (likely diffing the newly-computed output path against
 `state.db`'s existing `vault_path` column) before fixing.
 
+**#40 (done, untriaged, no phase label)** — manual-vault-edit conflict
+detection: `state.db` gained a nullable `vault_content_hash` column
+(SHA-256 of the content last successfully written to a vault note).
+`src/vault.py`'s `write_lecture_note()` gained a `previous_content_hash`
+param — when given and the target vault file already exists with
+different on-disk content, the write is skipped entirely (no figure copy,
+no content read/rewrite) and `VaultWriteResult.written` is `False`;
+`None` (no baseline recorded) always overwrites unconditionally, matching
+pre-#40 behavior. `src/main.py`'s `_write_to_vault()` fetches the prior
+`vault_content_hash` via `get_entry()`, now returns `(errors, conflicts)`
+instead of a bare error count; on a detected conflict it prints a warning
+naming both the vault file and its `_cache/` counterpart and records only
+`vault_status="conflict"`, leaving `vault_path`/`vault_written_at`/
+`vault_content_hash` untouched. `RunSummary`/`_FileOutcome` gained a
+`vault_conflicts` counter, aggregated separately from `errors` (expected,
+handled behavior, not a failure). No CLI override to bypass a detected
+conflict yet — deferred to Phase 7 per the issue's own scope note.
+Real-data validated against `notes_raw/class_1`: manually edited both
+freshly-written vault notes, then reran with `force_llm=True` (no CLI flag
+for this yet) — both correctly skipped with `vault_status="conflict"`,
+manual edits preserved byte-for-byte, `vault_path`/`vault_content_hash`/
+`vault_written_at` unchanged, reprocessed content landed in `_cache/` as
+expected. Still open: nothing yet lets a conflict be resolved/cleared once
+recorded (the deferred `--force-vault-overwrite` flag is the intended
+fix, Phase 7).
+
 **Scope correction — `output.base_tags` (a global/default tag list) is
 dropped entirely, not deferred.** docs/spec.md's `output:` schema included
 a `base_tags` global default tag list, with `course_tags` merging/

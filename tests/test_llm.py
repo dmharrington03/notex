@@ -376,6 +376,7 @@ def _state_entry(**overrides) -> StateEntry:
         output_path=None,
         vault_status=None,
         vault_path=None,
+        vault_content_hash=None,
         mathpix_processed_at=None,
         llm_processed_at=None,
         vault_written_at=None,

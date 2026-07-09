@@ -25,12 +25,16 @@ PDF's page count, from Mathpix's own status payload). Issue #30 added two
 more, `vault_status` (`"success"`/`"failed"`, same per-stage-status
 convention as `mathpix_status`/`llm_status`) and `vault_path` (the final
 vault `.md` path -- distinct from `output_path`, which keeps its Phase 3
-meaning as the cache-stage `.llm.md`/`.mathpix.md` path). No schema-migration
-logic is provided for these (or any other column) -- `init_db()` only ever
-runs `CREATE TABLE IF NOT EXISTS`, so an existing local `state.db`
-predating a column addition must be deleted and left to rebuild rather
-than migrated in place (cheap given this project's real data volume --
-see AGENTS.md's issue #21 notes).
+meaning as the cache-stage `.llm.md`/`.mathpix.md` path). Issue #40 added
+one more, `vault_content_hash` (SHA-256 hex digest of the exact content
+last *successfully* written to the vault file -- used to detect manual
+edits to a vault note before overwriting it; `vault_status` also gained a
+third value, `"conflict"`, for when a manual edit is detected and the
+write is skipped). No schema-migration logic is provided for these (or any
+other column) -- `init_db()` only ever runs `CREATE TABLE IF NOT EXISTS`,
+so an existing local `state.db` predating a column addition must be
+deleted and left to rebuild rather than migrated in place (cheap given
+this project's real data volume -- see AGENTS.md's issue #21 notes).
 """
 
 from __future__ import annotations
@@ -65,6 +69,7 @@ _VALUE_COLUMNS = (
     "output_path",
     "vault_status",
     "vault_path",
+    "vault_content_hash",
     "mathpix_processed_at",
     "llm_processed_at",
     "vault_written_at",
@@ -92,6 +97,7 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     output_path            TEXT,
     vault_status           TEXT,
     vault_path             TEXT,
+    vault_content_hash     TEXT,
     mathpix_processed_at   TEXT,
     llm_processed_at       TEXT,
     vault_written_at       TEXT,
@@ -119,6 +125,7 @@ class StateEntry:
     output_path: str | None
     vault_status: str | None
     vault_path: str | None
+    vault_content_hash: str | None
     mathpix_processed_at: datetime | None
     llm_processed_at: datetime | None
     vault_written_at: datetime | None

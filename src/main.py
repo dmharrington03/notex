@@ -56,6 +56,13 @@ Per-file flow (see AGENTS.md issue #11/#18 notes):
       recorded, leaving that file's already-successful
       mathpix_status/llm_status/output_path completely untouched (a
       correction to docs/spec.md's original wording -- see AGENTS.md).
+      Separately, if the vault file was manually edited since our last
+      write (detected via state.db's vault_content_hash, issue #40), the
+      write is skipped rather than failed: vault_status="conflict" is
+      recorded and vault_path/vault_written_at/vault_content_hash are left
+      untouched (they still correctly describe the last file we actually
+      wrote). This is expected, handled behavior, not an error -- tallied
+      separately as RunSummary.vault_conflicts, not folded into errors.
     - UNGROUPED_COURSE_KEY files (PDFs directly under input_root, not in any
       course subfolder) are, in the normal (non-target_source_path) run,
       deliberately *not* processed: there's no course to mirror in
@@ -181,6 +188,7 @@ class RunSummary:
     total_output_tokens: int = 0
     total_cost_estimate: float = 0.0
     total_pages_processed: int = 0
+    vault_conflicts: int = 0
 
 
 @dataclass(frozen=True)
@@ -196,6 +204,7 @@ class _FileOutcome:
     output_tokens: int = 0
     cost_estimate: float = 0.0
     pages: int = 0
+    vault_conflicts: int = 0
 
 
 def _write_to_vault(
@@ -212,7 +221,7 @@ def _write_to_vault(
     tags: tuple[str, ...],
     date_format: str,
     lecture_prefix: str,
-) -> int:
+) -> tuple[int, int]:
     """
     Write this file's final vault Markdown note (src/vault.py's
     write_lecture_note(), issue #29) and record the outcome to state.db.
@@ -254,8 +263,12 @@ def _write_to_vault(
             NamingConfig.lecture_prefix (issue #37).
 
     Returns:
-        1 if the vault write failed (counts toward the caller's
-        _FileOutcome.errors), 0 on success.
+        A (errors, conflicts) tuple -- each 1 or 0, never both 1 at once.
+        errors is 1 if the vault write failed (counts toward the caller's
+        _FileOutcome.errors); conflicts is 1 if a manually-edited vault
+        note was detected and the write was skipped (counts toward the
+        caller's _FileOutcome.vault_conflicts, issue #40) -- this is
+        expected, handled behavior, not an error.
 
     On a PostprocessError (source_path's filename doesn't match
     lecture[_-]?<digits>) or any OSError (I/O failure), the write is
@@ -266,7 +279,20 @@ def _write_to_vault(
     wording -- see issue #27/#31's notes). Any
     scan_delimiter_issues() warnings on a successful write are printed but
     never affect vault_status -- diagnostic only, per issue #28's design.
+
+    Before writing, the existing state.db entry's vault_content_hash (if
+    any) is fetched and passed to write_lecture_note() as
+    previous_content_hash, so it can detect a manually-edited vault note
+    (issue #40). If write_lecture_note() reports written=False (a conflict
+    was detected), the write is skipped entirely: a warning identifying
+    both the vault file and its corresponding _cache/ content is printed,
+    and only vault_status="conflict" is recorded -- vault_path/
+    vault_written_at/vault_content_hash are left untouched, since they
+    still correctly describe the last file this pipeline actually wrote.
     """
+    entry = get_entry(conn, source_path)
+    previous_content_hash = entry.vault_content_hash if entry is not None else None
+
     try:
         result = write_lecture_note(
             source_path,
@@ -279,11 +305,23 @@ def _write_to_vault(
             tags=list(tags),
             date_format=date_format,
             lecture_prefix=lecture_prefix,
+            previous_content_hash=previous_content_hash,
         )
     except (PostprocessError, OSError) as exc:
         print(f"[{course_label}] {filename}: vault write FAILED: {exc}")
         upsert_entry(conn, source_path, vault_status="failed")
-        return 1
+        return 1, 0
+
+    if not result.written:
+        print(
+            f"[{course_label}] {filename}: WARNING: vault note "
+            f"{result.output_path} was manually edited since the last "
+            f"pipeline write -- skipping overwrite. Diff it against the "
+            f"reprocessed content at {content_source_path} to merge "
+            f"manually."
+        )
+        upsert_entry(conn, source_path, vault_status="conflict")
+        return 0, 1
 
     for warning in result.delimiter_warnings:
         print(f"[{course_label}] {filename}: WARNING: {warning}")
@@ -294,8 +332,9 @@ def _write_to_vault(
         vault_status="success",
         vault_path=str(result.output_path),
         vault_written_at=processed_at,
+        vault_content_hash=result.content_hash,
     )
-    return 0
+    return 0, 0
 
 
 def _process_file(
@@ -409,7 +448,7 @@ def _process_file(
             llm_cost_estimate=llm_result.llm_cost_estimate,
         )
         errors = 0 if llm_result.llm_status == "success" else 1
-        errors += _write_to_vault(
+        vault_errors, vault_conflicts = _write_to_vault(
             conn,
             result.source_path,
             llm_result.output_path,
@@ -424,6 +463,7 @@ def _process_file(
             output_config.date_format,
             naming_config.lecture_prefix,
         )
+        errors += vault_errors
         return _FileOutcome(
             processed=1,
             errors=errors,
@@ -431,6 +471,7 @@ def _process_file(
             output_tokens=llm_result.llm_output_tokens or 0,
             cost_estimate=llm_result.llm_cost_estimate or 0.0,
             pages=process_result.page_count or 0,
+            vault_conflicts=vault_conflicts,
         )
 
     # Classification.UNCHANGED from here on.
@@ -483,7 +524,7 @@ def _process_file(
         llm_cost_estimate=llm_result.llm_cost_estimate,
     )
     errors = 0 if llm_result.llm_status == "success" else 1
-    errors += _write_to_vault(
+    vault_errors, vault_conflicts = _write_to_vault(
         conn,
         result.source_path,
         llm_result.output_path,
@@ -498,12 +539,14 @@ def _process_file(
         output_config.date_format,
         naming_config.lecture_prefix,
     )
+    errors += vault_errors
     return _FileOutcome(
         llm_reprocessed=1,
         errors=errors,
         input_tokens=llm_result.llm_input_tokens or 0,
         output_tokens=llm_result.llm_output_tokens or 0,
         cost_estimate=llm_result.llm_cost_estimate or 0.0,
+        vault_conflicts=vault_conflicts,
     )
 
 
@@ -553,8 +596,10 @@ def run(
 
     Returns:
         A RunSummary with processed/skipped/errors/ungrouped/llm_reprocessed
-        counts (plus this run's aggregated LLM token/cost totals and
-        total_pages_processed).
+        counts (plus this run's aggregated LLM token/cost totals,
+        total_pages_processed, and vault_conflicts -- issue #40's
+        manually-edited-vault-note detections, tallied separately from
+        errors since they're expected, handled behavior).
     """
     owns_client = client is None
     if client is None:
@@ -579,6 +624,7 @@ def run(
     total_output_tokens = 0
     total_cost_estimate = 0.0
     total_pages_processed = 0
+    vault_conflicts = 0
 
     try:
         if target_source_path is not None:
@@ -619,6 +665,7 @@ def run(
             total_output_tokens += outcome.output_tokens
             total_cost_estimate += outcome.cost_estimate
             total_pages_processed += outcome.pages
+            vault_conflicts += outcome.vault_conflicts
         else:
             results_by_course = discover_pdfs(paths_config.input_root, conn)
 
@@ -658,6 +705,7 @@ def run(
                     total_output_tokens += outcome.output_tokens
                     total_cost_estimate += outcome.cost_estimate
                     total_pages_processed += outcome.pages
+                    vault_conflicts += outcome.vault_conflicts
     finally:
         if owns_client:
             client.close()
@@ -672,6 +720,7 @@ def run(
         total_output_tokens=total_output_tokens,
         total_cost_estimate=total_cost_estimate,
         total_pages_processed=total_pages_processed,
+        vault_conflicts=vault_conflicts,
     )
 
 
@@ -684,6 +733,7 @@ def _print_summary(summary: RunSummary) -> None:
     print(f"  {'Errors:':<21}{summary.errors}")
     print(f"  {'Ungrouped:':<21}{summary.ungrouped}")
     print(f"  {'LLM reprocessed:':<21}{summary.llm_reprocessed}")
+    print(f"  {'Vault conflicts:':<21}{summary.vault_conflicts}")
     print(f"  {'Input tokens:':<21}{summary.total_input_tokens}")
     print(f"  {'Output tokens:':<21}{summary.total_output_tokens}")
     print(f"  {'Est. cost:':<21}${summary.total_cost_estimate:.4f}")

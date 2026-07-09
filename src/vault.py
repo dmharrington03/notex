@@ -19,6 +19,8 @@ Implementation status:
       build_frontmatter() itself gained this param in #35, but threading it
       through write_lecture_note() was an oversight not caught until #37's
       real config wiring surfaced the missing param)
+    - write_lecture_note()'s previous_content_hash param / manual-edit
+      conflict detection   implemented (issue #40)
 
 Deliberately no config.py reading here — dark_mode/tags/date_format/
 lecture_prefix are taken as plain params (same precedent as
@@ -31,6 +33,7 @@ are separate issues (#30/#31), not this module's job.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -50,18 +53,33 @@ class VaultWriteResult:
     """
     Result of write_lecture_note().
 
-    - output_path: the vault Markdown file actually written, e.g.
-      vault/{course}/Lecture 02.md.
+    - output_path: the vault Markdown file this call targets, e.g.
+      vault/{course}/Lecture 02.md -- always set, even when written is
+      False (a skipped conflict still targets this path, it's just not
+      overwritten).
     - delimiter_warnings: postprocess.scan_delimiter_issues()'s warning
-      strings for the rewritten body -- empty if no issues were found.
+      strings for the rewritten body -- empty if no issues were found, or
+      if the write was skipped due to a conflict (issue #40; nothing was
+      read/rewritten in that case, so there's nothing to scan).
       Printing these (if desired) is the caller's job, not this function's.
     - figures_copied: figures.copy_figures_to_vault()'s return value --
-      empty if the source lecture had no cached figures.
+      empty if the source lecture had no cached figures, or if the write
+      was skipped due to a conflict (issue #40; figures are never touched
+      when a conflict is detected).
+    - written: whether output_path was actually (over)written this call.
+      False only when previous_content_hash was given, output_path already
+      existed on disk, and its current content hash didn't match --
+      i.e. a manually-edited vault note was detected (issue #40).
+    - content_hash: the SHA-256 hex digest of the content just written,
+      when written is True. None when written is False (nothing was
+      written this call, so there's no new hash to report).
     """
 
     output_path: Path
     delimiter_warnings: list[str]
     figures_copied: list[Path]
+    written: bool = True
+    content_hash: str | None = None
 
 
 def write_lecture_note(
@@ -75,6 +93,7 @@ def write_lecture_note(
     tags: list[str] | None = None,
     date_format: str = DATE_FORMAT,
     lecture_prefix: str = DEFAULT_LECTURE_PREFIX,
+    previous_content_hash: str | None = None,
 ) -> VaultWriteResult:
     """
     Assemble and write a single lecture's final vault Markdown file.
@@ -126,11 +145,28 @@ def write_lecture_note(
             pass this explicitly -- real production callers pass
             naming.lecture_prefix from config.yaml (see src/config.py's
             load_naming_config()), threaded through by src/main.py (#37).
+        previous_content_hash: SHA-256 hex digest of the content this
+            source file's vault note held the last time this function
+            successfully wrote it (state.db's vault_content_hash column,
+            resolved by the caller -- src/main.py, issue #40). When None
+            (the default -- no baseline recorded, e.g. a fresh state.db or
+            a file never previously vault-written), the write proceeds
+            unconditionally, matching this function's pre-#40 behavior.
+            When given and the target output_path already exists on disk,
+            its current byte content is hashed and compared: a match means
+            no manual edits happened since our last write (proceed with
+            the overwrite as normal); a mismatch means the vault file was
+            manually edited and is left untouched -- no figure copy, no
+            content read/rewrite, nothing under vault/{course}/... is
+            touched at all for this call (see VaultWriteResult.written).
 
     Returns:
-        A VaultWriteResult recording the written output_path, the
-        delimiter-balance warnings for the rewritten body, and the list of
-        figure files copied.
+        A VaultWriteResult recording the target output_path, the
+        delimiter-balance warnings for the rewritten body (empty if the
+        write was skipped), the list of figure files copied (empty if the
+        write was skipped), whether the write actually happened, and the
+        SHA-256 hash of the newly-written content (None if the write was
+        skipped).
 
     Raises:
         PostprocessError: propagated uncaught from
@@ -146,6 +182,23 @@ def write_lecture_note(
     vault_course_dir = Path(vault_course_dir)
 
     info = parse_lecture_filename(source_pdf_path)
+    output_path = (
+        vault_course_dir / f"{lecture_prefix} {info.lecture_number:02d}.md"
+    )
+
+    if previous_content_hash is not None and output_path.exists():
+        current_hash = hashlib.sha256(output_path.read_bytes()).hexdigest()
+        if current_hash != previous_content_hash:
+            # Manually edited since our last write -- skip the write
+            # entirely (issue #40). Nothing under vault/{course}/... is
+            # touched: no figure copy, no content read/rewrite.
+            return VaultWriteResult(
+                output_path=output_path,
+                delimiter_warnings=[],
+                figures_copied=[],
+                written=False,
+                content_hash=None,
+            )
 
     figures_copied = copy_figures_to_vault(
         course_cache_figures_dir, vault_course_dir / "figures"
@@ -171,13 +224,13 @@ def write_lecture_note(
     full_content = frontmatter + rewritten_body
 
     vault_course_dir.mkdir(parents=True, exist_ok=True)
-    output_path = (
-        vault_course_dir / f"{lecture_prefix} {info.lecture_number:02d}.md"
-    )
     output_path.write_text(full_content, encoding="utf-8")
+    content_hash = hashlib.sha256(full_content.encode("utf-8")).hexdigest()
 
     return VaultWriteResult(
         output_path=output_path,
         delimiter_warnings=delimiter_warnings,
         figures_copied=figures_copied,
+        written=True,
+        content_hash=content_hash,
     )

@@ -20,11 +20,17 @@ Covered here:
       written frontmatter's title, confirming they match (issue #36)
     - custom date_format reflected in the written frontmatter's date field
       (issue #37)
+    - previous_content_hash conflict detection (issue #40): a mismatched
+      hash against an existing on-disk vault file skips the write entirely
+      (no figure copy, content preserved); a matching hash overwrites
+      normally; no baseline (None) with a pre-existing file overwrites,
+      matching pre-#40 behavior
 
 All tmp_path-backed, no mocking, no network (matches tests/test_figures.py's
 precedent).
 """
 
+import hashlib
 from datetime import datetime, timezone
 
 import pytest
@@ -378,3 +384,122 @@ def test_result_is_vault_write_result_instance(tmp_path):
     )
 
     assert isinstance(result, VaultWriteResult)
+
+
+def test_conflict_detected_skips_write_entirely(tmp_path):
+    """Issue #40: a previous_content_hash that doesn't match the existing
+    vault file's current on-disk content means a manual edit happened --
+    the write must be skipped entirely, with figures untouched and the
+    manually-edited content preserved."""
+    source_pdf = tmp_path / "notes_raw" / "class_1" / "lecture_02.pdf"
+    source_pdf.parent.mkdir(parents=True)
+    source_pdf.write_bytes(b"fake-pdf")
+    content_path = _make_content_file(tmp_path, "New pipeline content.\n")
+    cache_figures_dir = tmp_path / "_cache" / "class_1" / "figures"
+    cache_figures_dir.mkdir(parents=True)
+    (cache_figures_dir / "lecture_02_fig_001.jpg").write_bytes(b"fake-jpeg")
+    vault_course_dir = tmp_path / "vault" / "class_1"
+    vault_course_dir.mkdir(parents=True)
+
+    # Simulate a vault file the user manually edited after a prior write --
+    # its content no longer matches the hash we last recorded for it.
+    manual_content = "Manually edited notes -- do not clobber!\n"
+    output_path = vault_course_dir / "Lecture 02.md"
+    output_path.write_text(manual_content, encoding="utf-8")
+    stale_hash = hashlib.sha256(b"original pipeline content").hexdigest()
+
+    result = write_lecture_note(
+        source_pdf_path=source_pdf,
+        content_source_path=content_path,
+        course_cache_figures_dir=cache_figures_dir,
+        vault_course_dir=vault_course_dir,
+        source_mtime=datetime(2024, 1, 15).timestamp(),
+        processed_at=datetime(2024, 1, 16, tzinfo=timezone.utc),
+        previous_content_hash=stale_hash,
+    )
+
+    assert result.written is False
+    assert result.content_hash is None
+    assert result.output_path == output_path
+    assert result.delimiter_warnings == []
+    assert result.figures_copied == []
+    # The manual edit must survive untouched.
+    assert output_path.read_text(encoding="utf-8") == manual_content
+    # Figures must never be copied/overwritten on a conflict.
+    assert not (vault_course_dir / "figures").exists()
+
+
+def test_no_conflict_hash_matches_overwrites_normally(tmp_path):
+    """Issue #40: when the existing vault file's hash matches
+    previous_content_hash exactly (no manual edits since our last write),
+    the write proceeds and overwrites normally."""
+    source_pdf = tmp_path / "notes_raw" / "class_1" / "lecture_02.pdf"
+    source_pdf.parent.mkdir(parents=True)
+    source_pdf.write_bytes(b"fake-pdf")
+    vault_course_dir = tmp_path / "vault" / "class_1"
+
+    # First write establishes the baseline (no previous_content_hash yet).
+    first_content_path = _make_content_file(tmp_path, "First version.\n")
+    first = write_lecture_note(
+        source_pdf_path=source_pdf,
+        content_source_path=first_content_path,
+        course_cache_figures_dir=tmp_path / "_cache" / "class_1" / "figures",
+        vault_course_dir=vault_course_dir,
+        source_mtime=datetime(2024, 1, 15).timestamp(),
+        processed_at=datetime(2024, 1, 16, tzinfo=timezone.utc),
+    )
+    assert first.written is True
+    assert first.content_hash is not None
+
+    # Second write passes the first write's hash as the baseline -- since
+    # nobody touched the vault file since then, it must overwrite normally.
+    second_content_path = _make_content_file(tmp_path, "Second version.\n")
+    second = write_lecture_note(
+        source_pdf_path=source_pdf,
+        content_source_path=second_content_path,
+        course_cache_figures_dir=tmp_path / "_cache" / "class_1" / "figures",
+        vault_course_dir=vault_course_dir,
+        source_mtime=datetime(2024, 1, 15).timestamp(),
+        processed_at=datetime(2024, 1, 16, tzinfo=timezone.utc),
+        previous_content_hash=first.content_hash,
+    )
+
+    assert second.written is True
+    assert second.content_hash is not None
+    assert second.content_hash != first.content_hash
+    written = second.output_path.read_text(encoding="utf-8")
+    assert "Second version." in written
+    assert "First version." not in written
+
+
+def test_no_baseline_previous_content_hash_none_overwrites(tmp_path):
+    """Issue #40: previous_content_hash=None (no baseline recorded -- e.g.
+    a fresh/rebuilt state.db, or a file never previously vault-written)
+    always overwrites unconditionally, even if a file already happens to
+    exist on disk at the target path -- matching pre-#40 behavior."""
+    source_pdf = tmp_path / "notes_raw" / "class_1" / "lecture_02.pdf"
+    source_pdf.parent.mkdir(parents=True)
+    source_pdf.write_bytes(b"fake-pdf")
+    content_path = _make_content_file(tmp_path, "New content.\n")
+    cache_figures_dir = tmp_path / "_cache" / "class_1" / "figures"
+    vault_course_dir = tmp_path / "vault" / "class_1"
+    vault_course_dir.mkdir(parents=True)
+
+    output_path = vault_course_dir / "Lecture 02.md"
+    output_path.write_text("Pre-existing content on disk.\n", encoding="utf-8")
+
+    result = write_lecture_note(
+        source_pdf_path=source_pdf,
+        content_source_path=content_path,
+        course_cache_figures_dir=cache_figures_dir,
+        vault_course_dir=vault_course_dir,
+        source_mtime=datetime(2024, 1, 15).timestamp(),
+        processed_at=datetime(2024, 1, 16, tzinfo=timezone.utc),
+        previous_content_hash=None,
+    )
+
+    assert result.written is True
+    assert result.content_hash is not None
+    written = output_path.read_text(encoding="utf-8")
+    assert "New content." in written
+    assert "Pre-existing content on disk." not in written
