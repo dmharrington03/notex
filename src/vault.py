@@ -32,7 +32,6 @@ from pathlib import Path
 from src.figures import copy_figures_to_vault, rewrite_image_references
 from src.postprocess import (
     DEFAULT_LECTURE_PREFIX,
-    DEFAULT_TAGS,
     build_frontmatter,
     parse_lecture_filename,
     scan_delimiter_issues,
@@ -98,10 +97,12 @@ def write_lecture_note(
             appends " @darkmode" to every figure caption when True. Plain
             param, not read from config.yaml (Phase 6).
         tags: forwarded to postprocess.build_frontmatter(). None (the
-            default) falls back to postprocess.DEFAULT_TAGS, matching
-            build_frontmatter()'s own default -- same
-            ("lecture-notes",) stand-in pending Phase 6's real
-            output.course_tags config wiring.
+            default) falls back to no tags at all (an empty tuple) --
+            there is no global/default tag list anywhere in this codebase
+            (see AGENTS.md's Phase 6 "Scope correction" note); a course
+            only gets tags via an explicit output.course_tags entry,
+            resolved by postprocess.resolve_tags() and passed in here by
+            the caller (src/main.py, Phase 6 config wiring).
 
     Returns:
         A VaultWriteResult recording the written output_path, the
@@ -139,7 +140,7 @@ def write_lecture_note(
         source_pdf_path=source_pdf_path,
         source_mtime=source_mtime,
         processed_at=processed_at,
-        tags=tags if tags is not None else DEFAULT_TAGS,
+        tags=tags if tags is not None else (),
     )
 
     full_content = frontmatter + rewritten_body

@@ -109,9 +109,9 @@ retained in that file purely as historical/superseded reference.
 `src/config.py`'s `OutputConfig`/`load_output_config()` (issue #33) are
 already updated to this design — no `base_tags` field, no
 `DEFAULT_BASE_TAGS` constant. `src/postprocess.py`'s `DEFAULT_TAGS`
-constant is unaffected for now (still a Phase 5 stand-in pending #35's
-real wiring), but #35 must apply this same no-default rule when it wires
-`course_tags` resolution into `build_frontmatter()`.
+constant (a Phase 5 stand-in) was removed entirely by #35 — `resolve_tags()`
+implements this same no-default rule for real, and `build_frontmatter()`'s
+`tags` param now defaults to `()` (no tags), not a hardcoded constant.
 
 **Scope correction — course index generation is permanently dropped, not
 deferred.** docs/spec.md's Stage 6 (`_index.md` per course, a regenerated
@@ -304,7 +304,20 @@ narrative and real-data-validation findings.
   same no-cross-module-import precedent as `DEFAULT_DATE_FORMAT`. Added
   `naming:` section to `config.example.yaml`. No deviations from the
   issue's plan.
-- **#35-#38 (not yet started)** — see "Current Phase" above for the full
+- **#35 (done)** — `src/postprocess.py`: `build_frontmatter()` gained a
+  `date_format` param (default `DATE_FORMAT`, applied to both `date`/
+  `processed`); new `resolve_tags(course_name, output_config)` helper
+  resolves a course's tags from `OutputConfig.course_tags` with no
+  fallback (`()` if absent). Deviates from the issue's original
+  description: `DEFAULT_TAGS` was removed entirely (not left as a
+  fallback) and `build_frontmatter()`'s `tags` param now defaults to `()`
+  — keeping a hardcoded `("lecture-notes",)` default would have silently
+  reintroduced a global default tag for any caller that omits `tags`,
+  contradicting the no-base_tags design; `src/vault.py`'s
+  `write_lecture_note()` (still Phase 5, issue #29) updated to match, its
+  own tags default now also `()` instead of `DEFAULT_TAGS`. `src/main.py`
+  wiring `resolve_tags()`'s output through is still #37's job.
+- **#36-#38 (not yet started)** — see "Current Phase" above for the full
   scope. Status lines will be added here as each issue completes.
 
 ### Phase 5 (VALIDATED — complete, issues #26-#32)

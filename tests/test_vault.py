@@ -14,7 +14,7 @@ Covered here:
     - delimiter_warnings populated when the rewritten body has a balance
       issue, empty when clean
     - custom tags round-trip into frontmatter; omitted tags falls back to
-      DEFAULT_TAGS
+      no tags at all (empty list)
     - frontmatter is prepended before the rewritten body
 
 All tmp_path-backed, no mocking, no network (matches tests/test_figures.py's
@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 import pytest
 import yaml
 
-from src.postprocess import DEFAULT_TAGS, PostprocessError
+from src.postprocess import PostprocessError
 from src.vault import VaultWriteResult, write_lecture_note
 
 
@@ -237,7 +237,7 @@ def test_custom_tags_round_trip_into_frontmatter(tmp_path):
     assert data["tags"] == ["lecture-notes", "quantum-mechanics"]
 
 
-def test_omitted_tags_falls_back_to_default_tags(tmp_path):
+def test_omitted_tags_falls_back_to_no_tags(tmp_path):
     source_pdf = tmp_path / "notes_raw" / "class_1" / "lecture_02.pdf"
     source_pdf.parent.mkdir(parents=True)
     source_pdf.write_bytes(b"fake-pdf")
@@ -257,7 +257,7 @@ def test_omitted_tags_falls_back_to_default_tags(tmp_path):
     written = result.output_path.read_text(encoding="utf-8")
     frontmatter_body = written.split("---\n")[1]
     data = yaml.safe_load(frontmatter_body)
-    assert data["tags"] == list(DEFAULT_TAGS)
+    assert data["tags"] == []
 
 
 def test_frontmatter_prepended_before_body(tmp_path):

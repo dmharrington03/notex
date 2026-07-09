@@ -13,11 +13,15 @@ vault Markdown.
                                  from its immediate parent folder
     - build_frontmatter()     assembles the "---\\n...\\n---\\n" YAML block
     - scan_delimiter_issues() warn-only math-delimiter-balance diagnostic scan
+    - resolve_tags()          resolves a course's final tags from OutputConfig
+                               (course_tags-or-nothing, no global fallback)
 
 Implementation status:
     - parse_lecture_filename() / build_frontmatter()   implemented (issue #27)
     - scan_delimiter_issues() (warn-only delimiter-balance scan)   implemented
       (issue #28)
+    - resolve_tags() / build_frontmatter()'s date_format param   implemented
+      (issue #35)
     - Actually writing a file into the vault is src/vault.py's job (issue #29),
       not this module's — this module stays a pure, no-I/O (other than the
       read-only Path operations below) building-block layer.
@@ -31,6 +35,8 @@ from datetime import datetime
 from pathlib import Path
 
 import yaml
+
+from src.config import OutputConfig
 
 # Duplicated from src/llm.py's validate_cleanup() word-boundary-aware
 # \left/\right regexes (not imported — no cross-module import of a private
@@ -60,22 +66,9 @@ _LECTURE_FILENAME_RE = re.compile(r"lecture[_-]?(\d+)(?:_(.+))?", re.IGNORECASE)
 # naming.lecture_prefix's real config wiring is Phase 6.
 DEFAULT_LECTURE_PREFIX = "Lecture"
 
-# TEMPORARY Phase 5 stand-in, only until #35 wires real output.course_tags
-# resolution into build_frontmatter()'s callers. This constant itself will
-# NOT survive as a fallback once that lands: the final, real behavior is
-# that a course with no output.course_tags entry in config.yaml gets NO
-# tags at all (an empty tags list in the frontmatter) — there is no
-# global/default tag concept in the real config (see src/config.py's
-# OutputConfig docstring; this was a deliberate correction away from
-# docs/spec.md's base_tags idea, see AGENTS.md's Phase 6 notes). Until #35
-# lands, every note gets this hardcoded tuple since nothing reads
-# config.yaml's course_tags yet. A tuple (not a list) deliberately, so it
-# can safely serve as build_frontmatter()'s default parameter value without
-# the classic mutable-default-argument pitfall.
-DEFAULT_TAGS: tuple[str, ...] = ("lecture-notes",)
-
-# output.date_format's real config wiring is likewise Phase 6 — hardcoded
-# for now.
+# build_frontmatter()'s backward-compatible default for its `date_format`
+# param. Real production callers pass output.date_format (loaded via
+# src/config.py's load_output_config()) explicitly.
 DATE_FORMAT = "%Y-%m-%d"
 
 
@@ -152,7 +145,8 @@ def build_frontmatter(
     source_pdf_path: str | Path,
     source_mtime: float,
     processed_at: datetime,
-    tags: tuple[str, ...] | list[str] = DEFAULT_TAGS,
+    tags: tuple[str, ...] | list[str] = (),
+    date_format: str = DATE_FORMAT,
 ) -> str:
     """
     Assemble the YAML frontmatter block for a vault lecture note.
@@ -180,15 +174,18 @@ def build_frontmatter(
             local time before formatting, so "date"/"processed" are always
             consistent local-time calendar dates regardless of what
             tzinfo processed_at happens to carry.
-        tags: defaults to DEFAULT_TAGS (("lecture-notes",)), a TEMPORARY
-            Phase 5 stand-in until #35 wires real output.course_tags
-            resolution through. This param itself doesn't change in #35 —
-            callers (src/vault.py) will start passing an explicitly
-            resolved tuple every time (empty `()` for a course with no
-            course_tags entry, per the final no-default-tags design — see
-            DEFAULT_TAGS's module-level comment and AGENTS.md's Phase 6
-            notes), making this default effectively dead code at that
-            point rather than something still relied on.
+        tags: the resolved tags to render (see resolve_tags() below to
+            compute this from a course name + OutputConfig). Defaults to
+            `()` (no tags) — there is no global/default tag list anywhere
+            in this codebase (see AGENTS.md's Phase 6 "Scope correction"
+            note and OutputConfig's docstring); a course only gets tags via
+            an explicit course_tags entry, resolved by resolve_tags() and
+            passed in here explicitly.
+        date_format: strftime format string used for both the "date" and
+            "processed" fields. Defaults to DATE_FORMAT ("%Y-%m-%d") only
+            for callers that don't pass this explicitly — real production
+            callers pass output.date_format from config.yaml (see
+            src/config.py's load_output_config()).
 
     Returns:
         A complete "---\\n...\\n---\\n" YAML frontmatter block with keys in
@@ -196,8 +193,8 @@ def build_frontmatter(
         matching docs/spec.md's Stage 5 frontmatter schema.
     """
     title = f"{DEFAULT_LECTURE_PREFIX} {lecture_number:02d}"
-    date = datetime.fromtimestamp(source_mtime).strftime(DATE_FORMAT)
-    processed = processed_at.astimezone().strftime(DATE_FORMAT)
+    date = datetime.fromtimestamp(source_mtime).strftime(date_format)
+    processed = processed_at.astimezone().strftime(date_format)
     source_pdf = str(Path(source_pdf_path).resolve())
 
     data = {
@@ -212,6 +209,33 @@ def build_frontmatter(
 
     body = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
     return f"---\n{body}---\n"
+
+
+def resolve_tags(course_name: str, output_config: OutputConfig) -> tuple[str, ...]:
+    """
+    Resolve the final tags tuple for a course, for use as build_frontmatter()'s
+    `tags` argument.
+
+    Args:
+        course_name: the **raw course folder name** — underscores, not
+            converted to spaces (e.g. "18.06_Linear_Algebra", matching
+            discovery.py's course-subdirectory grouping key and
+            src/config.py's OutputConfig.course_tags docstring). This is
+            NOT the same string as parse_lecture_filename()'s
+            LectureFileInfo.course_name, which has underscores replaced
+            with spaces for display purposes — callers must use the raw
+            folder name here, or the course_tags lookup below will silently
+            miss and fall back to no tags.
+        output_config: loaded via src/config.py's load_output_config().
+
+    Returns:
+        output_config.course_tags[course_name] if present, else an empty
+        tuple. There is no global/default tag list to fall back to — a
+        course with no explicit course_tags entry gets no tags at all (see
+        AGENTS.md's Phase 6 "Scope correction" note, and OutputConfig's
+        docstring).
+    """
+    return output_config.course_tags.get(course_name, ())
 
 
 def scan_delimiter_issues(markdown_text: str) -> list[str]:
