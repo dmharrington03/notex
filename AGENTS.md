@@ -96,14 +96,16 @@ flags, `--no-llm`, manual mode, `--verbose`, Rich Live CLI output). See
 `docs/spec.md` for the full original roadmap (note: follow this file,
 AGENTS.md, not spec.md, where they disagree).
 
-**Known bug, filed as #39 (untriaged, no phase label yet)**: `src/vault.py`'s
-`write_lecture_note()` derives its output filename from the current
-`lecture_prefix`, but never removes a previously-written vault file with a
-*different* name for the same source PDF — changing `naming.lecture_prefix`
-after a vault already has content leaves the old-named file behind as a
-permanent orphan. Found live during #38's validation; needs a real design
-decision (likely diffing the newly-computed output path against
-`state.db`'s existing `vault_path` column) before fixing.
+**#39 (closed, won't-fix)**: `src/vault.py`'s `write_lecture_note()` derives
+its output filename from the current `lecture_prefix`, but never removes a
+previously-written vault file with a *different* name for the same source
+PDF — changing `naming.lecture_prefix` after a vault already has content
+leaves the old-named file behind as a permanent orphan. Found live during
+#38's validation. **Explicit user decision: this is acceptable behavior,
+not a bug to fix** — orphaned stale-named vault files are an acceptable
+side effect of changing `naming.lecture_prefix`; no cleanup logic will be
+built for this, at any point in this project. See #40's note below for one
+concrete interaction this decision has with #40's conflict detection.
 
 **#40 (done, untriaged, no phase label)** — manual-vault-edit conflict
 detection: `state.db` gained a nullable `vault_content_hash` column
@@ -130,6 +132,21 @@ manual edits preserved byte-for-byte, `vault_path`/`vault_content_hash`/
 expected. Still open: nothing yet lets a conflict be resolved/cleared once
 recorded (the deferred `--force-vault-overwrite` flag is the intended
 fix, Phase 7).
+
+**Known interaction between #39 (won't-fix) and #40's conflict
+detection**: `state.db` only tracks a single `vault_path`/
+`vault_content_hash` per source PDF (the most recent write). If
+`naming.lecture_prefix` is changed and later *reverted* to a value used
+before, the pipeline recomputes an `output_path` that points at the
+old, still-orphaned file from before the first change — but the baseline
+hash it compares against now describes the *intervening* (different-
+prefix) file, not that orphan. The hash mismatch is real, so this
+correctly-but-unhelpfully surfaces as `vault_status="conflict"` on the
+revert, even though nobody manually touched the orphaned file. Accepted
+as a narrow, foreseeable edge case of combining "leave orphans" (#39)
+with hash-baseline conflict detection (#40) — not planned to be
+specifically handled; the deferred `--force-vault-overwrite` flag (Phase
+7) is the general escape hatch for this too.
 
 **Scope correction — `output.base_tags` (a global/default tag list) is
 dropped entirely, not deferred.** docs/spec.md's `output:` schema included
