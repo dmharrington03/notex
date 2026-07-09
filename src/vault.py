@@ -14,11 +14,13 @@ Assembles and writes the final per-lecture Markdown file into
 
 Implementation status:
     - write_lecture_note()   implemented (issue #29)
+    - write_lecture_note()'s lecture_prefix param   implemented (issue #36)
 
-Deliberately no config.py reading here — dark_mode/tags are taken as plain
-params (same precedent as src/figures.py's rewrite_image_references()'s
-dark_mode param); real output.figures_dark_mode_flag/course_tags config
-wiring is Phase 6. Likewise, wiring this function into src/main.py's run()
+Deliberately no config.py reading here — dark_mode/tags/lecture_prefix are
+taken as plain params (same precedent as src/figures.py's
+rewrite_image_references()'s dark_mode param); real
+output.figures_dark_mode_flag/course_tags/naming.lecture_prefix config
+wiring is #37. Likewise, wiring this function into src/main.py's run()
 and state.db's vault_status/vault_path columns are separate issues
 (#30/#31), not this module's job.
 """
@@ -66,6 +68,7 @@ def write_lecture_note(
     processed_at: datetime,
     dark_mode: bool = False,
     tags: list[str] | None = None,
+    lecture_prefix: str = DEFAULT_LECTURE_PREFIX,
 ) -> VaultWriteResult:
     """
     Assemble and write a single lecture's final vault Markdown file.
@@ -103,6 +106,14 @@ def write_lecture_note(
             only gets tags via an explicit output.course_tags entry,
             resolved by postprocess.resolve_tags() and passed in here by
             the caller (src/main.py, Phase 6 config wiring).
+        lecture_prefix: used for both the output filename ("{lecture_prefix}
+            NN.md") and forwarded verbatim to postprocess.build_frontmatter()'s
+            same-named param (the "title" field) -- the two are never
+            independently configurable, so they can never disagree. Defaults
+            to DEFAULT_LECTURE_PREFIX ("Lecture") only for callers that don't
+            pass this explicitly -- real production callers pass
+            naming.lecture_prefix from config.yaml (see src/config.py's
+            load_naming_config()), threaded through by src/main.py (#37).
 
     Returns:
         A VaultWriteResult recording the written output_path, the
@@ -141,13 +152,14 @@ def write_lecture_note(
         source_mtime=source_mtime,
         processed_at=processed_at,
         tags=tags if tags is not None else (),
+        lecture_prefix=lecture_prefix,
     )
 
     full_content = frontmatter + rewritten_body
 
     vault_course_dir.mkdir(parents=True, exist_ok=True)
     output_path = (
-        vault_course_dir / f"{DEFAULT_LECTURE_PREFIX} {info.lecture_number:02d}.md"
+        vault_course_dir / f"{lecture_prefix} {info.lecture_number:02d}.md"
     )
     output_path.write_text(full_content, encoding="utf-8")
 

@@ -22,6 +22,7 @@ Implementation status:
       (issue #28)
     - resolve_tags() / build_frontmatter()'s date_format param   implemented
       (issue #35)
+    - build_frontmatter()'s lecture_prefix param   implemented (issue #36)
     - Actually writing a file into the vault is src/vault.py's job (issue #29),
       not this module's — this module stays a pure, no-I/O (other than the
       read-only Path operations below) building-block layer.
@@ -62,8 +63,12 @@ _BRACKET_DELIMITER_RE = re.compile(r"\\\[.*?\\\]", re.DOTALL)
 # parse_lecture_filename() below).
 _LECTURE_FILENAME_RE = re.compile(r"lecture[_-]?(\d+)(?:_(.+))?", re.IGNORECASE)
 
-# The output-filename prefix ("Lecture NN") is a hardcoded default for now —
-# naming.lecture_prefix's real config wiring is Phase 6.
+# build_frontmatter()'s backward-compatible default for its `lecture_prefix`
+# param (used for the "title" field, e.g. "Lecture 02"). Real production
+# callers pass naming.lecture_prefix (loaded via src/config.py's
+# load_naming_config()) explicitly; src/vault.py's write_lecture_note()
+# threads the same value through to both the frontmatter title and the
+# output filename so the two can never disagree (issue #36).
 DEFAULT_LECTURE_PREFIX = "Lecture"
 
 # build_frontmatter()'s backward-compatible default for its `date_format`
@@ -147,6 +152,7 @@ def build_frontmatter(
     processed_at: datetime,
     tags: tuple[str, ...] | list[str] = (),
     date_format: str = DATE_FORMAT,
+    lecture_prefix: str = DEFAULT_LECTURE_PREFIX,
 ) -> str:
     """
     Assemble the YAML frontmatter block for a vault lecture note.
@@ -186,13 +192,20 @@ def build_frontmatter(
             for callers that don't pass this explicitly — real production
             callers pass output.date_format from config.yaml (see
             src/config.py's load_output_config()).
+        lecture_prefix: used to build the "title" field (e.g.
+            "Lecture 02"). Defaults to DEFAULT_LECTURE_PREFIX ("Lecture")
+            only for callers that don't pass this explicitly — real
+            production callers pass naming.lecture_prefix from config.yaml
+            (see src/config.py's load_naming_config()). src/vault.py's
+            write_lecture_note() passes the same value here as it uses for
+            the output filename, so the two can never disagree (issue #36).
 
     Returns:
         A complete "---\\n...\\n---\\n" YAML frontmatter block with keys in
         the order title/course/date/lecture_number/tags/source_pdf/processed,
         matching docs/spec.md's Stage 5 frontmatter schema.
     """
-    title = f"{DEFAULT_LECTURE_PREFIX} {lecture_number:02d}"
+    title = f"{lecture_prefix} {lecture_number:02d}"
     date = datetime.fromtimestamp(source_mtime).strftime(date_format)
     processed = processed_at.astimezone().strftime(date_format)
     source_pdf = str(Path(source_pdf_path).resolve())

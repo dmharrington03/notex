@@ -165,6 +165,22 @@ def test_build_frontmatter_custom_date_format():
     assert data["processed"] == processed_at.astimezone().strftime("%d/%m/%Y")
 
 
+def test_build_frontmatter_custom_lecture_prefix():
+    result = build_frontmatter(
+        course_name="class 1",
+        lecture_number=2,
+        topic=None,
+        source_pdf_path="/abs/notes_raw/class_1/lecture_02.pdf",
+        source_mtime=datetime(2024, 1, 1).timestamp(),
+        processed_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        lecture_prefix="Lec",
+    )
+
+    body = result[len("---\n") : -len("---\n")]
+    data = yaml.safe_load(body)
+    assert data["title"] == "Lec 02"
+
+
 def test_resolve_tags_returns_configured_course_tags():
     output_config = OutputConfig(
         course_tags={"class_1": ("quantum-mechanics", "core")},

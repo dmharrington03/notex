@@ -16,6 +16,8 @@ Covered here:
     - custom tags round-trip into frontmatter; omitted tags falls back to
       no tags at all (empty list)
     - frontmatter is prepended before the rewritten body
+    - custom lecture_prefix reflected in both the output filename and the
+      written frontmatter's title, confirming they match (issue #36)
 
 All tmp_path-backed, no mocking, no network (matches tests/test_figures.py's
 precedent).
@@ -301,6 +303,32 @@ def test_output_filename_uses_zero_padded_lecture_number(tmp_path):
     )
 
     assert result.output_path.name == "Lecture 02.md"
+
+
+def test_custom_lecture_prefix_reflected_in_filename_and_title(tmp_path):
+    source_pdf = tmp_path / "notes_raw" / "class_1" / "lecture_02.pdf"
+    source_pdf.parent.mkdir(parents=True)
+    source_pdf.write_bytes(b"fake-pdf")
+    content_path = _make_content_file(tmp_path, "Notes.\n")
+    cache_figures_dir = tmp_path / "_cache" / "class_1" / "figures"
+    vault_course_dir = tmp_path / "vault" / "class_1"
+
+    result = write_lecture_note(
+        source_pdf_path=source_pdf,
+        content_source_path=content_path,
+        course_cache_figures_dir=cache_figures_dir,
+        vault_course_dir=vault_course_dir,
+        source_mtime=datetime(2024, 1, 15).timestamp(),
+        processed_at=datetime(2024, 1, 16, tzinfo=timezone.utc),
+        lecture_prefix="Lec",
+    )
+
+    assert result.output_path.name == "Lec 02.md"
+
+    written = result.output_path.read_text(encoding="utf-8")
+    frontmatter_body = written.split("---\n")[1]
+    data = yaml.safe_load(frontmatter_body)
+    assert data["title"] == "Lec 02"
 
 
 def test_result_is_vault_write_result_instance(tmp_path):

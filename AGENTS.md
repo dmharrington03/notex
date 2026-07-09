@@ -317,7 +317,14 @@ narrative and real-data-validation findings.
   `write_lecture_note()` (still Phase 5, issue #29) updated to match, its
   own tags default now also `()` instead of `DEFAULT_TAGS`. `src/main.py`
   wiring `resolve_tags()`'s output through is still #37's job.
-- **#36-#38 (not yet started)** — see "Current Phase" above for the full
+- **#36 (done)** — `src/postprocess.py`: `build_frontmatter()` gained a
+  `lecture_prefix` param (default `DEFAULT_LECTURE_PREFIX`), used to build
+  the `title` field. `src/vault.py`'s `write_lecture_note()` gained the
+  same-named param, used for both the output filename and forwarded
+  verbatim to `build_frontmatter()`, so the two can never disagree. No
+  deviations from the issue's plan. `src/main.py` wiring
+  `NamingConfig.lecture_prefix` through is still #37's job.
+- **#37-#38 (not yet started)** — see "Current Phase" above for the full
   scope. Status lines will be added here as each issue completes.
 
 ### Phase 5 (VALIDATED — complete, issues #26-#32)
