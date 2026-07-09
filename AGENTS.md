@@ -87,14 +87,14 @@ Dependencies are tracked in `environment.yml` (reproduce with
 
 ## Current Phase
 
-**Phase 6 is VALIDATED — complete** (see "Phase 6" under "Phase Progress"
-below for its confirmed design/findings). **Phase 7 — CLI polish + new
-feature requests — not yet started**; no issues filed for it yet. See
-"Remaining Work — Phases 4-7 Plan" below for Phase 7's full scope
-(`--dry-run`/`--force`/`--course`/`--refresh-llm-prompt`/single-file-rerun
-flags, `--no-llm`, manual mode, `--verbose`, Rich Live CLI output). See
-`docs/spec.md` for the full original roadmap (note: follow this file,
-AGENTS.md, not spec.md, where they disagree).
+**Phases 1-6 are all VALIDATED — complete** (see "Phase Progress" below for
+each phase's confirmed design/findings). **Phase 7 — CLI polish + new
+feature requests — IN PROGRESS**, issues #41-#51 filed (all open, none
+started yet). See "Remaining Work — Phases 4-7 Plan" below for Phase 7's
+full scope and the "Phase 7 Plan" subsection immediately below that for the
+issue-by-issue breakdown and implementation order. See `docs/spec.md` for
+the full original roadmap (note: follow this file, AGENTS.md, not spec.md,
+where they disagree).
 
 **#39 (closed, won't-fix)**: `src/vault.py`'s `write_lecture_note()` derives
 its output filename from the current `lecture_prefix`, but never removes a
@@ -299,10 +299,56 @@ planning.
    - Testing convention: tests inject a fake/no-op `Reporter` — no test
      asserts on actual Rich terminal rendering.
 
+5. **`--force-vault-overwrite` flag.** Not in docs/spec.md's original CLI
+   list — the escape hatch deferred by #40's "Known interaction"/"Still
+   open" notes above for clearing a recorded `vault_status="conflict"`
+   once a manually-edited vault note has been detected. `write_lecture_note()`
+   gains a `force_overwrite: bool` param that bypasses the
+   `previous_content_hash` comparison entirely (write unconditionally,
+   same as the no-baseline-recorded case); `_write_to_vault()`/`run()`/
+   `_process_file()` thread a matching param down from a new
+   `--force-vault-overwrite` flag. Deliberately a blunt, whole-run
+   instrument for this phase — no per-file conflict targeting.
+
+### Phase 7 Plan — issue breakdown and order
+
+Confirmed with the user (2026-07-08) before filing: fine-grained,
+one-thing-per-issue (matching Phases 3/5/6's precedent), implemented in the
+order below (simple CLI flags first, then reporting infra, then manual
+mode, validation last). `rich` is added to `environment.yml` inside the
+`RichReporter` issue itself, not as separate prep work. `--force-vault-overwrite`
+(see item 5 above) is in scope for this phase, not deferred further.
+
+1. **#41** — argparse scaffolding + `--course NAME` (establishes the
+   parser pattern every later flag issue extends).
+2. **#42** — `--dry-run`.
+3. **#43** — `--force` (full reprocess regardless of state.db; distinct
+   from the existing `force_llm` param).
+4. **#44** — `--refresh-llm-prompt` + `--file PATH` (thin CLI surfaces for
+   the already-built `force_llm`/`target_source_path` params — grouped
+   since neither needs new pipeline logic).
+5. **#45** — `--force-vault-overwrite` (item 5 above).
+6. **#46** — `--no-llm` (item 1 above).
+7. **#47** — `src/reporting.py` core: `Reporter` protocol + `PlainReporter`
+   (refactors existing `print()` call sites, no behavior change).
+8. **#48** — `--verbose`/`-v` (depends on #47).
+9. **#49** — `RichReporter` + TTY auto-detection, adds the `rich`
+   dependency (depends on #47).
+10. **#50** — `scripts/manual_convert.py` manual mode (item 2 above).
+11. **#51** — Real-data validation against `notes_raw/class_1`, same
+    closing-issue shape as #12/#20/#25/#32/#38 (depends on all of the
+    above).
+
 ## Phase Progress
 
 Brief status only — see each issue's GitHub comments for implementation
 narrative and real-data-validation findings.
+
+### Phase 7 (IN PROGRESS, issues #41-#51)
+
+- Issues filed, none started yet. See "Phase 7 Plan" under "Remaining
+  Work — Phases 4-7 Plan" above for the full issue-by-issue breakdown and
+  implementation order.
 
 ### Phase 6 (VALIDATED — complete, issues #33-#38)
 
