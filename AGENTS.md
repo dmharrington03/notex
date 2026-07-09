@@ -87,72 +87,44 @@ Dependencies are tracked in `environment.yml` (reproduce with
 
 ## Current Phase
 
-**Phase 6 — Full config wiring + end-to-end validation — in progress.**
-Phase 5 is VALIDATED — complete (see "Phase 5" under "Phase Progress" below
-for its confirmed design/findings). Phase 6's scope: wire the remaining
-still-hardcoded config values (`output.course_tags`, `output.date_format`,
-`output.figures_dark_mode_flag`, `naming.lecture_prefix`) into real
-`config.yaml` reads, then validate the complete pipeline end-to-end on real
-data. See `docs/spec.md` for the full original roadmap (note: follow this
-file, AGENTS.md, not spec.md, where they disagree).
+**Phase 6 is VALIDATED — complete** (see "Phase 6" under "Phase Progress"
+below for its confirmed design/findings). **Phase 7 — CLI polish + new
+feature requests — not yet started**; no issues filed for it yet. See
+"Remaining Work — Phases 4-7 Plan" below for Phase 7's full scope
+(`--dry-run`/`--force`/`--course`/`--refresh-llm-prompt`/single-file-rerun
+flags, `--no-llm`, manual mode, `--verbose`, Rich Live CLI output). See
+`docs/spec.md` for the full original roadmap (note: follow this file,
+AGENTS.md, not spec.md, where they disagree).
+
+**Known bug, filed as #39 (untriaged, no phase label yet)**: `src/vault.py`'s
+`write_lecture_note()` derives its output filename from the current
+`lecture_prefix`, but never removes a previously-written vault file with a
+*different* name for the same source PDF — changing `naming.lecture_prefix`
+after a vault already has content leaves the old-named file behind as a
+permanent orphan. Found live during #38's validation; needs a real design
+decision (likely diffing the newly-computed output path against
+`state.db`'s existing `vault_path` column) before fixing.
 
 **Scope correction — `output.base_tags` (a global/default tag list) is
-dropped entirely, not deferred.** docs/spec.md's `output:` schema and this
-file's own prior Phase 6 planning both included a `base_tags` global
-default tag list, with `course_tags` merging/overriding it per course. Per
-explicit user direction, **there is no global/default tag list at all** —
-a course only gets tags if it has an explicit `output.course_tags` entry
-for its raw folder name; a course with no entry produces untagged notes
-(empty `tags` list). This is a deliberate divergence from docs/spec.md,
-not a rewording — ignore spec.md's `base_tags` key going forward; it's
-retained in that file purely as historical/superseded reference.
-`src/config.py`'s `OutputConfig`/`load_output_config()` (issue #33) are
-already updated to this design — no `base_tags` field, no
-`DEFAULT_BASE_TAGS` constant. `src/postprocess.py`'s `DEFAULT_TAGS`
-constant (a Phase 5 stand-in) was removed entirely by #35 — `resolve_tags()`
-implements this same no-default rule for real, and `build_frontmatter()`'s
-`tags` param now defaults to `()` (no tags), not a hardcoded constant.
+dropped entirely, not deferred.** docs/spec.md's `output:` schema included
+a `base_tags` global default tag list, with `course_tags` merging/
+overriding it per course. Per explicit user direction, **there is no
+global/default tag list at all** — a course only gets tags if it has an
+explicit `output.course_tags` entry for its raw folder name; a course with
+no entry produces untagged notes (empty `tags` list). This is a deliberate
+divergence from docs/spec.md, not a rewording — ignore spec.md's
+`base_tags` key going forward; it's retained in that file purely as
+historical/superseded reference. `src/config.py`'s `OutputConfig`/
+`load_output_config()` (issue #33) and `src/postprocess.py`'s
+`resolve_tags()` (issue #35) implement this no-default rule for real.
 
-**Scope correction — course index generation is permanently dropped, not
-deferred.** docs/spec.md's Stage 6 (`_index.md` per course, a regenerated
-Markdown table of lectures) and this file's own prior planning both
-described index generation as part of Phase 6. Per explicit user direction,
-**this feature is cancelled entirely** — no `_index.md` file, wikilink
-table, or per-course index regeneration will be built at any point in this
-project, in any future phase. This is a deliberate divergence from
-docs/spec.md, not a rewording — ignore spec.md's Stage 6 section going
-forward; it's retained in that file purely as historical/superseded
-reference.
-
-Concretely, Phase 6 covers:
-- `src/config.py`: `load_output_config()` — reads `output.course_tags`
-  (dict keyed by the **raw course folder name**, underscores not converted
-  to spaces; no global/default tag list — a course with no entry gets no
-  tags, see the scope-correction note above), `output.date_format`,
-  `output.figures_dark_mode_flag`. `load_naming_config()` — reads
-  `naming.lecture_prefix` (a **single global value**, no per-course
-  override). Both follow the fully-optional pattern already established by
-  `load_llm_config()`: a missing file/section/key silently falls back to
-  today's hardcoded defaults, never raises.
-- `src/postprocess.py`: `build_frontmatter()` gains a configurable
-  `date_format` param (replacing the hardcoded `DATE_FORMAT` constant) and
-  a configurable `lecture_prefix` param for the `title` field (replacing
-  `DEFAULT_LECTURE_PREFIX`); tag resolution (course_tags-or-nothing, no
-  base_tags fallback) is a separate helper, not a change to
-  `build_frontmatter()`'s existing `tags` param.
-- `src/vault.py`: `write_lecture_note()` gains a `lecture_prefix` param,
-  threaded to **both** the output filename and `build_frontmatter()`'s
-  title, so the two can never disagree with each other.
-- `src/main.py`: `run()` loads `OutputConfig`/`NamingConfig` internally
-  when not passed in (same optional-param pattern already used for
-  `llm_config`), threading both down through `_process_file()` /
-  `_write_to_vault()` into `write_lecture_note()`.
-- Real-data validation pass against `notes_raw/class_1` with a populated
-  `output:`/`naming:` config (including a `course_tags` override), same
-  precedent as every prior phase's closing validation issue.
-
-Tracked in issues #33-#38 (`phase-6` label). See "Phase Progress" below for
-status as issues complete.
+**Scope correction — course index generation is permanently dropped.**
+docs/spec.md's Stage 6 (`_index.md` per course, a regenerated Markdown
+table of lectures) is cancelled entirely per explicit user direction — no
+`_index.md` file, wikilink table, or per-course index regeneration will be
+built at any point in this project, in any future phase. Ignore spec.md's
+Stage 6 section going forward; it's retained purely as historical/
+superseded reference.
 
 ## Remaining Work — Phases 4-7 Plan
 
@@ -289,7 +261,7 @@ planning.
 Brief status only — see each issue's GitHub comments for implementation
 narrative and real-data-validation findings.
 
-### Phase 6 (in progress, issues #33-#38)
+### Phase 6 (VALIDATED — complete, issues #33-#38)
 
 - **#33 (done)** — `src/config.py`: `OutputConfig` (`course_tags`/
   `date_format`/`figures_dark_mode_flag`) + `load_output_config()`, same
@@ -351,8 +323,19 @@ narrative and real-data-validation findings.
   #37's own stale GitHub issue-body wording (a leftover "base_tags
   fallback" mention that predates the no-base_tags design), matching the
   #33/#35 precedent of correcting stale issue text.
-- **#38 (not yet started)** — see "Current Phase" above for the full
-  scope.
+- **#38 (done)** — real-data validation against `notes_raw/class_1`: cold
+  run, idempotent rerun, and a config-change-without-input-change rerun all
+  confirmed working as designed; no code changes needed for Phase 6 itself.
+  Found and filed (not fixed) #39 — `write_lecture_note()` orphans the
+  previously-named vault file when `naming.lecture_prefix` changes.
+  Confirmed the config-change scenario requires calling `run(...,
+  force_llm=True)` directly — `needs_llm_reprocessing()` never retriggers
+  an already-`llm_status="success"` file, and `main()` hardcodes
+  `force_llm=False` with no CLI flag yet (Phase 7) — so today, editing
+  `output:`/`naming:` values and rerunning the plain CLI has no effect on
+  already-processed files. Manual Obsidian check confirmed the
+  `@darkmode`-suffixed alt text renders as intended. Full findings in the
+  issue's GitHub comments. Phase 6 is now marked **VALIDATED — complete**.
 
 ### Phase 5 (VALIDATED — complete, issues #26-#32)
 
