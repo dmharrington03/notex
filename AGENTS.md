@@ -324,8 +324,35 @@ narrative and real-data-validation findings.
   verbatim to `build_frontmatter()`, so the two can never disagree. No
   deviations from the issue's plan. `src/main.py` wiring
   `NamingConfig.lecture_prefix` through is still #37's job.
-- **#37-#38 (not yet started)** — see "Current Phase" above for the full
-  scope. Status lines will be added here as each issue completes.
+- **#37 (done)** — `src/main.py`: `run()` gained optional
+  `output_config`/`naming_config` params (loaded via
+  `load_output_config()`/`load_naming_config()` internally when `None`,
+  same pattern as `llm_config`), threaded through `_process_file()` into
+  both `_write_to_vault()` call sites (actionable NEW/CHANGED/RETRY path
+  and the UNCHANGED LLM-only-rerun path). Tags are resolved per call via
+  `resolve_tags(course_label, output_config)` — `course_label` is already
+  the raw course folder name (or the `_ungrouped` sentinel, which
+  naturally resolves to no tags) in both call paths, so no extra param
+  was needed for that lookup. Found and fixed a pre-existing gap while
+  implementing this: `src/vault.py`'s `write_lecture_note()` never
+  actually gained a `date_format` param — `build_frontmatter()` got one in
+  #35, but threading it through `write_lecture_note()` was missed by both
+  #35 and #36 and only surfaced once #37 tried to wire it from
+  `output_config.date_format`; added it here (default `DATE_FORMAT`,
+  forwarded verbatim to `build_frontmatter()`). All ~13 existing
+  `tests/test_main.py::run()` call sites updated to pass explicit
+  `output_config=_make_output_config()`/`naming_config=_make_naming_config()`
+  (mirroring the existing `llm_config` precedent, keeping tests hermetic/
+  independent of the real machine's `config.yaml`); one new test drives
+  `run()` through a real on-disk `config.yaml` (via `monkeypatch.chdir`) to
+  exercise the internal load-if-`None` fallback end-to-end, confirming
+  `output.course_tags`/`date_format`/`figures_dark_mode_flag` and
+  `naming.lecture_prefix` all reach the written vault note. Also fixed
+  #37's own stale GitHub issue-body wording (a leftover "base_tags
+  fallback" mention that predates the no-base_tags design), matching the
+  #33/#35 precedent of correcting stale issue text.
+- **#38 (not yet started)** — see "Current Phase" above for the full
+  scope.
 
 ### Phase 5 (VALIDATED — complete, issues #26-#32)
 

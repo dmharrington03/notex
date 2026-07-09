@@ -68,8 +68,9 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
+import yaml
 
-from src.config import ConfigError, LLMConfig, PathsConfig
+from src.config import ConfigError, LLMConfig, NamingConfig, OutputConfig, PathsConfig
 from src.llm import LLMResult
 from src.main import RunSummary, main, run
 from src.mathpix import MathpixClient
@@ -105,6 +106,30 @@ def _make_llm_config() -> LLMConfig:
     )
 
 
+def _make_output_config(**overrides) -> OutputConfig:
+    """Explicit OutputConfig for tests, mirroring _make_llm_config()'s
+    precedent of never relying on run()'s internal load_output_config()
+    fallback (which reads a real, gitignored config.yaml relative to cwd) --
+    keeps every test hermetic/deterministic. See
+    test_run_wires_real_output_and_naming_config_end_to_end for the one
+    test that deliberately exercises the real internal-load path instead."""
+    defaults = dict(
+        course_tags={},
+        date_format="%Y-%m-%d",
+        figures_dark_mode_flag=False,
+    )
+    defaults.update(overrides)
+    return OutputConfig(**defaults)
+
+
+def _make_naming_config(**overrides) -> NamingConfig:
+    """Explicit NamingConfig for tests -- same rationale as
+    _make_output_config()."""
+    defaults = dict(lecture_prefix="Lecture")
+    defaults.update(overrides)
+    return NamingConfig(**defaults)
+
+
 def _upsert_unchanged_entry(
     conn,
     pdf_path: Path,
@@ -131,6 +156,7 @@ def _install_fake_cleanup_pdf(
     input_tokens: int = 100,
     output_tokens: int = 50,
     cost_estimate: float = 0.001,
+    content: str = "cleaned markdown",
 ):
     """
     Monkeypatch src.main.cleanup_pdf with a fake that never touches
@@ -138,7 +164,10 @@ def _install_fake_cleanup_pdf(
     so tests can assert on what run() passed through.
 
     status="success" writes a real {lecture_stem}.llm.md into dest_dir
-    (mirroring cleanup_pdf()'s real success behavior) and returns a
+    (mirroring cleanup_pdf()'s real success behavior), containing `content`
+    (defaults to the plain "cleaned markdown" string used by most tests;
+    override with e.g. a ![](figures/...) reference to exercise vault
+    dark-mode alt-text rewriting -- issue #37), and returns a
     llm_status="success" LLMResult with the given input_tokens/
     output_tokens/cost_estimate; status="failed" mirrors the
     fallback-to-raw-output shape (llm_model/llm_prompt_version/
@@ -164,7 +193,7 @@ def _install_fake_cleanup_pdf(
             dest_dir_path = Path(dest_dir)
             dest_dir_path.mkdir(parents=True, exist_ok=True)
             output_path = dest_dir_path / f"{lecture_stem}.llm.md"
-            output_path.write_text("cleaned markdown", encoding="utf-8")
+            output_path.write_text(content, encoding="utf-8")
             return LLMResult(
                 llm_model=llm_config.model,
                 llm_prompt_version=llm_config.prompt_version,
@@ -241,7 +270,14 @@ def test_run_processes_new_file_and_records_success(client, tmp_path, monkeypatc
     _mock_happy_path()
     llm_calls = _install_fake_cleanup_pdf(monkeypatch, status="success")
 
-    summary = run(paths_config, conn, client=client, llm_config=_make_llm_config())
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
 
     assert summary == RunSummary(
         processed=1,
@@ -311,7 +347,14 @@ def test_run_skips_unchanged_and_current_file_entirely(client, tmp_path, monkeyp
     )
     llm_calls = _install_fake_cleanup_pdf(monkeypatch, status="success")
 
-    summary = run(paths_config, conn, client=client, llm_config=_make_llm_config())
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
 
     assert summary == RunSummary(processed=0, skipped=1, errors=0, ungrouped=0, llm_reprocessed=0)
     assert not submit_route.called
@@ -341,7 +384,14 @@ def test_run_unchanged_and_stale_triggers_llm_only_reprocessing(client, tmp_path
 
     llm_calls = _install_fake_cleanup_pdf(monkeypatch, status="success")
 
-    summary = run(paths_config, conn, client=client, llm_config=_make_llm_config())
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
 
     assert summary == RunSummary(
         processed=0,
@@ -396,7 +446,13 @@ def test_run_force_llm_reprocesses_up_to_date_entry(client, tmp_path, monkeypatc
     llm_calls = _install_fake_cleanup_pdf(monkeypatch, status="success")
 
     summary = run(
-        paths_config, conn, client=client, llm_config=_make_llm_config(), force_llm=True
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        force_llm=True,
     )
 
     assert summary == RunSummary(
@@ -440,7 +496,14 @@ def test_run_continues_after_one_file_fails(client, tmp_path, monkeypatch):
     )
     _install_fake_cleanup_pdf(monkeypatch, status="success")
 
-    summary = run(paths_config, conn, client=client, llm_config=_make_llm_config())
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
 
     assert summary == RunSummary(
         processed=1,
@@ -486,7 +549,14 @@ def test_run_unparseable_filename_records_vault_failure_only(client, tmp_path, m
     _mock_happy_path()
     _install_fake_cleanup_pdf(monkeypatch, status="success")
 
-    summary = run(paths_config, conn, client=client, llm_config=_make_llm_config())
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
 
     assert summary == RunSummary(
         processed=1,
@@ -522,7 +592,14 @@ def test_run_skips_ungrouped_pdfs_without_writing_state(client, tmp_path, monkey
     )
     llm_calls = _install_fake_cleanup_pdf(monkeypatch, status="success")
 
-    summary = run(paths_config, conn, client=client, llm_config=_make_llm_config())
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
 
     assert summary == RunSummary(processed=0, skipped=0, errors=0, ungrouped=1, llm_reprocessed=0)
     assert not submit_route.called
@@ -541,7 +618,14 @@ def test_run_second_pass_is_full_noop(client, tmp_path, monkeypatch):
     submit_route = _mock_happy_path()
     _install_fake_cleanup_pdf(monkeypatch, status="success")
 
-    first_summary = run(paths_config, conn, client=client, llm_config=_make_llm_config())
+    first_summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
     assert first_summary == RunSummary(
         processed=1,
         skipped=0,
@@ -559,7 +643,14 @@ def test_run_second_pass_is_full_noop(client, tmp_path, monkeypatch):
     assert vault_path.is_file()
     first_run_mtime = vault_path.stat().st_mtime_ns
 
-    second_summary = run(paths_config, conn, client=client, llm_config=_make_llm_config())
+    second_summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
 
     assert second_summary == RunSummary(
         processed=0, skipped=1, errors=0, ungrouped=0, llm_reprocessed=0
@@ -591,6 +682,8 @@ def test_run_target_source_path_restricts_to_one_file_in_course(client, tmp_path
         conn,
         client=client,
         llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
         target_source_path=target_pdf,
     )
 
@@ -634,6 +727,8 @@ def test_run_target_source_path_force_processes_ungrouped_file(client, tmp_path,
         conn,
         client=client,
         llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
         target_source_path=stray_pdf,
     )
 
@@ -697,6 +792,8 @@ def test_run_target_source_path_with_force_llm_reprocesses_only_that_file(
         conn,
         client=client,
         llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
         force_llm=True,
         target_source_path=target_pdf,
     )
@@ -716,6 +813,79 @@ def test_run_target_source_path_with_force_llm_reprocesses_only_that_file(
 
     sibling_entry_after = get_entry(conn, str(sibling_pdf.resolve()))
     assert sibling_entry_after == sibling_entry_before
+
+
+@respx.mock
+def test_run_wires_real_output_and_naming_config_end_to_end(client, tmp_path, monkeypatch):
+    """
+    Issue #37: when output_config/naming_config are omitted, run() loads
+    them internally via load_output_config()/load_naming_config() -- same
+    optional-param fallback pattern as llm_config. This drives that real
+    internal-load path (a real config.yaml on disk, not an injected
+    OutputConfig/NamingConfig object) end-to-end, confirming the written
+    vault note reflects output.course_tags/date_format/
+    figures_dark_mode_flag and naming.lecture_prefix rather than the old
+    hardcoded defaults.
+    """
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        "output:\n"
+        "  course_tags:\n"
+        "    class_1:\n"
+        "      - test-tag\n"
+        "  date_format: \"%d/%m/%Y\"\n"
+        "  figures_dark_mode_flag: true\n"
+        "naming:\n"
+        "  lecture_prefix: Lec\n",
+        encoding="utf-8",
+    )
+    # load_output_config()/load_naming_config() (called by run() with no
+    # config_path arg, since output_config/naming_config are omitted below)
+    # resolve config.yaml relative to cwd -- chdir so they pick up the file
+    # just written above.
+    monkeypatch.chdir(tmp_path)
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(
+        monkeypatch,
+        status="success",
+        content="Some notes.\n\n![](figures/lecture_01_fig_001.jpg)\n",
+    )
+
+    summary = run(paths_config, conn, client=client, llm_config=_make_llm_config())
+
+    assert summary.errors == 0
+    assert summary.processed == 1
+
+    entry = get_entry(conn, str(pdf_path.resolve()))
+    assert entry.vault_status == "success"
+    vault_path = Path(entry.vault_path)
+
+    # naming.lecture_prefix reflected in the output filename.
+    assert vault_path.name == "Lec 01.md"
+
+    written = vault_path.read_text(encoding="utf-8")
+    frontmatter_body = written.split("---\n")[1]
+    data = yaml.safe_load(frontmatter_body)
+
+    # naming.lecture_prefix also reflected in the frontmatter title.
+    assert data["title"] == "Lec 01"
+    # output.course_tags's "class_1" entry resolved via resolve_tags().
+    assert data["tags"] == ["test-tag"]
+    # output.date_format applied to the "date" field.
+    stat = pdf_path.stat()
+    expected_date = datetime.fromtimestamp(stat.st_mtime).strftime("%d/%m/%Y")
+    assert data["date"] == expected_date
+
+    # output.figures_dark_mode_flag=true appended "@darkmode" to the
+    # figure's rewritten alt text.
+    assert "![Figure 1 @darkmode](figures/lecture_01_fig_001.jpg)" in written
 
 
 def test_main_returns_error_code_on_config_error(monkeypatch, tmp_path, capsys):

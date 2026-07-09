@@ -1,17 +1,20 @@
 """
-Phase 2/3/5 orchestration entry point.
+Phase 2/3/5/6 orchestration entry point.
 
 Wires discovery (src/discovery.py, issues #8/#9) + the state log
 (src/state.py, issue #7) + Phase 1's process_pdf() (src/mathpix.py) + Phase
 3's cleanup_pdf() (src/llm.py, issues #15-#17) + Phase 5's
 write_lecture_note() (src/vault.py, issue #29) into a single runnable pass
-over paths.input_root. No CLI flags yet (--dry-run / --force / --course /
+over paths.input_root, with Phase 6's OutputConfig/NamingConfig (issue #37)
+threaded through into write_lecture_note()'s dark_mode/tags/date_format/
+lecture_prefix params. No CLI flags yet (--dry-run / --force / --course /
 --verbose, and the eventual --refresh-llm-prompt / --file flags, are Phase 7
 per docs/spec.md's roadmap).
 
 Two entry points:
     - run(paths_config, conn, client=None, llm_config=None,
-          force_llm=False, target_source_path=None) -> RunSummary
+          output_config=None, naming_config=None, force_llm=False,
+          target_source_path=None) -> RunSummary
         The core, directly testable orchestration logic. Takes an already-
         loaded PathsConfig and an already-open state.db connection so tests
         can supply a tmp_path input_root tree, a real temp state.db, and an
@@ -122,9 +125,13 @@ import httpx
 from src.config import (
     ConfigError,
     LLMConfig,
+    NamingConfig,
+    OutputConfig,
     PathsConfig,
     load_llm_config,
     load_mathpix_credentials,
+    load_naming_config,
+    load_output_config,
     load_paths_config,
 )
 from src.discovery import (
@@ -136,7 +143,7 @@ from src.discovery import (
 )
 from src.llm import LLMClient, cleanup_pdf, needs_llm_reprocessing
 from src.mathpix import MathpixClient, MathpixError, process_pdf
-from src.postprocess import PostprocessError
+from src.postprocess import PostprocessError, resolve_tags
 from src.state import get_entry, init_db, upsert_entry
 from src.vault import write_lecture_note
 
@@ -201,6 +208,10 @@ def _write_to_vault(
     processed_at: datetime,
     course_label: str,
     filename: str,
+    dark_mode: bool,
+    tags: tuple[str, ...],
+    date_format: str,
+    lecture_prefix: str,
 ) -> int:
     """
     Write this file's final vault Markdown note (src/vault.py's
@@ -227,6 +238,20 @@ def _write_to_vault(
         course_label: display-only label for progress print lines.
         filename: display-only source PDF filename for progress print
             lines.
+        dark_mode: forwarded to write_lecture_note()'s dark_mode param --
+            the caller (_process_file()) resolves this from
+            OutputConfig.figures_dark_mode_flag (issue #37).
+        tags: forwarded to write_lecture_note()'s tags param -- the caller
+            resolves this via src/postprocess.py's resolve_tags(course_label,
+            output_config) (issue #37); empty if this course has no
+            explicit output.course_tags entry.
+        date_format: forwarded to write_lecture_note()'s date_format param
+            -- the caller resolves this from OutputConfig.date_format
+            (issue #37).
+        lecture_prefix: forwarded to write_lecture_note()'s lecture_prefix
+            param (used for both the output filename and the frontmatter
+            title) -- the caller resolves this from
+            NamingConfig.lecture_prefix (issue #37).
 
     Returns:
         1 if the vault write failed (counts toward the caller's
@@ -250,6 +275,10 @@ def _write_to_vault(
             vault_course_dir,
             source_mtime,
             processed_at,
+            dark_mode=dark_mode,
+            tags=list(tags),
+            date_format=date_format,
+            lecture_prefix=lecture_prefix,
         )
     except (PostprocessError, OSError) as exc:
         print(f"[{course_label}] {filename}: vault write FAILED: {exc}")
@@ -276,6 +305,8 @@ def _process_file(
     mathpix_client: MathpixClient,
     llm_client: LLMClient,
     llm_config: LLMConfig,
+    output_config: OutputConfig,
+    naming_config: NamingConfig,
     conn: sqlite3.Connection,
     force_llm: bool,
     course_label: str,
@@ -299,16 +330,28 @@ def _process_file(
         mathpix_client: the run's shared MathpixClient.
         llm_client: the run's shared LLMClient.
         llm_config: the run's resolved LLMConfig.
+        output_config: the run's resolved OutputConfig (issue #37) --
+            figures_dark_mode_flag/date_format are forwarded to every
+            _write_to_vault() call verbatim; course_tags is resolved per
+            call via src/postprocess.py's resolve_tags(course_label,
+            output_config), since course_label is already the raw course
+            folder name (or the "_ungrouped" sentinel, which naturally
+            resolves to no tags -- no config ever has an entry for it).
+        naming_config: the run's resolved NamingConfig (issue #37) --
+            lecture_prefix is forwarded to every _write_to_vault() call
+            verbatim.
         conn: an open state.db connection.
         force_llm: whether to bypass needs_llm_reprocessing() for an
             UNCHANGED file eligible for LLM-only reprocessing.
         course_label: display-only label for progress print lines (a real
-            course name, or "_ungrouped").
+            course name, or "_ungrouped") -- doubles as resolve_tags()'s
+            course_name lookup key (issue #37).
 
     Returns:
         A _FileOutcome with the increments this file contributes to the
         run's overall RunSummary.
     """
+    tags = resolve_tags(course_label, output_config)
     filename = Path(result.source_path).name
 
     if result.classification in _ACTIONABLE_CLASSIFICATIONS:
@@ -376,6 +419,10 @@ def _process_file(
             llm_result.processed_at,
             course_label,
             filename,
+            output_config.figures_dark_mode_flag,
+            tags,
+            output_config.date_format,
+            naming_config.lecture_prefix,
         )
         return _FileOutcome(
             processed=1,
@@ -446,6 +493,10 @@ def _process_file(
         llm_result.processed_at,
         course_label,
         filename,
+        output_config.figures_dark_mode_flag,
+        tags,
+        output_config.date_format,
+        naming_config.lecture_prefix,
     )
     return _FileOutcome(
         llm_reprocessed=1,
@@ -461,6 +512,8 @@ def run(
     conn: sqlite3.Connection,
     client: MathpixClient | None = None,
     llm_config: LLMConfig | None = None,
+    output_config: OutputConfig | None = None,
+    naming_config: NamingConfig | None = None,
     force_llm: bool = False,
     target_source_path: str | Path | None = None,
 ) -> RunSummary:
@@ -481,6 +534,12 @@ def run(
             closed at the end of the run.
         llm_config: the LLMConfig to use for the LLM cleanup stage. When
             omitted, loaded via load_llm_config().
+        output_config: the OutputConfig (course_tags/date_format/
+            figures_dark_mode_flag) to use for vault-writing (issue #37).
+            When omitted, loaded via load_output_config().
+        naming_config: the NamingConfig (lecture_prefix) to use for
+            vault-writing (issue #37). When omitted, loaded via
+            load_naming_config().
         force_llm: bypass needs_llm_reprocessing() for UNCHANGED files,
             reprocessing every eligible file's LLM stage regardless of its
             stored status/version. Infrastructure for a future
@@ -505,6 +564,11 @@ def run(
     if llm_config is None:
         llm_config = load_llm_config()
     llm_client = LLMClient(model=llm_config.model)
+
+    if output_config is None:
+        output_config = load_output_config()
+    if naming_config is None:
+        naming_config = load_naming_config()
 
     processed = 0
     skipped = 0
@@ -541,6 +605,8 @@ def run(
                 client,
                 llm_client,
                 llm_config,
+                output_config,
+                naming_config,
                 conn,
                 force_llm,
                 course_label,
@@ -578,6 +644,8 @@ def run(
                         client,
                         llm_client,
                         llm_config,
+                        output_config,
+                        naming_config,
                         conn,
                         force_llm,
                         course,

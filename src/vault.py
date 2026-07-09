@@ -15,14 +15,18 @@ Assembles and writes the final per-lecture Markdown file into
 Implementation status:
     - write_lecture_note()   implemented (issue #29)
     - write_lecture_note()'s lecture_prefix param   implemented (issue #36)
+    - write_lecture_note()'s date_format param   implemented (issue #37;
+      build_frontmatter() itself gained this param in #35, but threading it
+      through write_lecture_note() was an oversight not caught until #37's
+      real config wiring surfaced the missing param)
 
-Deliberately no config.py reading here — dark_mode/tags/lecture_prefix are
-taken as plain params (same precedent as src/figures.py's
-rewrite_image_references()'s dark_mode param); real
-output.figures_dark_mode_flag/course_tags/naming.lecture_prefix config
-wiring is #37. Likewise, wiring this function into src/main.py's run()
-and state.db's vault_status/vault_path columns are separate issues
-(#30/#31), not this module's job.
+Deliberately no config.py reading here — dark_mode/tags/date_format/
+lecture_prefix are taken as plain params (same precedent as
+src/figures.py's rewrite_image_references()'s dark_mode param); real
+output.figures_dark_mode_flag/course_tags/date_format/naming.lecture_prefix
+config wiring is src/main.py's job (#37). Likewise, wiring this function
+into src/main.py's run() and state.db's vault_status/vault_path columns
+are separate issues (#30/#31), not this module's job.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ from pathlib import Path
 
 from src.figures import copy_figures_to_vault, rewrite_image_references
 from src.postprocess import (
+    DATE_FORMAT,
     DEFAULT_LECTURE_PREFIX,
     build_frontmatter,
     parse_lecture_filename,
@@ -68,6 +73,7 @@ def write_lecture_note(
     processed_at: datetime,
     dark_mode: bool = False,
     tags: list[str] | None = None,
+    date_format: str = DATE_FORMAT,
     lecture_prefix: str = DEFAULT_LECTURE_PREFIX,
 ) -> VaultWriteResult:
     """
@@ -106,6 +112,12 @@ def write_lecture_note(
             only gets tags via an explicit output.course_tags entry,
             resolved by postprocess.resolve_tags() and passed in here by
             the caller (src/main.py, Phase 6 config wiring).
+        date_format: forwarded verbatim to postprocess.build_frontmatter()'s
+            same-named param (used for both the "date" and "processed"
+            fields). Defaults to DATE_FORMAT ("%Y-%m-%d") only for callers
+            that don't pass this explicitly -- real production callers pass
+            output.date_format from config.yaml (see src/config.py's
+            load_output_config()), threaded through by src/main.py (#37).
         lecture_prefix: used for both the output filename ("{lecture_prefix}
             NN.md") and forwarded verbatim to postprocess.build_frontmatter()'s
             same-named param (the "title" field) -- the two are never
@@ -152,6 +164,7 @@ def write_lecture_note(
         source_mtime=source_mtime,
         processed_at=processed_at,
         tags=tags if tags is not None else (),
+        date_format=date_format,
         lecture_prefix=lecture_prefix,
     )
 
