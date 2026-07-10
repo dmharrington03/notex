@@ -65,6 +65,20 @@ Covered here (issue #40 — manual vault-edit conflict detection):
       vault_content_hash are left unchanged from the prior run, and
       RunSummary.vault_conflicts (not errors) reflects the skip -- the
       reprocessed content still lands under _cache/ as normal.
+
+Covered here (issue #41 — --course CLI scaffolding):
+    - run(): course restricts the run to one course subdirectory -- a
+      sibling course's files are never even classified/written to
+      state.db.
+    - run(): an unknown course name is a clean, all-zero-summary no-op
+      (a warning is printed, not an exception).
+    - run(): course and target_source_path together raise ValueError
+      (see src/cli.py's module docstring for why the CLI-level --file
+      rejection itself is deferred to issue #44).
+    - main(): a --course argv value is parsed by src/cli.py's
+      build_arg_parser() and forwarded into run() as its course= kwarg.
+      See tests/test_cli.py for build_arg_parser()'s own parsing-only
+      tests.
 """
 
 from __future__ import annotations
@@ -912,6 +926,121 @@ def test_run_target_source_path_with_force_llm_reprocesses_only_that_file(
 
 
 @respx.mock
+def test_run_course_restricts_to_one_course(client, tmp_path, monkeypatch):
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    class_1_dir = paths_config.input_root / "class_1"
+    class_1_dir.mkdir()
+    class_2_dir = paths_config.input_root / "class_2"
+    class_2_dir.mkdir()
+    target_pdf = _write_pdf(class_1_dir / "lecture_01.pdf")
+    other_course_pdf = _write_pdf(class_2_dir / "lecture_01.pdf")
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        course="class_1",
+    )
+
+    assert summary == RunSummary(
+        processed=1,
+        skipped=0,
+        errors=0,
+        ungrouped=0,
+        llm_reprocessed=0,
+        total_input_tokens=100,
+        total_output_tokens=50,
+        total_cost_estimate=0.001,
+        total_pages_processed=2,
+    )
+
+    target_entry = get_entry(conn, str(target_pdf.resolve()))
+    assert target_entry is not None
+    assert target_entry.mathpix_status == "success"
+
+    # class_2's file was never even classified -- discover_pdfs()'s full
+    # scan happened, but the outer loop skipped every course except
+    # class_1 entirely, so it has no state.db row at all.
+    assert get_entry(conn, str(other_course_pdf.resolve())) is None
+
+
+@respx.mock
+def test_run_unknown_course_is_a_clean_noop(client, tmp_path, monkeypatch, capsys):
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    submit_route = respx.post(f"{MATHPIX_BASE_URL}/v3/pdf").mock(
+        return_value=httpx.Response(200, json={"pdf_id": "abc123"})
+    )
+    llm_calls = _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        course="does_not_exist",
+    )
+
+    assert summary == RunSummary(processed=0, skipped=0, errors=0, ungrouped=0, llm_reprocessed=0)
+    assert not submit_route.called
+    assert llm_calls == []
+    assert get_entry(conn, str(pdf_path.resolve())) is None
+    assert "does_not_exist" in capsys.readouterr().out
+
+
+def test_run_course_and_target_source_path_are_mutually_exclusive(tmp_path):
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        run(
+            paths_config,
+            conn,
+            llm_config=_make_llm_config(),
+            output_config=_make_output_config(),
+            naming_config=_make_naming_config(),
+            course="class_1",
+            target_source_path=pdf_path,
+        )
+
+
+def test_main_parses_course_flag_and_forwards_it_to_run(monkeypatch, tmp_path):
+    import src.main as main_module
+
+    paths_config = _make_paths_config(tmp_path)
+    monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+
+    received_kwargs: dict = {}
+
+    def _fake_run(paths_config, conn, **kwargs):
+        received_kwargs.update(kwargs)
+        return RunSummary(processed=0, skipped=0, errors=0, ungrouped=0)
+
+    monkeypatch.setattr(main_module, "run", _fake_run)
+
+    exit_code = main(["--course", "class_1"])
+
+    assert exit_code == 0
+    assert received_kwargs["course"] == "class_1"
+
+
+@respx.mock
 def test_run_wires_real_output_and_naming_config_end_to_end(client, tmp_path, monkeypatch):
     """
     Issue #37: when output_config/naming_config are omitted, run() loads
@@ -1006,7 +1135,7 @@ def test_main_returns_zero_and_prints_summary_even_with_errors(monkeypatch, tmp_
     monkeypatch.setattr(
         main_module,
         "run",
-        lambda paths_config, conn, client=None: RunSummary(
+        lambda paths_config, conn, client=None, course=None: RunSummary(
             processed=1,
             skipped=2,
             errors=1,

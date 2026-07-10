@@ -7,14 +7,16 @@ Wires discovery (src/discovery.py, issues #8/#9) + the state log
 write_lecture_note() (src/vault.py, issue #29) into a single runnable pass
 over paths.input_root, with Phase 6's OutputConfig/NamingConfig (issue #37)
 threaded through into write_lecture_note()'s dark_mode/tags/date_format/
-lecture_prefix params. No CLI flags yet (--dry-run / --force / --course /
---verbose, and the eventual --refresh-llm-prompt / --file flags, are Phase 7
-per docs/spec.md's roadmap).
+lecture_prefix params. Phase 7 (issue #41) adds real argparse scaffolding
+(src/cli.py's build_arg_parser()) and the first flag, --course NAME; the
+remaining flags (--dry-run / --force / --verbose, and the eventual
+--refresh-llm-prompt / --file / --force-vault-overwrite / --no-llm) are
+later Phase 7 issues per docs/spec.md's roadmap.
 
 Two entry points:
     - run(paths_config, conn, client=None, llm_config=None,
           output_config=None, naming_config=None, force_llm=False,
-          target_source_path=None) -> RunSummary
+          target_source_path=None, course=None) -> RunSummary
         The core, directly testable orchestration logic. Takes an already-
         loaded PathsConfig and an already-open state.db connection so tests
         can supply a tmp_path input_root tree, a real temp state.db, and an
@@ -129,6 +131,7 @@ from pathlib import Path
 
 import httpx
 
+from src.cli import build_arg_parser
 from src.config import (
     ConfigError,
     LLMConfig,
@@ -559,6 +562,7 @@ def run(
     naming_config: NamingConfig | None = None,
     force_llm: bool = False,
     target_source_path: str | Path | None = None,
+    course: str | None = None,
 ) -> RunSummary:
     """
     Discover new/changed/failed-retry PDFs under paths_config.input_root (or,
@@ -593,6 +597,22 @@ def run(
             discover_pdfs() over all of input_root. Infrastructure for a
             future single-file rerun CLI flag (Phase 7) -- main() doesn't
             pass this yet.
+        course: when given, restrict this run to one course subdirectory of
+            input_root (an exact, case-sensitive match against
+            discover_pdfs()'s results_by_course key -- i.e. the raw course
+            folder name). The full directory is still recursively scanned
+            (discover_pdfs() has no way to scan a single course subdir
+            alone) -- every course except the requested one is simply
+            skipped from the outer loop, never classified/written to
+            state.db. An unknown course name is a clean no-op (a warning is
+            printed, RunSummary comes back all-zero) rather than raising.
+            Mutually exclusive with target_source_path -- passing both
+            raises ValueError (issue #41; the CLI-level --course/--file
+            rejection with exit code 1 is #44's job, once --file exists in
+            the parser).
+
+    Raises:
+        ValueError: if both course and target_source_path are given.
 
     Returns:
         A RunSummary with processed/skipped/errors/ungrouped/llm_reprocessed
@@ -601,6 +621,12 @@ def run(
         manually-edited-vault-note detections, tallied separately from
         errors since they're expected, handled behavior).
     """
+    if course is not None and target_source_path is not None:
+        raise ValueError(
+            "course and target_source_path are mutually exclusive -- restrict "
+            "the run to one course, or one exact file, not both"
+        )
+
     owns_client = client is None
     if client is None:
         credentials = load_mathpix_credentials()
@@ -669,8 +695,18 @@ def run(
         else:
             results_by_course = discover_pdfs(paths_config.input_root, conn)
 
-            for course, results in results_by_course.items():
-                if course == UNGROUPED_COURSE_KEY:
+            if course is not None:
+                if course not in results_by_course:
+                    print(
+                        f"WARNING: --course {course!r} not found under "
+                        f"{paths_config.input_root} -- nothing to process."
+                    )
+                    results_by_course = {}
+                else:
+                    results_by_course = {course: results_by_course[course]}
+
+            for course_name, results in results_by_course.items():
+                if course_name == UNGROUPED_COURSE_KEY:
                     for result in results:
                         print(
                             f"[ungrouped] {Path(result.source_path).name}: "
@@ -680,8 +716,8 @@ def run(
                         ungrouped += 1
                     continue
 
-                cache_dir = paths_config.cache_dir / course
-                vault_course_dir = paths_config.vault_root / course
+                cache_dir = paths_config.cache_dir / course_name
+                vault_course_dir = paths_config.vault_root / course_name
 
                 for result in results:
                     outcome = _process_file(
@@ -695,7 +731,7 @@ def run(
                         naming_config,
                         conn,
                         force_llm,
-                        course,
+                        course_name,
                     )
                     processed += outcome.processed
                     skipped += outcome.skipped
@@ -741,15 +777,19 @@ def _print_summary(summary: RunSummary) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     """
-    CLI entry point: load config.yaml's paths:, open/init state.db, run the
-    discover -> process -> record pipeline once, print a summary.
+    CLI entry point: parse argv (src/cli.py's build_arg_parser(), issue #41),
+    load config.yaml's paths:, open/init state.db, run the discover -> process
+    -> record pipeline once, print a summary.
 
-    No flags yet (--dry-run/--force/--course/--verbose, and the eventual
-    --refresh-llm-prompt/--file, are Phase 7) -- force_llm/target_source_path
-    stay at their defaults (False/None). Hits the real, paid Mathpix and LLM
-    APIs -- same caution as scripts/smoke_test_mathpix.py /
-    scripts/smoke_test_llm.py.
+    Only --course is wired up so far (issue #41) -- --dry-run/--force/
+    --verbose, and the eventual --refresh-llm-prompt/--file/
+    --force-vault-overwrite/--no-llm, are later Phase 7 issues.
+    force_llm/target_source_path stay at their defaults (False/None). Hits
+    the real, paid Mathpix and LLM APIs -- same caution as
+    scripts/smoke_test_mathpix.py / scripts/smoke_test_llm.py.
     """
+    args = build_arg_parser().parse_args(argv)
+
     try:
         paths_config = load_paths_config()
     except ConfigError as exc:
@@ -757,7 +797,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     conn = init_db(paths_config.state_db)
-    summary = run(paths_config, conn)
+    summary = run(paths_config, conn, course=args.course)
     _print_summary(summary)
     return 0
 

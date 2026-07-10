@@ -346,9 +346,25 @@ narrative and real-data-validation findings.
 
 ### Phase 7 (IN PROGRESS, issues #41-#51)
 
-- Issues filed, none started yet. See "Phase 7 Plan" under "Remaining
-  Work — Phases 4-7 Plan" above for the full issue-by-issue breakdown and
-  implementation order.
+- **#41 (done)** — `src/cli.py`: new module holding `build_arg_parser()`
+  (argparse scaffolding) + the first flag, `--course NAME`. Deviates from
+  the issue's literal "Add an `argparse.ArgumentParser` in `main()`"
+  wording — confirmed with the user to split it into its own module
+  instead, since the full Phase 7 scope adds seven more flags across
+  follow-up issues, several with their own cross-flag validation; this
+  mirrors the project's existing one-module-per-concern convention and
+  lets `tests/test_cli.py` test parsing in complete isolation. `src/main.py`'s
+  `main()` calls `build_arg_parser().parse_args(argv)` and forwards
+  `course=args.course` into `run()`. `run()` gained a `course: str | None`
+  param — restricts the (still fully recursive) `discover_pdfs()` scan's
+  outer loop to one course key; an unknown course name prints a warning
+  and returns an all-zero `RunSummary` rather than raising. `course` and
+  `target_source_path` together raise `ValueError` — the actual CLI-level
+  `--course`/`--file` rejection with exit code 1 is deferred to #44, since
+  `--file` doesn't exist in the parser yet.
+- Remaining issues (#42-#51) filed, not started yet. See "Phase 7 Plan"
+  under "Remaining Work — Phases 4-7 Plan" above for the full
+  issue-by-issue breakdown and implementation order.
 
 ### Phase 6 (VALIDATED — complete, issues #33-#38)
 
@@ -628,6 +644,7 @@ notex/                      ← repo root
 │   ├── figures.py          ← figure copy-to-vault + Markdown image-reference caption rewriter (copy_figures_to_vault, rewrite_image_references)
 │   ├── postprocess.py      ← filename parsing + YAML frontmatter builder (parse_lecture_filename, build_frontmatter); delimiter-balance warning scan (scan_delimiter_issues)
 │   ├── vault.py            ← assembles + writes final per-lecture vault .md (write_lecture_note)
+│   ├── cli.py              ← argparse scaffolding for main.py (build_arg_parser) — split into its own module per-issue #41, not built inline in main()
 │   └── reporting.py        ← [Phase 7, not yet implemented] Reporter interface (PlainReporter/RichReporter) for progress UI
 ├── scripts/
 │   ├── smoke_test_mathpix.py   ← manual, real-API Mathpix validation
@@ -641,6 +658,7 @@ notex/                      ← repo root
 │   ├── test_config.py
 │   ├── test_llm.py
 │   ├── test_main.py
+│   ├── test_cli.py
 │   └── test_figures.py
 ├── state.db                ← SQLite state log, gitignored, created at runtime
 └── _cache/                 ← gitignored, created at runtime
