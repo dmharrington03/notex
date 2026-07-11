@@ -20,8 +20,17 @@ run()/reporter= param only, with no CLI-facing flag yet. Issue #48 adds
 --verbose/-v: main() constructs a PlainReporter(verbose=args.verbose)
 directly and passes it as run()'s existing reporter= param, rather than
 threading a new verbose param through run()/_process_file() themselves --
---verbose only changes what PlainReporter chooses to print. A RichReporter
-is a later Phase 7 issue (#49) per docs/spec.md's roadmap.
+--verbose only changes what PlainReporter chooses to print. Issue #49 adds
+RichReporter (a rich.live.Live progress table) plus a new
+Reporter.on_discover() hook (called once by run(), right after discovery/
+force-reclassification completes, before any per-file processing) so a
+reporter can pre-populate a full picture of the run's scope up front with
+an accurate initial per-file state -- see src/reporting.py's module
+docstring for the full rationale. main() now selects between
+RichReporter/PlainReporter via _select_reporter() (stdout is an
+interactive TTY and rich is importable -> RichReporter; otherwise
+PlainReporter) and wraps the run() call in `with reporter:` so a
+RichReporter's Live display starts/stops cleanly.
 
 Two entry points:
     - run(paths_config, conn, client=None, llm_config=None,
@@ -1062,11 +1071,18 @@ def run(
             When omitted (the default), a fresh PlainReporter() is
             constructed internally -- reporter is never None past this
             point, so _process_file()/_write_to_vault() never need a null
-            check. The real CLI (main(), issue #48) always passes an
-            explicit PlainReporter(verbose=args.verbose) instead of
-            relying on this default. See src/reporting.py for
-            PlainReporter's exact-output-preserving design; a RichReporter
-            is a separate, not-yet-implemented follow-up issue (#49).
+            check. The real CLI (main(), issue #49) always passes an
+            explicit reporter built by _select_reporter(args.verbose)
+            instead of relying on this default. Issue #49 also adds a
+            single reporter.on_discover([(source_path, classification),
+            ...]) call, made once right after discover_pdfs()/
+            classify_pdf() and any force reclassification complete (in
+            both the per-course loop and the target_source_path branch),
+            before any per-file processing begins -- lets a reporter
+            (RichReporter) pre-populate its full view of the run's scope
+            up front. PlainReporter's on_discover is a no-op (zero output
+            change). See src/reporting.py for both implementations' exact
+            designs.
 
     Raises:
         ValueError: if both course and target_source_path are given.
@@ -1120,6 +1136,7 @@ def run(
             course = relative_parts[0] if len(relative_parts) > 1 else UNGROUPED_COURSE_KEY
 
             result = _apply_force(classify_pdf(resolved_target, conn), force)
+            reporter.on_discover([(result.source_path, result.classification.value)])
 
             if course == UNGROUPED_COURSE_KEY:
                 cache_dir = paths_config.cache_dir / _UNGROUPED_CACHE_SUBDIR
@@ -1169,44 +1186,62 @@ def run(
                 else:
                     results_by_course = {course: results_by_course[course]}
 
+            # Issue #49: apply force reclassification up front and flatten
+            # into a single ordered (course_name, result) list before any
+            # processing, so reporter.on_discover() can be called exactly
+            # once with every file's final, about-to-be-processed
+            # classification -- iteration order matches the original
+            # nested-loop order (dict insertion order, then each course's
+            # results list order), and _apply_force() is still only ever
+            # computed once per file.
+            flattened: list[tuple[str, ClassificationResult]] = []
             for course_name, results in results_by_course.items():
                 if course_name == UNGROUPED_COURSE_KEY:
                     for result in results:
-                        reporter.on_stage(result.source_path, "ungrouped_skip")
-                        ungrouped += 1
+                        flattened.append((course_name, result))
+                    continue
+                for result in results:
+                    flattened.append((course_name, _apply_force(result, force)))
+
+            reporter.on_discover(
+                [(result.source_path, result.classification.value) for _, result in flattened]
+            )
+
+            for course_name, result in flattened:
+                if course_name == UNGROUPED_COURSE_KEY:
+                    reporter.on_stage(result.source_path, "ungrouped_skip")
+                    ungrouped += 1
                     continue
 
                 cache_dir = paths_config.cache_dir / course_name
                 vault_course_dir = paths_config.vault_root / course_name
 
-                for result in results:
-                    result = _apply_force(result, force)
-                    outcome = _process_file(
-                        result,
-                        cache_dir,
-                        vault_course_dir,
-                        client,
-                        llm_client,
-                        llm_config,
-                        output_config,
-                        naming_config,
-                        conn,
-                        force_llm,
-                        dry_run,
-                        force_vault_overwrite,
-                        no_llm,
-                        course_name,
-                        reporter,
-                    )
-                    processed += outcome.processed
-                    skipped += outcome.skipped
-                    errors += outcome.errors
-                    llm_reprocessed += outcome.llm_reprocessed
-                    total_input_tokens += outcome.input_tokens
-                    total_output_tokens += outcome.output_tokens
-                    total_cost_estimate += outcome.cost_estimate
-                    total_pages_processed += outcome.pages
-                    vault_conflicts += outcome.vault_conflicts
+                outcome = _process_file(
+                    result,
+                    cache_dir,
+                    vault_course_dir,
+                    client,
+                    llm_client,
+                    llm_config,
+                    output_config,
+                    naming_config,
+                    conn,
+                    force_llm,
+                    dry_run,
+                    force_vault_overwrite,
+                    no_llm,
+                    course_name,
+                    reporter,
+                )
+                processed += outcome.processed
+                skipped += outcome.skipped
+                errors += outcome.errors
+                llm_reprocessed += outcome.llm_reprocessed
+                total_input_tokens += outcome.input_tokens
+                total_output_tokens += outcome.output_tokens
+                total_cost_estimate += outcome.cost_estimate
+                total_pages_processed += outcome.pages
+                vault_conflicts += outcome.vault_conflicts
     finally:
         if owns_client and client is not None:
             client.close()
@@ -1242,6 +1277,25 @@ def _print_summary(summary: RunSummary, dry_run: bool = False) -> None:
     print(f"  {'Est. cost:':<21}${summary.total_cost_estimate:.4f}")
 
 
+def _select_reporter(verbose: bool) -> Reporter:
+    """
+    Issue #49: choose RichReporter when stdout is an interactive TTY and
+    rich is importable, falling back to PlainReporter otherwise (piped/
+    redirected/CI output, or rich missing). Deliberately implemented here
+    in main(), not inside run() -- run()'s own reporter=None default stays
+    a plain, dumb PlainReporter() for direct/test callers (see run()'s
+    docstring); only the real CLI auto-selects.
+    """
+    if sys.stdout.isatty():
+        try:
+            from src.reporting import RichReporter
+
+            return RichReporter(verbose=verbose)
+        except ImportError:
+            pass
+    return PlainReporter(verbose=verbose)
+
+
 def main(argv: list[str] | None = None) -> int:
     """
     CLI entry point: parse argv (src/cli.py's build_arg_parser(), issue #41),
@@ -1259,10 +1313,13 @@ def main(argv: list[str] | None = None) -> int:
     --dry-run additionally skips Mathpix too).
 
     --verbose/-v does not add a new run()/_process_file() param -- main()
-    constructs a PlainReporter(verbose=args.verbose) directly and passes it
-    as run()'s existing reporter= param (issue #47), since --verbose only
-    ever changes what PlainReporter itself chooses to print, not any
-    pipeline logic.
+    builds a reporter via _select_reporter(args.verbose) (issue #49; a
+    RichReporter or PlainReporter, both constructed with
+    verbose=args.verbose) and passes it as run()'s existing reporter= param
+    (issue #47), since --verbose only ever changes what the reporter itself
+    chooses to print, not any pipeline logic. The run() call is wrapped in
+    `with reporter:` so a RichReporter's Live display starts/stops cleanly,
+    including if run() raises.
 
     --file is validated here, before run() is ever called: the path must
     exist, end in .pdf (case-insensitive), and resolve to somewhere under
@@ -1301,18 +1358,20 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     conn = init_db(paths_config.state_db)
-    summary = run(
-        paths_config,
-        conn,
-        course=args.course,
-        dry_run=args.dry_run,
-        force=args.force,
-        force_llm=args.rerun_llm,
-        target_source_path=target_source_path,
-        force_vault_overwrite=args.force_vault_overwrite,
-        no_llm=args.no_llm,
-        reporter=PlainReporter(verbose=args.verbose),
-    )
+    reporter = _select_reporter(args.verbose)
+    with reporter:
+        summary = run(
+            paths_config,
+            conn,
+            course=args.course,
+            dry_run=args.dry_run,
+            force=args.force,
+            force_llm=args.rerun_llm,
+            target_source_path=target_source_path,
+            force_vault_overwrite=args.force_vault_overwrite,
+            no_llm=args.no_llm,
+            reporter=reporter,
+        )
     _print_summary(summary, dry_run=args.dry_run)
     return 0
 

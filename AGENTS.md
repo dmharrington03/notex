@@ -672,9 +672,69 @@ narrative and real-data-validation findings.
 - **#48 (done)** — `--verbose`/`-v`, gating `PlainReporter.on_detail()`;
   new `on_copy`/`on_figure_copy` hooks added to `copy_figures_to_vault()`/
   `write_lecture_note()`. See the issue's GitHub comments for full detail.
-- Remaining issues (#49-#51) filed, not started yet. See "Phase 7 Plan"
-  under "Remaining Work — Phases 4-7 Plan" above for the full
-  issue-by-issue breakdown and implementation order.
+- **#49 (done)** — `src/reporting.py`: `RichReporter` (a `rich.live.Live` +
+  `rich.table.Table` progress display: `Course | File | Status` columns,
+  one row per discovered file) + TTY auto-detection. `rich` added to
+  `environment.yml` (conda-forge, unpinned). Two deviations beyond the
+  issue's literal text, both confirmed with the user before implementing:
+  (1) the `Reporter` protocol gained a new `on_discover(items: Sequence[
+  tuple[str, str]])` hook — called exactly once by `run()`, right after
+  discovery/force-reclassification completes and before any per-file
+  processing, with `(source_path, classification.value)` for every
+  discovered file (including ungrouped ones). This was necessary because
+  most already-up-to-date `UNCHANGED` files receive *zero* further
+  `on_stage`/`on_detail` calls all run (`_process_file()` silently returns
+  `skipped=1`) — without a classification-aware seed, those rows would sit
+  at a perpetual "waiting" with no way to know they're actually fine.
+  `RichReporter` seeds NEW/CHANGED/RETRY as "waiting", UNCHANGED as an
+  already-settled "up to date". `PlainReporter.on_discover` is a no-op (no
+  output change). Required a small `run()` restructuring: the per-course
+  loop now applies `_apply_force()` and flattens into one ordered
+  `(course_name, result)` list *before* calling `on_discover()` once, then
+  iterates that same list for real processing (avoids computing
+  `_apply_force()` twice per file); the `target_source_path` branch gained
+  one `on_discover()` call with its single classified result.
+  `tests/test_main.py`'s `_RecordingReporter` test double updated with a
+  matching `on_discover` (append-only, same pattern as its siblings).
+  (2) `Reporter`/`PlainReporter`/`RichReporter` all gained trivial
+  `__enter__`/`__exit__` — `main()` now wraps the `run()` call in `with
+  reporter:` instead of just passing it in, so `RichReporter`'s `Live`
+  display starts/stops cleanly (including on an exception mid-run).
+  Deliberately `main()`-only: `run()` itself never enters/exits a reporter
+  as a context manager, so any Reporter passed directly to
+  `run(reporter=...)` (including every existing test double) never needed
+  updating for this part. `on_done()` stays intentionally unwired — no new
+  call sites added to `src/main.py` this issue (confirmed with the user);
+  `on_discover`'s seeding plus the last `on_stage` call `RichReporter`
+  observes are sufficient for a sensible resting state per row.
+  `on_detail()` (verbose-only, matching `PlainReporter`'s existing gating)
+  renders as a dim trailing suffix appended to the Status cell rather than
+  a separate column — picked per the issue's explicit "whichever is
+  simpler" allowance. `src/reporting.py` guards its `rich` imports with a
+  module-level `try/except ImportError` (`_RICH_AVAILABLE` flag) so
+  `Reporter`/`PlainReporter` stay importable with zero hard dependency on
+  `rich` even if it's missing; `RichReporter.__init__` raises `ImportError`
+  itself (lazily, at construction, not at module-import time) when
+  `_RICH_AVAILABLE` is `False`. `src/main.py` gained a `_select_reporter
+  (verbose: bool) -> Reporter` helper (in `main.py`, not `run()`, per the
+  issue's explicit instruction) choosing `RichReporter` when
+  `sys.stdout.isatty()` and construction succeeds, else `PlainReporter`.
+  Per AGENTS.md's testing conventions, no test asserts on actual rendered
+  Rich output — `tests/test_reporting.py`'s `RichReporter` tests check its
+  internal `_rows` state dict (seeding, `on_stage`/`on_detail` transitions,
+  style heuristics, `__enter__`/`__exit__` starting/stopping the real
+  `Live` object) and protocol conformance only; `tests/test_main.py` adds
+  `on_discover`-wiring tests (both the multi-file and `--file` branches)
+  and `_select_reporter`/`main()`-level TTY-detection tests (monkeypatching
+  `sys.stdout.isatty`). Manually verified end-to-end in a real TTY (via
+  `script -q /dev/null python -m src.main --dry-run[, --verbose]` against
+  the real `notes_raw` tree) — table renders correctly with real course/
+  file data, both already-processed real lectures correctly show "up to
+  date", Live starts/stops cleanly, and the plain-text summary still
+  prints afterward.
+- **#50, #51** — filed, not started yet. See "Phase 7 Plan" under
+  "Remaining Work — Phases 4-7 Plan" above for the full issue-by-issue
+  breakdown and implementation order.
 
 ### Phase 6 (VALIDATED — complete, issues #33-#38)
 

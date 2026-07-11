@@ -2500,9 +2500,13 @@ class _RecordingReporter:
     """
 
     def __init__(self):
+        self.discovered: list[tuple[str, str]] = []
         self.stages: list[tuple[str, str]] = []
         self.details: list[tuple[str, str]] = []
         self.done: list[tuple[str, str]] = []
+
+    def on_discover(self, items):
+        self.discovered.extend(items)
 
     def on_stage(self, source_path, stage):
         self.stages.append((source_path, stage))
@@ -2512,6 +2516,90 @@ class _RecordingReporter:
 
     def on_done(self, source_path, status):
         self.done.append((source_path, status))
+
+
+@respx.mock
+def test_run_wires_on_discover_for_new_file(client, tmp_path, monkeypatch):
+    """
+    Issue #49 -- run() calls reporter.on_discover() exactly once, before any
+    per-file processing, with (source_path, classification) for every
+    discovered file.
+    """
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    reporter = _RecordingReporter()
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        reporter=reporter,
+    )
+
+    assert summary.processed == 1
+    source_path = str(pdf_path.resolve())
+    assert reporter.discovered == [(source_path, "new")]
+
+
+@respx.mock
+def test_run_on_discover_includes_ungrouped_files(client, tmp_path):
+    """
+    Ungrouped (root-level) PDFs are still part of on_discover()'s seed list
+    (they have a real classification, just never persisted to state.db) --
+    even though they're immediately reported as "ungrouped_skip" right
+    after.
+    """
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    stray_pdf = _write_pdf(paths_config.input_root / "stray.pdf")
+
+    reporter = _RecordingReporter()
+    run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        reporter=reporter,
+    )
+
+    assert reporter.discovered == [(str(stray_pdf.resolve()), "new")]
+
+
+@respx.mock
+def test_run_target_source_path_calls_on_discover_with_one_item(client, tmp_path, monkeypatch):
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    reporter = _RecordingReporter()
+    run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        target_source_path=pdf_path,
+        reporter=reporter,
+    )
+
+    assert reporter.discovered == [(str(pdf_path.resolve()), "new")]
 
 
 @respx.mock
@@ -2719,3 +2807,71 @@ def test_main_without_verbose_omits_detail_lines(tmp_path, monkeypatch, capsys):
     assert "mathpix pdf: poll" not in out
     assert "copied figure:" not in out
     assert "vault write confirmed:" not in out
+
+
+# --- Issue #49: _select_reporter() TTY auto-detection ---
+
+
+def test_select_reporter_returns_plain_when_stdout_is_not_a_tty(monkeypatch):
+    import sys
+
+    import src.main as main_module
+    from src.reporting import PlainReporter
+
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+
+    reporter = main_module._select_reporter(verbose=False)
+
+    assert isinstance(reporter, PlainReporter)
+
+
+def test_select_reporter_returns_rich_when_tty_and_rich_available(monkeypatch):
+    import sys
+
+    import src.main as main_module
+    from src.reporting import RichReporter
+
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    reporter = main_module._select_reporter(verbose=True)
+
+    assert isinstance(reporter, RichReporter)
+    assert reporter.verbose is True
+
+
+def test_select_reporter_falls_back_to_plain_when_rich_unavailable(monkeypatch):
+    import sys
+
+    import src.main as main_module
+    import src.reporting as reporting_module
+    from src.reporting import PlainReporter
+
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(reporting_module, "_RICH_AVAILABLE", False)
+
+    reporter = main_module._select_reporter(verbose=False)
+
+    assert isinstance(reporter, PlainReporter)
+
+
+@respx.mock
+def test_main_selects_plain_reporter_end_to_end_when_not_a_tty(tmp_path, monkeypatch, capsys):
+    """
+    main()'s TTY-detection selects PlainReporter (not RichReporter) when
+    stdout isn't a TTY, regardless of whether rich is installed --
+    confirmed end-to-end via main()'s real, non-Rich-table output text.
+    """
+    import sys
+
+    paths_config, conn, pdf_path = _setup_main_end_to_end(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    exit_code = main([])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "[class_1] lecture_01.pdf: processing (new)..." in out
+    assert "[class_1] lecture_01.pdf: done (LLM cleanup succeeded)" in out

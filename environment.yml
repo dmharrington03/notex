@@ -7,7 +7,9 @@
 # requests is included for manual Mathpix API key verification; the pipeline
 # itself is built on httpx (see src/mathpix.py). pyyaml parses config.yaml
 # (see src/config.py). litellm is the LLM API abstraction used by the Phase 3
-# cleanup stage (see src/llm.py, ANTHROPIC_API_KEY in .env).
+# cleanup stage (see src/llm.py, ANTHROPIC_API_KEY in .env). rich is used by
+# src/reporting.py's RichReporter (issue #49) for the interactive-TTY Live
+# progress table; PlainReporter has no dependency on it.
 
 name: notex
 channels:
@@ -22,3 +24,4 @@ dependencies:
   - pyyaml
   - conda-forge::respx
   - conda-forge::litellm
+  - conda-forge::rich
