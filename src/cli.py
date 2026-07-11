@@ -5,8 +5,8 @@ Holds the argparse scaffolding for src/main.py's main() -- split into its own
 module rather than built inline in main() (a deliberate deviation from issue
 #41's literal "Add an argparse.ArgumentParser in main()" wording, confirmed
 with the user) since the full Phase 7 scope adds seven more flags across
-follow-up issues (#44-#46, #48: --refresh-llm-prompt,
---file, --force-vault-overwrite, --no-llm, --verbose/-v), several with their
+follow-up issues (#44-#46, #48: --rerun-llm, --file,
+--force-vault-overwrite, --no-llm, --verbose/-v), several with their
 own cross-flag validation (e.g. --course/--file mutual exclusion). Keeping
 parser construction here mirrors the project's existing one-module-per-
 concern convention (src/config.py, src/discovery.py, etc.) and lets
@@ -27,9 +27,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     """
     Build the CLI's argument parser.
 
-    Currently --course NAME (issue #41), --dry-run (issue #42), and --force
-    (issue #43); later Phase 7 issues add --refresh-llm-prompt / --file /
-    --force-vault-overwrite / --no-llm / --verbose to this same parser.
+    Currently --course NAME (issue #41), --dry-run (issue #42), --force
+    (issue #43), and --rerun-llm / --file PATH (issue #44); later Phase 7
+    issues add --force-vault-overwrite / --no-llm / --verbose to this same
+    parser.
     """
     parser = argparse.ArgumentParser(
         prog="notex",
@@ -39,7 +40,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "organized Markdown into an Obsidian vault."
         ),
     )
-    parser.add_argument(
+    course_or_file = parser.add_mutually_exclusive_group()
+    course_or_file.add_argument(
         "--course",
         metavar="NAME",
         default=None,
@@ -48,7 +50,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "(exact, case-sensitive match against the course folder name). "
             "The full directory is still scanned; every other course is "
             "simply skipped. An unknown course name is a clean no-op (a "
-            "warning is printed, nothing is processed) rather than an error."
+            "warning is printed, nothing is processed) rather than an error. "
+            "Mutually exclusive with --file."
+        ),
+    )
+    course_or_file.add_argument(
+        "--file",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Restrict this run to exactly one PDF (an exact source path, "
+            "not a course) instead of scanning paths.input_root. The path "
+            "must exist, end in .pdf (case-insensitive), and live under "
+            "paths.input_root -- main() rejects anything else with exit "
+            "code 1 before any API calls happen. Combine with --rerun-llm "
+            "to reprocess just this one lecture's LLM stage after tweaking "
+            "the prompt. Mutually exclusive with --course."
         ),
     )
     parser.add_argument(
@@ -67,7 +84,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Reprocess every discovered file's Mathpix + LLM stages "
             "regardless of state.db's classification (useful for testing). "
-            "Distinct from the LLM-only --refresh-llm-prompt flag."
+            "Distinct from the LLM-only --rerun-llm flag."
+        ),
+    )
+    parser.add_argument(
+        "--rerun-llm",
+        action="store_true",
+        default=False,
+        help=(
+            "Reprocess the LLM cleanup stage for every eligible file, "
+            "regardless of its stored status/version -- useful after "
+            "tweaking the LLM prompt. For an already-up-to-date "
+            "(UNCHANGED) file this hits only the LLM API, reusing the "
+            "cached Mathpix output -- no Mathpix API call. For a "
+            "NEW/CHANGED/RETRY file there's no cached Mathpix output to "
+            "reuse yet, so both the Mathpix and LLM stages run regardless "
+            "of this flag. Commonly combined with --file to target one "
+            "lecture."
         ),
     )
     return parser

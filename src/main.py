@@ -9,9 +9,11 @@ over paths.input_root, with Phase 6's OutputConfig/NamingConfig (issue #37)
 threaded through into write_lecture_note()'s dark_mode/tags/date_format/
 lecture_prefix params. Phase 7 (issue #41) adds real argparse scaffolding
 (src/cli.py's build_arg_parser()) and the first flag, --course NAME; issue
-#42 adds --dry-run; issue #43 adds --force. The remaining flags (--verbose,
-and the eventual --refresh-llm-prompt / --file / --force-vault-overwrite /
---no-llm) are later Phase 7 issues per docs/spec.md's roadmap.
+#42 adds --dry-run; issue #43 adds --force; issue #44 adds --rerun-llm and
+--file PATH (thin CLI surfaces for the already-existing force_llm/
+target_source_path params below -- no new pipeline logic). The remaining
+flags (--verbose, and the eventual --force-vault-overwrite / --no-llm) are
+later Phase 7 issues per docs/spec.md's roadmap.
 
 Two entry points:
     - run(paths_config, conn, client=None, llm_config=None,
@@ -670,14 +672,13 @@ def run(
             load_naming_config().
         force_llm: bypass needs_llm_reprocessing() for UNCHANGED files,
             reprocessing every eligible file's LLM stage regardless of its
-            stored status/version. Infrastructure for a future
-            --refresh-llm-prompt CLI flag (Phase 7) -- main() hardcodes
-            False for now.
+            stored status/version. Wired to --rerun-llm (issue #44).
         target_source_path: when given, restrict the entire run to exactly
             this one PDF (resolved to an absolute path) instead of walking
-            discover_pdfs() over all of input_root. Infrastructure for a
-            future single-file rerun CLI flag (Phase 7) -- main() doesn't
-            pass this yet.
+            discover_pdfs() over all of input_root. Wired to --file (issue
+            #44); main() validates the path exists, ends in .pdf
+            (case-insensitive), and lives under paths.input_root before
+            ever calling run() with it.
         course: when given, restrict this run to one course subdirectory of
             input_root (an exact, case-sensitive match against
             discover_pdfs()'s results_by_course key -- i.e. the raw course
@@ -689,8 +690,9 @@ def run(
             printed, RunSummary comes back all-zero) rather than raising.
             Mutually exclusive with target_source_path -- passing both
             raises ValueError (issue #41; the CLI-level --course/--file
-            rejection with exit code 1 is #44's job, once --file exists in
-            the parser).
+            rejection is issue #44's build_arg_parser() mutually exclusive
+            group, which makes this ValueError unreachable from the real
+            CLI -- it remains as a direct-call-level guard for run()).
         dry_run: when True (issue #42, wired to --dry-run), report what
             would be processed without doing it -- no MathpixClient/
             LLMClient is constructed (when not injected), and
@@ -893,15 +895,23 @@ def main(argv: list[str] | None = None) -> int:
     load config.yaml's paths:, open/init state.db, run the discover -> process
     -> record pipeline once, print a summary.
 
-    --course (issue #41), --dry-run (issue #42), and --force (issue #43)
-    are wired up so far -- --verbose, and the eventual
-    --refresh-llm-prompt/--file/--force-vault-overwrite/--no-llm, are later
-    Phase 7 issues. force_llm/target_source_path stay at their defaults
-    (False/None) -- --force does not set force_llm=True itself, since
-    forcing full reprocessing already implies a fresh LLM pass regardless
-    (see run()'s docstring). Hits the real, paid Mathpix and LLM APIs --
-    same caution as scripts/smoke_test_mathpix.py / scripts/smoke_test_llm.py
-    (unless --dry-run is given, which makes no API calls at all).
+    --course (issue #41), --dry-run (issue #42), --force (issue #43), and
+    --rerun-llm / --file (issue #44) are wired up so far -- --verbose, and
+    the eventual --force-vault-overwrite/--no-llm, are later Phase 7
+    issues. --force does not set force_llm=True itself, since forcing full
+    reprocessing already implies a fresh LLM pass regardless (see run()'s
+    docstring). Hits the real, paid Mathpix and LLM APIs -- same caution as
+    scripts/smoke_test_mathpix.py / scripts/smoke_test_llm.py (unless
+    --dry-run is given, which makes no API calls at all).
+
+    --file is validated here, before run() is ever called: the path must
+    exist, end in .pdf (case-insensitive), and resolve to somewhere under
+    paths.input_root -- any violation prints a clear error to stderr and
+    returns exit code 1 without touching state.db or any API (rather than
+    letting an obscure exception surface from deep inside classify_pdf()).
+    --course/--file are already mutually exclusive at the argparse level
+    (src/cli.py's build_arg_parser()), so run()'s own course/
+    target_source_path ValueError guard is unreachable from this path.
     """
     args = build_arg_parser().parse_args(argv)
 
@@ -911,6 +921,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
+    target_source_path = args.file
+    if target_source_path is not None:
+        file_path = Path(target_source_path)
+        input_root = Path(paths_config.input_root).resolve()
+        if not file_path.is_file():
+            print(f"ERROR: --file {target_source_path!r} does not exist.", file=sys.stderr)
+            return 1
+        if file_path.suffix.lower() != ".pdf":
+            print(f"ERROR: --file {target_source_path!r} is not a .pdf file.", file=sys.stderr)
+            return 1
+        resolved_file = file_path.resolve()
+        if input_root not in resolved_file.parents:
+            print(
+                f"ERROR: --file {target_source_path!r} is not under "
+                f"paths.input_root ({input_root}).",
+                file=sys.stderr,
+            )
+            return 1
+
     conn = init_db(paths_config.state_db)
     summary = run(
         paths_config,
@@ -918,6 +947,8 @@ def main(argv: list[str] | None = None) -> int:
         course=args.course,
         dry_run=args.dry_run,
         force=args.force,
+        force_llm=args.rerun_llm,
+        target_source_path=target_source_path,
     )
     _print_summary(summary, dry_run=args.dry_run)
     return 0

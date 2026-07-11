@@ -1,14 +1,18 @@
 """
 Unit tests for src/cli.py (issue #41 — argparse scaffolding + --course NAME;
-issue #42 — --dry-run; issue #43 — --force).
+issue #42 — --dry-run; issue #43 — --force; issue #44 — --rerun-llm and
+--file PATH).
 
 Pure argparse-level tests: no PathsConfig/state.db/tmp_path fixtures needed,
 since build_arg_parser() has no dependency on the pipeline itself. See
 tests/test_main.py for run()/main()-level coverage of --course's/--dry-run's/
---force's actual behavior.
+--force's/--rerun-llm's/--file's actual behavior (including --file's
+exists/.pdf/under-input_root validation, which lives in main(), not here).
 """
 
 from __future__ import annotations
+
+import pytest
 
 from src.cli import build_arg_parser
 
@@ -47,3 +51,32 @@ def test_force_flag_sets_true():
     args = build_arg_parser().parse_args(["--force"])
 
     assert args.force is True
+
+
+def test_rerun_llm_defaults_to_false_when_omitted():
+    args = build_arg_parser().parse_args([])
+
+    assert args.rerun_llm is False
+
+
+def test_rerun_llm_flag_sets_true():
+    args = build_arg_parser().parse_args(["--rerun-llm"])
+
+    assert args.rerun_llm is True
+
+
+def test_file_defaults_to_none_when_omitted():
+    args = build_arg_parser().parse_args([])
+
+    assert args.file is None
+
+
+def test_file_parses_given_value():
+    args = build_arg_parser().parse_args(["--file", "/tmp/notes_raw/class_1/lecture_01.pdf"])
+
+    assert args.file == "/tmp/notes_raw/class_1/lecture_01.pdf"
+
+
+def test_course_and_file_are_mutually_exclusive():
+    with pytest.raises(SystemExit):
+        build_arg_parser().parse_args(["--course", "class_1", "--file", "lecture_01.pdf"])

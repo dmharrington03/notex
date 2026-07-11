@@ -1321,6 +1321,196 @@ def test_main_parses_force_flag_and_forwards_it_to_run(monkeypatch, tmp_path):
     assert received_kwargs["force"] is True
 
 
+def test_main_parses_rerun_llm_flag_and_forwards_it_to_run(monkeypatch, tmp_path):
+    import src.main as main_module
+
+    paths_config = _make_paths_config(tmp_path)
+    monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+
+    received_kwargs: dict = {}
+
+    def _fake_run(paths_config, conn, **kwargs):
+        received_kwargs.update(kwargs)
+        return RunSummary(processed=0, skipped=0, errors=0, ungrouped=0)
+
+    monkeypatch.setattr(main_module, "run", _fake_run)
+
+    exit_code = main(["--rerun-llm"])
+
+    assert exit_code == 0
+    assert received_kwargs["force_llm"] is True
+
+
+def test_main_parses_file_flag_and_forwards_it_to_run(monkeypatch, tmp_path):
+    import src.main as main_module
+
+    paths_config = _make_paths_config(tmp_path)
+    monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    received_kwargs: dict = {}
+
+    def _fake_run(paths_config, conn, **kwargs):
+        received_kwargs.update(kwargs)
+        return RunSummary(processed=0, skipped=0, errors=0, ungrouped=0)
+
+    monkeypatch.setattr(main_module, "run", _fake_run)
+
+    exit_code = main(["--file", str(pdf_path)])
+
+    assert exit_code == 0
+    assert received_kwargs["target_source_path"] == str(pdf_path)
+
+
+def test_main_rejects_nonexistent_file_with_exit_code_1(monkeypatch, tmp_path, capsys):
+    import src.main as main_module
+
+    paths_config = _make_paths_config(tmp_path)
+    monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+
+    def _raise_if_called(*args, **kwargs):
+        raise AssertionError("run() should not be called for an invalid --file path")
+
+    monkeypatch.setattr(main_module, "run", _raise_if_called)
+
+    missing_pdf = paths_config.input_root / "class_1" / "lecture_01.pdf"
+    exit_code = main(["--file", str(missing_pdf)])
+
+    assert exit_code == 1
+    assert "does not exist" in capsys.readouterr().err
+
+
+def test_main_rejects_non_pdf_file_with_exit_code_1(monkeypatch, tmp_path, capsys):
+    import src.main as main_module
+
+    paths_config = _make_paths_config(tmp_path)
+    monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+
+    def _raise_if_called(*args, **kwargs):
+        raise AssertionError("run() should not be called for a non-.pdf --file path")
+
+    monkeypatch.setattr(main_module, "run", _raise_if_called)
+
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    not_a_pdf = course_dir / "notes.txt"
+    not_a_pdf.write_text("not a pdf", encoding="utf-8")
+
+    exit_code = main(["--file", str(not_a_pdf)])
+
+    assert exit_code == 1
+    assert "not a .pdf file" in capsys.readouterr().err
+
+
+def test_main_accepts_uppercase_pdf_extension(monkeypatch, tmp_path):
+    import src.main as main_module
+
+    paths_config = _make_paths_config(tmp_path)
+    monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.PDF")
+
+    received_kwargs: dict = {}
+
+    def _fake_run(paths_config, conn, **kwargs):
+        received_kwargs.update(kwargs)
+        return RunSummary(processed=0, skipped=0, errors=0, ungrouped=0)
+
+    monkeypatch.setattr(main_module, "run", _fake_run)
+
+    exit_code = main(["--file", str(pdf_path)])
+
+    assert exit_code == 0
+    assert received_kwargs["target_source_path"] == str(pdf_path)
+
+
+def test_main_rejects_file_outside_input_root_with_exit_code_1(monkeypatch, tmp_path, capsys):
+    import src.main as main_module
+
+    paths_config = _make_paths_config(tmp_path)
+    monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+
+    def _raise_if_called(*args, **kwargs):
+        raise AssertionError(
+            "run() should not be called for a --file path outside input_root"
+        )
+
+    monkeypatch.setattr(main_module, "run", _raise_if_called)
+
+    outside_dir = tmp_path / "elsewhere"
+    outside_dir.mkdir()
+    outside_pdf = _write_pdf(outside_dir / "lecture_01.pdf")
+
+    exit_code = main(["--file", str(outside_pdf)])
+
+    assert exit_code == 1
+    assert "not under paths.input_root" in capsys.readouterr().err
+
+
+@respx.mock
+def test_main_file_and_rerun_llm_combined_reprocesses_only_that_files_llm_stage(
+    tmp_path, monkeypatch
+):
+    """
+    Confirms the documented "reprocess just this one lecture's LLM stage
+    after tweaking the prompt" workflow (issue #44) end-to-end through
+    main(argv), not just run() directly: --rerun-llm on an UNCHANGED
+    --file target hits only the LLM API (no Mathpix call), leaving a
+    sibling file in the same course completely untouched. No client=
+    injection point exists at the main() level, so a fake MathpixClient
+    is built internally from monkeypatched credentials -- respx.mock
+    intercepts the real httpx call regardless of which MathpixClient
+    instance makes it (it's never expected to fire here anyway, since
+    this is the UNCHANGED/LLM-only path).
+    """
+    import src.main as main_module
+    from src.config import MathpixCredentials
+
+    paths_config = _make_paths_config(tmp_path)
+    monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+    monkeypatch.setattr(
+        main_module,
+        "load_mathpix_credentials",
+        lambda: MathpixCredentials(app_id="test_app_id", app_key="test_app_key"),
+    )
+    monkeypatch.setattr(main_module, "load_llm_config", _make_llm_config)
+    monkeypatch.setattr(main_module, "load_output_config", _make_output_config)
+    monkeypatch.setattr(main_module, "load_naming_config", _make_naming_config)
+
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    target_pdf = _write_pdf(course_dir / "lecture_01.pdf")
+    sibling_pdf = _write_pdf(course_dir / "lecture_02.pdf")
+
+    _upsert_unchanged_entry(conn, target_pdf, mathpix_status="success", llm_status="success")
+    _upsert_unchanged_entry(conn, sibling_pdf, mathpix_status="success", llm_status="success")
+    sibling_entry_before = get_entry(conn, str(sibling_pdf.resolve()))
+
+    cache_dir = paths_config.cache_dir / "class_1"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "lecture_01.mathpix.md").write_text("raw markdown", encoding="utf-8")
+
+    submit_route = respx.post(f"{MATHPIX_BASE_URL}/v3/pdf").mock(
+        return_value=httpx.Response(200, json={"pdf_id": "abc123"})
+    )
+    llm_calls = _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    exit_code = main(["--file", str(target_pdf), "--rerun-llm"])
+
+    assert exit_code == 0
+    assert not submit_route.called
+    assert len(llm_calls) == 1
+
+    sibling_entry_after = get_entry(conn, str(sibling_pdf.resolve()))
+    assert sibling_entry_after == sibling_entry_before
+
+
 @respx.mock
 def test_run_wires_real_output_and_naming_config_end_to_end(client, tmp_path, monkeypatch):
     """
@@ -1416,7 +1606,7 @@ def test_main_returns_zero_and_prints_summary_even_with_errors(monkeypatch, tmp_
     monkeypatch.setattr(
         main_module,
         "run",
-        lambda paths_config, conn, client=None, course=None, dry_run=False, force=False: RunSummary(
+        lambda paths_config, conn, client=None, course=None, dry_run=False, force=False, force_llm=False, target_source_path=None: RunSummary(
             processed=1,
             skipped=2,
             errors=1,

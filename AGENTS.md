@@ -414,7 +414,40 @@ narrative and real-data-validation findings.
   force alone is sufficient; `force=True` on a NEW file produces an
   identical `RunSummary` to a plain run (no regression); `--force`
   CLI-parsing and `main()`-wiring tests mirroring `--dry-run`'s precedent.
-- Remaining issues (#44-#51) filed, not started yet. See "Phase 7 Plan"
+- **#44 (done)** — `src/cli.py`/`src/main.py` gained `--rerun-llm` +
+  `--file PATH`, both thin CLI surfaces for `run()`'s already-existing
+  `force_llm`/`target_source_path` params — no new pipeline logic, per the
+  issue's own scope. Deviates from the issue's literal wording: the flag
+  is named `--rerun-llm`, not `--refresh-llm-prompt` (explicit user
+  direction before implementation). `--course`/`--file` are mutually
+  exclusive via a real `argparse.add_mutually_exclusive_group()` in
+  `build_arg_parser()` — `run()`'s own `course`/`target_source_path`
+  `ValueError` guard (issue #41) is now unreachable from the real CLI and
+  remains only as a direct-call-level guard. `main()` validates `--file`
+  itself, before ever calling `run()`: the path must exist, end in `.pdf`
+  (case-insensitive — confirmed with the user), and resolve to somewhere
+  under `paths.input_root` (also confirmed with the user — an explicit
+  scope addition beyond the issue's literal "validate the path exists and
+  is a `.pdf`" wording, since `paths_config` is already loaded by that
+  point in `main()`); any violation prints a clear error to stderr and
+  returns exit code 1 without touching `state.db`/`init_db()`/any API.
+  Confirmed with the user and validated by test: `--rerun-llm` combined
+  with `--file` pointing at an UNCHANGED file hits only the LLM API (no
+  Mathpix call, reusing the cached `.mathpix.md`); pointed at a
+  NEW/CHANGED/RETRY file it runs both stages regardless of the flag,
+  since there's no cached Mathpix output yet to reuse — this was already
+  true of the pre-existing `force_llm`/actionable-branch behavior itself
+  (issue #18), so no code changes were needed to get it, only the CLI
+  wiring. Tests added: `tests/test_cli.py` parsing/defaults for both flags
+  plus the `--course`/`--file` mutual-exclusion `SystemExit`;
+  `tests/test_main.py` `main()`-level tests for both flags forwarding into
+  `run()`'s kwargs, the nonexistent-path/non-`.pdf`/outside-`input_root`
+  rejection cases (each asserting `run()` is never called), a
+  case-insensitive `.PDF` acceptance test, and a combined
+  `--file X --rerun-llm` end-to-end workflow test through `main(argv)`
+  itself (not just `run()` directly) confirming the LLM-only-hit behavior
+  and that a sibling file's state.db row is untouched.
+- Remaining issues (#45-#51) filed, not started yet. See "Phase 7 Plan"
   under "Remaining Work — Phases 4-7 Plan" above for the full
   issue-by-issue breakdown and implementation order.
 
