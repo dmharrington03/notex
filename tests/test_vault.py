@@ -106,6 +106,71 @@ def test_with_figures_copies_and_rewrites_references(tmp_path):
     assert "![Figure 1](figures/lecture_02_fig_001.jpg)" in written
 
 
+def test_on_figure_copy_forwarded_to_copy_figures_to_vault(tmp_path):
+    """Issue #48: on_figure_copy is forwarded verbatim to
+    figures.copy_figures_to_vault()'s on_copy param, firing once per
+    copied figure file."""
+    source_pdf = tmp_path / "notes_raw" / "class_1" / "lecture_02.pdf"
+    source_pdf.parent.mkdir(parents=True)
+    source_pdf.write_bytes(b"fake-pdf")
+    content_path = _make_content_file(
+        tmp_path, "Notes.\n\n![](figures/lecture_02_fig_001.jpg)\n"
+    )
+    cache_figures_dir = tmp_path / "_cache" / "class_1" / "figures"
+    cache_figures_dir.mkdir(parents=True)
+    (cache_figures_dir / "lecture_02_fig_001.jpg").write_bytes(b"fake-jpeg")
+    vault_course_dir = tmp_path / "vault" / "class_1"
+
+    copied_paths = []
+    result = write_lecture_note(
+        source_pdf_path=source_pdf,
+        content_source_path=content_path,
+        course_cache_figures_dir=cache_figures_dir,
+        vault_course_dir=vault_course_dir,
+        source_mtime=datetime(2024, 1, 15).timestamp(),
+        processed_at=datetime(2024, 1, 16, tzinfo=timezone.utc),
+        on_figure_copy=copied_paths.append,
+    )
+
+    assert copied_paths == result.figures_copied
+    assert len(copied_paths) == 1
+
+
+def test_on_figure_copy_not_called_when_conflict_skips_write(tmp_path):
+    """Issue #48: on_figure_copy must never fire when the write is skipped
+    due to a detected conflict (issue #40) -- figures aren't touched at
+    all in that case."""
+    source_pdf = tmp_path / "notes_raw" / "class_1" / "lecture_02.pdf"
+    source_pdf.parent.mkdir(parents=True)
+    source_pdf.write_bytes(b"fake-pdf")
+    content_path = _make_content_file(tmp_path, "New pipeline content.\n")
+    cache_figures_dir = tmp_path / "_cache" / "class_1" / "figures"
+    cache_figures_dir.mkdir(parents=True)
+    (cache_figures_dir / "lecture_02_fig_001.jpg").write_bytes(b"fake-jpeg")
+    vault_course_dir = tmp_path / "vault" / "class_1"
+    vault_course_dir.mkdir(parents=True)
+
+    manual_content = "Manually edited notes -- do not clobber!\n"
+    output_path = vault_course_dir / "Lecture 02.md"
+    output_path.write_text(manual_content, encoding="utf-8")
+    stale_hash = hashlib.sha256(b"original pipeline content").hexdigest()
+
+    copied_paths = []
+    result = write_lecture_note(
+        source_pdf_path=source_pdf,
+        content_source_path=content_path,
+        course_cache_figures_dir=cache_figures_dir,
+        vault_course_dir=vault_course_dir,
+        source_mtime=datetime(2024, 1, 15).timestamp(),
+        processed_at=datetime(2024, 1, 16, tzinfo=timezone.utc),
+        previous_content_hash=stale_hash,
+        on_figure_copy=copied_paths.append,
+    )
+
+    assert result.written is False
+    assert copied_paths == []
+
+
 def test_dark_mode_marker_propagated(tmp_path):
     source_pdf = tmp_path / "notes_raw" / "class_1" / "lecture_02.pdf"
     source_pdf.parent.mkdir(parents=True)

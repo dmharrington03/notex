@@ -13,7 +13,8 @@ marker).
                                    ![](figures/...) reference's alt-text slot
 
 Implementation status:
-    - copy_figures_to_vault()      implemented (issue #23)
+    - copy_figures_to_vault()      implemented (issue #23; gained an
+                                    on_copy observability callback in #48)
     - rewrite_image_references()   implemented (issue #24)
 
 Deliberately no config.py reading / vault_root lookup here — both functions
@@ -38,10 +39,13 @@ import re
 import shutil
 from itertools import count
 from pathlib import Path
+from typing import Callable
 
 
 def copy_figures_to_vault(
-    cache_figures_dir: str | Path, vault_figures_dir: str | Path
+    cache_figures_dir: str | Path,
+    vault_figures_dir: str | Path,
+    on_copy: Callable[[Path], None] | None = None,
 ) -> list[Path]:
     """
     Copy every figure file from a course's cached figures/ dir into the
@@ -76,6 +80,15 @@ def copy_figures_to_vault(
     Returns a sorted list of the destination Paths actually written (not
     a bare count), so callers such as issue #24's reference rewriter or
     Phase 5's vault.py have the real filenames to work with.
+
+    on_copy (issue #48): optional observability hook, called once per
+    copied file with its destination Path, immediately after that file's
+    shutil.copy2() call. Purely for a Reporter's on_detail() (verbose-only,
+    src/main.py's _write_to_vault()) to surface per-figure copy actions --
+    never affects control flow, and never called at all for the
+    zero-figure no-op case. Not called in copied-Path sort order -- fires
+    in cache_figures_dir.iterdir()'s (arbitrary) order, before the final
+    sort; the returned list is still sorted regardless.
     """
     cache_figures_dir = Path(cache_figures_dir)
     vault_figures_dir = Path(vault_figures_dir)
@@ -94,6 +107,8 @@ def copy_figures_to_vault(
         dest_path = vault_figures_dir / src_path.name
         shutil.copy2(src_path, dest_path)
         copied.append(dest_path)
+        if on_copy is not None:
+            on_copy(dest_path)
 
     return sorted(copied)
 

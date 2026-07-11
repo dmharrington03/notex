@@ -22,6 +22,7 @@ Implementation status:
     - write_lecture_note()'s previous_content_hash param / manual-edit
       conflict detection   implemented (issue #40)
     - write_lecture_note()'s force_overwrite param   implemented (issue #45)
+    - write_lecture_note()'s on_figure_copy param   implemented (issue #48)
 
 Deliberately no config.py reading here — dark_mode/tags/date_format/
 lecture_prefix are taken as plain params (same precedent as
@@ -38,6 +39,7 @@ import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from src.figures import copy_figures_to_vault, rewrite_image_references
 from src.postprocess import (
@@ -99,6 +101,7 @@ def write_lecture_note(
     lecture_prefix: str = DEFAULT_LECTURE_PREFIX,
     previous_content_hash: str | None = None,
     force_overwrite: bool = False,
+    on_figure_copy: Callable[[Path], None] | None = None,
 ) -> VaultWriteResult:
     """
     Assemble and write a single lecture's final vault Markdown file.
@@ -173,6 +176,12 @@ def write_lecture_note(
             the pipeline's version should overwrite. Defaults to False
             (issue #40's conflict-preserving behavior is unaffected unless
             a caller explicitly opts in).
+        on_figure_copy: optional observability hook (issue #48), forwarded
+            verbatim to figures.copy_figures_to_vault()'s own same-named
+            on_copy param -- called once per copied figure file with its
+            destination Path. Never called at all when the write is
+            skipped due to a detected conflict (figures aren't touched in
+            that case either).
 
     Returns:
         A VaultWriteResult recording the target output_path, the
@@ -215,7 +224,7 @@ def write_lecture_note(
             )
 
     figures_copied = copy_figures_to_vault(
-        course_cache_figures_dir, vault_course_dir / "figures"
+        course_cache_figures_dir, vault_course_dir / "figures", on_copy=on_figure_copy
     )
 
     raw_text = content_source_path.read_text(encoding="utf-8")

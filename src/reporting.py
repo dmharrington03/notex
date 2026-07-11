@@ -24,12 +24,21 @@ Reporter has three hook methods:
           be enumerated (an exception's str(), a delimiter-balance warning,
           etc.) -- PlainReporter recognizes these by their absence from
           _STAGE_TEXT and prints them verbatim.
-    - on_detail(source_path, message): finer-grained detail lines, only
-      ever populated once --verbose (issue #48) wires real callers -- this
-      issue only wires the plumbing (src/mathpix.py's existing on_status
-      hook, and a new equivalent added to src/llm.py's cleanup_pdf()) to
-      call it, with messages that never print anything today. PlainReporter
-      is a no-op here by design, so today's output is unchanged.
+    - on_detail(source_path, message): finer-grained detail lines. Issue
+      #47 (this issue's original scope) only wired the plumbing
+      (src/mathpix.py's existing on_status hook, and a new equivalent
+      added to src/llm.py's cleanup_pdf()) to call it, with messages that
+      never printed anything -- PlainReporter was a no-op here by design,
+      so its default output was unchanged. Issue #48 adds a
+      `verbose: bool = False` constructor param to PlainReporter: when
+      True, on_detail() actually prints (see the module docstring's
+      "on_detail()" note further below for the exact format); when False
+      (the default), it stays a no-op, so non-verbose output is
+      completely unaffected. Issue #48 also wires two more real callers:
+      src/figures.py's copy_figures_to_vault() (a new on_copy callback
+      param, since it previously had none) and a new post-write
+      confirmation call in src/main.py's _write_to_vault(), sourced from
+      write_lecture_note()'s existing VaultWriteResult.
     - on_done(source_path, status): terminal per-file outcome signal, new
       plumbing with no current visible-output requirement (reserved for a
       future RichReporter to know when to finalize a table row).
@@ -50,6 +59,22 @@ case (a stray root-level PDF processed via `--file` directly, using the
 label now shows the real parent directory name instead of the synthetic
 "_ungrouped" placeholder used pre-refactor -- a deliberate, approved, purely
 cosmetic deviation for that one rare, untested path.
+
+on_detail() (issue #48, when verbose=True) uses the exact same derived
+"[{course}] {filename}" label as on_stage, but prefixed with a 4-space
+indent to visually distinguish a detail line as a sub-line of whichever
+on_stage transition it belongs under, e.g.:
+
+    [class_1] lecture_01.pdf: processing (new)...
+        [class_1] lecture_01.pdf: mathpix pdf: poll 3/40 status=loaded
+    [class_1] lecture_01.pdf: done (LLM cleanup succeeded)
+
+message is always the already-fully-composed free-form text passed in --
+there is no canonical-token vocabulary for detail lines (unlike on_stage),
+since every current on_detail() caller already builds a complete,
+human-readable message itself (src/mathpix.py's on_status, src/llm.py's
+cleanup_pdf() on_status, src/figures.py's on_copy, and _write_to_vault()'s
+own post-write confirmation summary).
 """
 
 from __future__ import annotations
@@ -105,8 +130,12 @@ _UNGROUPED_STAGE_TEXT = (
 class PlainReporter:
     """
     Default Reporter implementation: reproduces today's exact print()-based
-    output. See module docstring for the full design rationale.
+    output (with --verbose, issue #48, adding new detail lines). See module
+    docstring for the full design rationale.
     """
+
+    def __init__(self, verbose: bool = False) -> None:
+        self.verbose = verbose
 
     def on_stage(self, source_path: str, stage: str) -> None:
         if stage in _UNGROUPED_STAGE_TOKENS:
@@ -119,10 +148,14 @@ class PlainReporter:
         print(f"[{label}] {filename}: {text}")
 
     def on_detail(self, source_path: str, message: str) -> None:
-        # Verbose-only (issue #48 wires real callers) -- no-op today so
-        # PlainReporter's default output is unchanged from before this
-        # refactor.
-        pass
+        # Issue #48: only prints when verbose=True -- the default (False)
+        # keeps this a no-op, so non-verbose output is completely
+        # unchanged from before --verbose existed.
+        if not self.verbose:
+            return
+        label = Path(source_path).parent.name
+        filename = Path(source_path).name
+        print(f"    [{label}] {filename}: {message}")
 
     def on_done(self, source_path: str, status: str) -> None:
         # New plumbing, reserved for a future RichReporter (issue #49) --

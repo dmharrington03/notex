@@ -12,6 +12,11 @@ concern convention (src/config.py, src/discovery.py, etc.) and lets
 tests/test_cli.py exercise parsing/validation in complete isolation, with no
 PathsConfig/state.db/tmp_path fixtures needed at all.
 
+--verbose/-v (issue #48) does not add any new pipeline logic to run()/
+_process_file() -- main() constructs a PlainReporter(verbose=args.verbose)
+directly and passes it as run()'s existing reporter= param (issue #47),
+rather than threading a new verbose param through run() itself.
+
 Every later Phase 7 flag issue extends build_arg_parser() here, not
 src/main.py; src/main.py's main() only calls it and forwards the parsed
 values into run().
@@ -28,8 +33,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     Currently --course NAME (issue #41), --dry-run (issue #42), --force
     (issue #43), --rerun-llm / --file PATH (issue #44),
-    --force-vault-overwrite (issue #45), and --no-llm (issue #46); a later
-    Phase 7 issue adds --verbose to this same parser.
+    --force-vault-overwrite (issue #45), --no-llm (issue #46), and
+    --verbose/-v (issue #48).
     """
     parser = argparse.ArgumentParser(
         prog="notex",
@@ -127,6 +132,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "for a real LLM pass. Has no effect on an UNCHANGED file that "
             "would otherwise only need its LLM stage (re)run -- there's "
             "nothing for --no-llm to do there, so it's simply skipped."
+        ),
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        default=False,
+        help=(
+            "Print finer-grained per-stage progress detail (Mathpix poll "
+            "counts, LLM token/cost per file, per-figure copy actions, "
+            "and vault-write confirmation lines) in addition to the "
+            "default progress output. Does not change or remove any "
+            "existing output line -- only adds new ones."
         ),
     )
     return parser

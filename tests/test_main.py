@@ -2108,6 +2108,80 @@ def test_main_parses_no_llm_flag_and_forwards_it_to_run(monkeypatch, tmp_path):
     assert received_kwargs["no_llm"] is True
 
 
+def test_main_parses_verbose_flag_and_constructs_verbose_reporter(monkeypatch, tmp_path):
+    """
+    Issue #48: --verbose does not thread a new kwarg through run() itself --
+    main() constructs a PlainReporter(verbose=True) directly and passes it
+    as run()'s existing reporter= param.
+    """
+    import src.main as main_module
+    from src.reporting import PlainReporter
+
+    paths_config = _make_paths_config(tmp_path)
+    monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+
+    received_kwargs: dict = {}
+
+    def _fake_run(paths_config, conn, **kwargs):
+        received_kwargs.update(kwargs)
+        return RunSummary(processed=0, skipped=0, errors=0, ungrouped=0)
+
+    monkeypatch.setattr(main_module, "run", _fake_run)
+
+    exit_code = main(["--verbose"])
+
+    assert exit_code == 0
+    reporter = received_kwargs["reporter"]
+    assert isinstance(reporter, PlainReporter)
+    assert reporter.verbose is True
+
+
+def test_main_short_flag_v_also_constructs_verbose_reporter(monkeypatch, tmp_path):
+    import src.main as main_module
+    from src.reporting import PlainReporter
+
+    paths_config = _make_paths_config(tmp_path)
+    monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+
+    received_kwargs: dict = {}
+
+    def _fake_run(paths_config, conn, **kwargs):
+        received_kwargs.update(kwargs)
+        return RunSummary(processed=0, skipped=0, errors=0, ungrouped=0)
+
+    monkeypatch.setattr(main_module, "run", _fake_run)
+
+    exit_code = main(["-v"])
+
+    assert exit_code == 0
+    reporter = received_kwargs["reporter"]
+    assert isinstance(reporter, PlainReporter)
+    assert reporter.verbose is True
+
+
+def test_main_default_constructs_non_verbose_reporter(monkeypatch, tmp_path):
+    import src.main as main_module
+    from src.reporting import PlainReporter
+
+    paths_config = _make_paths_config(tmp_path)
+    monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+
+    received_kwargs: dict = {}
+
+    def _fake_run(paths_config, conn, **kwargs):
+        received_kwargs.update(kwargs)
+        return RunSummary(processed=0, skipped=0, errors=0, ungrouped=0)
+
+    monkeypatch.setattr(main_module, "run", _fake_run)
+
+    exit_code = main([])
+
+    assert exit_code == 0
+    reporter = received_kwargs["reporter"]
+    assert isinstance(reporter, PlainReporter)
+    assert reporter.verbose is False
+
+
 def test_main_parses_rerun_llm_flag_and_forwards_it_to_run(monkeypatch, tmp_path):
     import src.main as main_module
 
@@ -2393,7 +2467,7 @@ def test_main_returns_zero_and_prints_summary_even_with_errors(monkeypatch, tmp_
     monkeypatch.setattr(
         main_module,
         "run",
-        lambda paths_config, conn, client=None, course=None, dry_run=False, force=False, force_llm=False, target_source_path=None, force_vault_overwrite=False, no_llm=False: RunSummary(
+        lambda paths_config, conn, client=None, course=None, dry_run=False, force=False, force_llm=False, target_source_path=None, force_vault_overwrite=False, no_llm=False, reporter=None: RunSummary(
             processed=1,
             skipped=2,
             errors=1,
@@ -2560,3 +2634,88 @@ def test_run_ungrouped_skip_wired_through_reporter(client, tmp_path):
 
     assert summary.ungrouped == 1
     assert (str(stray_pdf.resolve()), "ungrouped_skip") in reporter.stages
+
+
+def _setup_main_end_to_end(monkeypatch, tmp_path):
+    """
+    Shared setup for the --verbose end-to-end tests below: monkeypatches
+    main_module's config loaders (mirroring
+    test_main_file_and_rerun_llm_combined_reprocesses_only_that_files_llm_stage's
+    precedent) and writes one course/lecture PDF. Returns
+    (paths_config, conn, pdf_path).
+    """
+    import src.main as main_module
+    from src.config import MathpixCredentials
+
+    paths_config = _make_paths_config(tmp_path)
+    monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+    monkeypatch.setattr(
+        main_module,
+        "load_mathpix_credentials",
+        lambda: MathpixCredentials(app_id="test_app_id", app_key="test_app_key"),
+    )
+    monkeypatch.setattr(main_module, "load_llm_config", _make_llm_config)
+    monkeypatch.setattr(main_module, "load_output_config", _make_output_config)
+    monkeypatch.setattr(main_module, "load_naming_config", _make_naming_config)
+
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+    return paths_config, conn, pdf_path
+
+
+@respx.mock
+def test_main_verbose_flag_prints_detail_lines_not_seen_by_default(
+    tmp_path, monkeypatch, capsys
+):
+    """
+    Issue #48 -- end-to-end confirmation that --verbose surfaces new detail
+    lines (Mathpix poll counts, per-figure copy actions, vault-write
+    confirmation) that a non-verbose run's output doesn't, without changing
+    any existing (non-verbose) output line. LLM token/cost detail isn't
+    exercised here since _install_fake_cleanup_pdf's fake never calls
+    on_status -- covered instead by tests/test_llm.py's on_status coverage
+    (issue #47) plus src/reporting.py's own PlainReporter(verbose=True)
+    tests.
+    """
+    paths_config, conn, pdf_path = _setup_main_end_to_end(monkeypatch, tmp_path)
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    exit_code = main(["--verbose"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+
+    # Existing (non-verbose) output lines are still present, unchanged.
+    assert "[class_1] lecture_01.pdf: processing (new)..." in out
+    assert "[class_1] lecture_01.pdf: done (LLM cleanup succeeded)" in out
+
+    # New verbose-only detail lines.
+    assert "mathpix pdf: poll" in out
+    assert "copied figure:" in out
+    assert "vault write confirmed:" in out
+
+
+@respx.mock
+def test_main_without_verbose_omits_detail_lines(tmp_path, monkeypatch, capsys):
+    paths_config, conn, pdf_path = _setup_main_end_to_end(monkeypatch, tmp_path)
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    exit_code = main([])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+
+    # Existing (non-verbose) output lines are still present.
+    assert "[class_1] lecture_01.pdf: processing (new)..." in out
+    assert "[class_1] lecture_01.pdf: done (LLM cleanup succeeded)" in out
+
+    # None of the verbose-only detail lines appear by default.
+    assert "mathpix pdf: poll" not in out
+    assert "copied figure:" not in out
+    assert "vault write confirmed:" not in out

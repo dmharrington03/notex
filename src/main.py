@@ -16,9 +16,12 @@ target_source_path params below -- no new pipeline logic); issue #45 adds
 vault_status="conflict"); issue #46 adds --no-llm (skip the LLM cleanup
 stage entirely for the run). Issue #47 adds the Reporter abstraction
 (src/reporting.py) every per-file print() now goes through -- an internal
-run()/reporter= param only, with no CLI-facing flag yet. The remaining
-flags (--verbose, RichReporter) are later Phase 7 issues (#48/#49) per
-docs/spec.md's roadmap.
+run()/reporter= param only, with no CLI-facing flag yet. Issue #48 adds
+--verbose/-v: main() constructs a PlainReporter(verbose=args.verbose)
+directly and passes it as run()'s existing reporter= param, rather than
+threading a new verbose param through run()/_process_file() themselves --
+--verbose only changes what PlainReporter chooses to print. A RichReporter
+is a later Phase 7 issue (#49) per docs/spec.md's roadmap.
 
 Two entry points:
     - run(paths_config, conn, client=None, llm_config=None,
@@ -405,7 +408,13 @@ def _write_to_vault(
             directly now goes through reporter.on_stage(source_path, ...)
             instead, passing the exact same final message text (never
             None; the caller always supplies a concrete Reporter, defaulting
-            to PlainReporter() at run()'s top level).
+            to PlainReporter() at run()'s top level). Issue #48 also wires
+            two verbose-only reporter.on_detail(source_path, ...) calls:
+            one per copied figure (write_lecture_note()'s on_figure_copy
+            callback), and one post-write confirmation summary (output
+            path, figure count, delimiter-warning count) after a
+            successful write -- both no-ops unless the injected reporter
+            is a PlainReporter(verbose=True) (or an equivalent).
 
     Returns:
         A (errors, conflicts) tuple -- each 1 or 0, never both 1 at once.
@@ -442,6 +451,9 @@ def _write_to_vault(
     entry = get_entry(conn, source_path)
     previous_content_hash = entry.vault_content_hash if entry is not None else None
 
+    def _on_figure_copy(dest_path: Path) -> None:
+        reporter.on_detail(source_path, f"copied figure: {dest_path.name}")
+
     try:
         result = write_lecture_note(
             source_path,
@@ -456,6 +468,7 @@ def _write_to_vault(
             lecture_prefix=lecture_prefix,
             previous_content_hash=previous_content_hash,
             force_overwrite=force_overwrite,
+            on_figure_copy=_on_figure_copy,
         )
     except (PostprocessError, OSError) as exc:
         reporter.on_stage(source_path, f"vault write FAILED: {exc}")
@@ -476,6 +489,13 @@ def _write_to_vault(
 
     for warning in result.delimiter_warnings:
         reporter.on_stage(source_path, f"WARNING: {warning}")
+
+    reporter.on_detail(
+        source_path,
+        f"vault write confirmed: {result.output_path} "
+        f"({len(result.figures_copied)} figure(s), "
+        f"{len(result.delimiter_warnings)} delimiter warning(s))",
+    )
 
     upsert_entry(
         conn,
@@ -1039,13 +1059,14 @@ def run(
             path).
         reporter: issue #47 -- the Reporter every per-file progress/outcome
             line is routed through, instead of calling print() directly.
-            When omitted (the default, and every real caller today), a
-            fresh PlainReporter() is constructed internally -- reporter is
-            never None past this point, so _process_file()/
-            _write_to_vault() never need a null check. See src/reporting.py
-            for PlainReporter's exact-output-preserving design; no CLI flag
-            surfaces this yet (--verbose/RichReporter are separate,
-            not-yet-implemented follow-up issues, #48/#49).
+            When omitted (the default), a fresh PlainReporter() is
+            constructed internally -- reporter is never None past this
+            point, so _process_file()/_write_to_vault() never need a null
+            check. The real CLI (main(), issue #48) always passes an
+            explicit PlainReporter(verbose=args.verbose) instead of
+            relying on this default. See src/reporting.py for
+            PlainReporter's exact-output-preserving design; a RichReporter
+            is a separate, not-yet-implemented follow-up issue (#49).
 
     Raises:
         ValueError: if both course and target_source_path are given.
@@ -1229,13 +1250,19 @@ def main(argv: list[str] | None = None) -> int:
 
     --course (issue #41), --dry-run (issue #42), --force (issue #43),
     --rerun-llm / --file (issue #44), --force-vault-overwrite (issue #45),
-    and --no-llm (issue #46) are wired up so far -- --verbose is a later
-    Phase 7 issue. --force does not set force_llm=True itself, since
-    forcing full reprocessing already implies a fresh LLM pass regardless
-    (see run()'s docstring). Hits the real, paid Mathpix and LLM APIs --
-    same caution as scripts/smoke_test_mathpix.py / scripts/smoke_test_llm.py
-    (unless --dry-run or --no-llm is given, which skip the LLM API
-    entirely -- --dry-run additionally skips Mathpix too).
+    --no-llm (issue #46), and --verbose/-v (issue #48) are wired up so far.
+    --force does not set force_llm=True itself, since forcing full
+    reprocessing already implies a fresh LLM pass regardless (see run()'s
+    docstring). Hits the real, paid Mathpix and LLM APIs -- same caution as
+    scripts/smoke_test_mathpix.py / scripts/smoke_test_llm.py (unless
+    --dry-run or --no-llm is given, which skip the LLM API entirely --
+    --dry-run additionally skips Mathpix too).
+
+    --verbose/-v does not add a new run()/_process_file() param -- main()
+    constructs a PlainReporter(verbose=args.verbose) directly and passes it
+    as run()'s existing reporter= param (issue #47), since --verbose only
+    ever changes what PlainReporter itself chooses to print, not any
+    pipeline logic.
 
     --file is validated here, before run() is ever called: the path must
     exist, end in .pdf (case-insensitive), and resolve to somewhere under
@@ -1284,6 +1311,7 @@ def main(argv: list[str] | None = None) -> int:
         target_source_path=target_source_path,
         force_vault_overwrite=args.force_vault_overwrite,
         no_llm=args.no_llm,
+        reporter=PlainReporter(verbose=args.verbose),
     )
     _print_summary(summary, dry_run=args.dry_run)
     return 0

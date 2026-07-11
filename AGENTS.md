@@ -669,7 +669,10 @@ narrative and real-data-validation findings.
   refactor; `_write_to_vault()`'s failure path routes through the injected
   reporter too; the ungrouped-skip loop's `"ungrouped_skip"` token reaches
   the injected reporter with the correct `source_path`).
-- Remaining issues (#48-#51) filed, not started yet. See "Phase 7 Plan"
+- **#48 (done)** — `--verbose`/`-v`, gating `PlainReporter.on_detail()`;
+  new `on_copy`/`on_figure_copy` hooks added to `copy_figures_to_vault()`/
+  `write_lecture_note()`. See the issue's GitHub comments for full detail.
+- Remaining issues (#49-#51) filed, not started yet. See "Phase 7 Plan"
   under "Remaining Work — Phases 4-7 Plan" above for the full
   issue-by-issue breakdown and implementation order.
 

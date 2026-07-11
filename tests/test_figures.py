@@ -115,6 +115,45 @@ def test_empty_cache_figures_dir_creates_empty_vault_dir(tmp_path):
     assert list(vault_figures_dir.iterdir()) == []
 
 
+def test_on_copy_called_once_per_copied_file(tmp_path):
+    """Issue #48 -- on_copy fires once per copied file with its dest Path."""
+    cache_figures_dir = tmp_path / "_cache" / "class_1" / "figures"
+    cache_figures_dir.mkdir(parents=True)
+    (cache_figures_dir / "lecture_02_fig_001.jpg").write_bytes(b"fig1")
+    (cache_figures_dir / "lecture_02_fig_002.jpg").write_bytes(b"fig2")
+    vault_figures_dir = tmp_path / "vault" / "class_1" / "figures"
+
+    copied_paths = []
+    result = copy_figures_to_vault(
+        cache_figures_dir, vault_figures_dir, on_copy=copied_paths.append
+    )
+
+    assert sorted(copied_paths) == result
+    assert len(copied_paths) == 2
+
+
+def test_on_copy_not_called_for_zero_figure_case(tmp_path):
+    cache_figures_dir = tmp_path / "_cache" / "class_1" / "figures"
+    vault_figures_dir = tmp_path / "vault" / "class_1" / "figures"
+
+    copied_paths = []
+    copy_figures_to_vault(cache_figures_dir, vault_figures_dir, on_copy=copied_paths.append)
+
+    assert copied_paths == []
+
+
+def test_on_copy_omittable_default_none(tmp_path):
+    """on_copy defaults to None and is safely omittable (no crash)."""
+    cache_figures_dir = tmp_path / "_cache" / "class_1" / "figures"
+    cache_figures_dir.mkdir(parents=True)
+    (cache_figures_dir / "lecture_02_fig_001.jpg").write_bytes(b"fig1")
+    vault_figures_dir = tmp_path / "vault" / "class_1" / "figures"
+
+    result = copy_figures_to_vault(cache_figures_dir, vault_figures_dir)
+
+    assert len(result) == 1
+
+
 def test_rewrite_single_image_reference_gets_figure_1_caption():
     markdown = "Some text.\n\n![](figures/lecture_02_fig_001.jpg)\n\nMore text."
 
