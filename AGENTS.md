@@ -362,7 +362,34 @@ narrative and real-data-validation findings.
   `target_source_path` together raise `ValueError` — the actual CLI-level
   `--course`/`--file` rejection with exit code 1 is deferred to #44, since
   `--file` doesn't exist in the parser yet.
-- Remaining issues (#42-#51) filed, not started yet. See "Phase 7 Plan"
+- **#42 (done)** — `src/cli.py` gained `--dry-run` (`action="store_true"`,
+  default `False`). `run()` gained a `dry_run: bool = False` param;
+  `_process_file()` gained a matching `dry_run` param and short-circuits
+  at the top of the function — before `resolve_tags()`/`process_pdf()`/
+  `cleanup_pdf()`/`_write_to_vault()`/`upsert_entry()` — mirroring the real
+  classification branching purely off `result.classification` and the
+  existing `state.db` entry: actionable (NEW/CHANGED/RETRY) prints
+  `"would process (...)"` and counts as `processed`; UNCHANGED-and-stale
+  (or `force_llm`) prints `"would reprocess LLM stage only"` and counts as
+  `llm_reprocessed`; everything else counts as `skipped`. `errors`/
+  `vault_conflicts`/token/cost/page fields always stay `0` in dry-run — no
+  attempt is made to predict failures or vault conflicts (confirmed with
+  the user, out of scope for this issue). No new `RunSummary` field was
+  added (kept the dataclass and all its existing equality-check tests
+  untouched) — the dry-run banner is a separate `dry_run` param on
+  `_print_summary()` instead. When `dry_run=True` and no `client=` is
+  injected, `run()` skips constructing both `MathpixClient` (so
+  `load_mathpix_credentials()` is never called — a dry run needs no
+  Mathpix/LLM credentials at all) and `LLMClient`, passing `None` for both
+  down into `_process_file()` (which never touches them on the dry-run
+  path); `mathpix_client`/`llm_client` param types widened to `... | None`
+  accordingly, and the `finally: client.close()` guard extended to handle
+  a `None` client. `main()` forwards `dry_run=args.dry_run` into both
+  `run()` and `_print_summary()`. One pre-existing test
+  (`test_main_returns_zero_and_prints_summary_even_with_errors`) needed
+  its fake `run()` stand-in's signature updated to accept `dry_run=False`,
+  since `main()` now always forwards that kwarg.
+- Remaining issues (#43-#51) filed, not started yet. See "Phase 7 Plan"
   under "Remaining Work — Phases 4-7 Plan" above for the full
   issue-by-issue breakdown and implementation order.
 

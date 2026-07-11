@@ -8,15 +8,15 @@ write_lecture_note() (src/vault.py, issue #29) into a single runnable pass
 over paths.input_root, with Phase 6's OutputConfig/NamingConfig (issue #37)
 threaded through into write_lecture_note()'s dark_mode/tags/date_format/
 lecture_prefix params. Phase 7 (issue #41) adds real argparse scaffolding
-(src/cli.py's build_arg_parser()) and the first flag, --course NAME; the
-remaining flags (--dry-run / --force / --verbose, and the eventual
---refresh-llm-prompt / --file / --force-vault-overwrite / --no-llm) are
-later Phase 7 issues per docs/spec.md's roadmap.
+(src/cli.py's build_arg_parser()) and the first flag, --course NAME; issue
+#42 adds --dry-run. The remaining flags (--force / --verbose, and the
+eventual --refresh-llm-prompt / --file / --force-vault-overwrite /
+--no-llm) are later Phase 7 issues per docs/spec.md's roadmap.
 
 Two entry points:
     - run(paths_config, conn, client=None, llm_config=None,
           output_config=None, naming_config=None, force_llm=False,
-          target_source_path=None, course=None) -> RunSummary
+          target_source_path=None, course=None, dry_run=False) -> RunSummary
         The core, directly testable orchestration logic. Takes an already-
         loaded PathsConfig and an already-open state.db connection so tests
         can supply a tmp_path input_root tree, a real temp state.db, and an
@@ -94,6 +94,18 @@ Per-file flow (see AGENTS.md issue #11/#18 notes):
       triggered automatically by a stale llm_prompt_version -- see
       AGENTS.md's "Deliberate correction to docs/spec.md's Reprocessing
       logic table".
+    - dry_run=True (issue #42, wired to --dry-run): every file is still
+      classified via discover_pdfs()/classify_pdf() (or, with
+      target_source_path, classify_pdf() on just that file) so accurate
+      would-be classifications/reprocessing decisions can be reported, but
+      _process_file() short-circuits before any real work: process_pdf(),
+      cleanup_pdf(), _write_to_vault(), and upsert_entry() are never
+      called for that file. No MathpixClient is constructed at all when
+      one isn't injected (no Mathpix credentials required), and no
+      LLMClient is constructed either. RunSummary's processed/skipped/
+      llm_reprocessed counts reflect what *would* happen; errors/
+      vault_conflicts/token/cost/page fields stay at 0 since no real work
+      is attempted.
 
 A single MathpixClient and a single LLMClient are each constructed once per
 run() call (when not injected/configured) and reused across every file in
@@ -344,13 +356,14 @@ def _process_file(
     result: ClassificationResult,
     cache_dir: Path,
     vault_course_dir: Path,
-    mathpix_client: MathpixClient,
-    llm_client: LLMClient,
+    mathpix_client: MathpixClient | None,
+    llm_client: LLMClient | None,
     llm_config: LLMConfig,
     output_config: OutputConfig,
     naming_config: NamingConfig,
     conn: sqlite3.Connection,
     force_llm: bool,
+    dry_run: bool,
     course_label: str,
 ) -> _FileOutcome:
     """
@@ -369,8 +382,11 @@ def _process_file(
         vault_course_dir: the (course-specific, or _ungrouped-sentinel)
             vault directory to pass through to write_lecture_note() as its
             vault_course_dir.
-        mathpix_client: the run's shared MathpixClient.
-        llm_client: the run's shared LLMClient.
+        mathpix_client: the run's shared MathpixClient, or None in
+            dry_run mode (never touched by the dry-run short-circuit
+            below).
+        llm_client: the run's shared LLMClient, or None in dry_run mode
+            (same as mathpix_client).
         llm_config: the run's resolved LLMConfig.
         output_config: the run's resolved OutputConfig (issue #37) --
             figures_dark_mode_flag/date_format are forwarded to every
@@ -385,6 +401,17 @@ def _process_file(
         conn: an open state.db connection.
         force_llm: whether to bypass needs_llm_reprocessing() for an
             UNCHANGED file eligible for LLM-only reprocessing.
+        dry_run: issue #42 -- when True, short-circuits before any of the
+            real processing below: no process_pdf()/cleanup_pdf()/
+            _write_to_vault()/upsert_entry() call is ever made for this
+            file. The short-circuit mirrors the real branching logic
+            immediately below it (actionable classification -> "would
+            process"; UNCHANGED-and-stale-or-force_llm -> "would
+            reprocess LLM stage only"; otherwise -> skip) purely from
+            result/state.db's already-recorded entry, so it reports
+            accurate would-be counts without doing any real work --
+            errors/vault_conflicts always stay 0 in dry-run since nothing
+            can fail.
         course_label: display-only label for progress print lines (a real
             course name, or "_ungrouped") -- doubles as resolve_tags()'s
             course_name lookup key (issue #37).
@@ -393,8 +420,27 @@ def _process_file(
         A _FileOutcome with the increments this file contributes to the
         run's overall RunSummary.
     """
-    tags = resolve_tags(course_label, output_config)
     filename = Path(result.source_path).name
+
+    if dry_run:
+        if result.classification in _ACTIONABLE_CLASSIFICATIONS:
+            print(
+                f"[{course_label}] {filename}: would process "
+                f"({result.classification.value})"
+            )
+            return _FileOutcome(processed=1)
+
+        entry = get_entry(conn, result.source_path)
+        if entry is None or entry.mathpix_status != "success":
+            return _FileOutcome(skipped=1)
+
+        if force_llm or needs_llm_reprocessing(entry):
+            print(f"[{course_label}] {filename}: would reprocess LLM stage only")
+            return _FileOutcome(llm_reprocessed=1)
+
+        return _FileOutcome(skipped=1)
+
+    tags = resolve_tags(course_label, output_config)
 
     if result.classification in _ACTIONABLE_CLASSIFICATIONS:
         print(
@@ -563,6 +609,7 @@ def run(
     force_llm: bool = False,
     target_source_path: str | Path | None = None,
     course: str | None = None,
+    dry_run: bool = False,
 ) -> RunSummary:
     """
     Discover new/changed/failed-retry PDFs under paths_config.input_root (or,
@@ -610,6 +657,13 @@ def run(
             raises ValueError (issue #41; the CLI-level --course/--file
             rejection with exit code 1 is #44's job, once --file exists in
             the parser).
+        dry_run: when True (issue #42, wired to --dry-run), report what
+            would be processed without doing it -- no MathpixClient/
+            LLMClient is constructed (when not injected), and
+            _process_file() short-circuits before process_pdf()/
+            cleanup_pdf()/_write_to_vault()/upsert_entry() for every file.
+            Classification (discover_pdfs()/classify_pdf()) still runs
+            normally, so the reported would-be counts are accurate.
 
     Raises:
         ValueError: if both course and target_source_path are given.
@@ -628,13 +682,13 @@ def run(
         )
 
     owns_client = client is None
-    if client is None:
+    if client is None and not dry_run:
         credentials = load_mathpix_credentials()
         client = MathpixClient(credentials.app_id, credentials.app_key)
 
     if llm_config is None:
         llm_config = load_llm_config()
-    llm_client = LLMClient(model=llm_config.model)
+    llm_client = None if dry_run else LLMClient(model=llm_config.model)
 
     if output_config is None:
         output_config = load_output_config()
@@ -681,6 +735,7 @@ def run(
                 naming_config,
                 conn,
                 force_llm,
+                dry_run,
                 course_label,
             )
             processed += outcome.processed
@@ -731,6 +786,7 @@ def run(
                         naming_config,
                         conn,
                         force_llm,
+                        dry_run,
                         course_name,
                     )
                     processed += outcome.processed
@@ -743,7 +799,7 @@ def run(
                     total_pages_processed += outcome.pages
                     vault_conflicts += outcome.vault_conflicts
     finally:
-        if owns_client:
+        if owns_client and client is not None:
             client.close()
 
     return RunSummary(
@@ -760,8 +816,10 @@ def run(
     )
 
 
-def _print_summary(summary: RunSummary) -> None:
+def _print_summary(summary: RunSummary, dry_run: bool = False) -> None:
     print()
+    if dry_run:
+        print("Dry run -- no files were modified.")
     print("Done.")
     print(f"  {'Documents processed:':<21}{summary.processed}")
     print(f"  {'Pages processed:':<21}{summary.total_pages_processed}")
@@ -781,12 +839,13 @@ def main(argv: list[str] | None = None) -> int:
     load config.yaml's paths:, open/init state.db, run the discover -> process
     -> record pipeline once, print a summary.
 
-    Only --course is wired up so far (issue #41) -- --dry-run/--force/
-    --verbose, and the eventual --refresh-llm-prompt/--file/
+    --course (issue #41) and --dry-run (issue #42) are wired up so far --
+    --force/--verbose, and the eventual --refresh-llm-prompt/--file/
     --force-vault-overwrite/--no-llm, are later Phase 7 issues.
     force_llm/target_source_path stay at their defaults (False/None). Hits
     the real, paid Mathpix and LLM APIs -- same caution as
-    scripts/smoke_test_mathpix.py / scripts/smoke_test_llm.py.
+    scripts/smoke_test_mathpix.py / scripts/smoke_test_llm.py (unless
+    --dry-run is given, which makes no API calls at all).
     """
     args = build_arg_parser().parse_args(argv)
 
@@ -797,8 +856,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     conn = init_db(paths_config.state_db)
-    summary = run(paths_config, conn, course=args.course)
-    _print_summary(summary)
+    summary = run(paths_config, conn, course=args.course, dry_run=args.dry_run)
+    _print_summary(summary, dry_run=args.dry_run)
     return 0
 
 

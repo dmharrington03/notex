@@ -5,7 +5,7 @@ Holds the argparse scaffolding for src/main.py's main() -- split into its own
 module rather than built inline in main() (a deliberate deviation from issue
 #41's literal "Add an argparse.ArgumentParser in main()" wording, confirmed
 with the user) since the full Phase 7 scope adds seven more flags across
-follow-up issues (#42-#46, #48: --dry-run, --force, --refresh-llm-prompt,
+follow-up issues (#43-#46, #48: --force, --refresh-llm-prompt,
 --file, --force-vault-overwrite, --no-llm, --verbose/-v), several with their
 own cross-flag validation (e.g. --course/--file mutual exclusion). Keeping
 parser construction here mirrors the project's existing one-module-per-
@@ -27,8 +27,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     """
     Build the CLI's argument parser.
 
-    Currently just --course NAME (issue #41); later Phase 7 issues add
-    --dry-run / --force / --refresh-llm-prompt / --file /
+    Currently --course NAME (issue #41) and --dry-run (issue #42); later
+    Phase 7 issues add --force / --refresh-llm-prompt / --file /
     --force-vault-overwrite / --no-llm / --verbose to this same parser.
     """
     parser = argparse.ArgumentParser(
@@ -49,6 +49,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "The full directory is still scanned; every other course is "
             "simply skipped. An unknown course name is a clean no-op (a "
             "warning is printed, nothing is processed) rather than an error."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help=(
+            "Report what would be processed without doing it -- no Mathpix "
+            "or LLM API calls, and no state.db/cache/vault writes."
         ),
     )
     return parser

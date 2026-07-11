@@ -79,6 +79,20 @@ Covered here (issue #41 — --course CLI scaffolding):
       build_arg_parser() and forwarded into run() as its course= kwarg.
       See tests/test_cli.py for build_arg_parser()'s own parsing-only
       tests.
+
+Covered here (issue #42 — --dry-run):
+    - run(): a NEW file's dry run reports it would be processed (tallied as
+      processed) without ever calling the mocked Mathpix submit endpoint or
+      writing a state.db row for it.
+    - run(): an UNCHANGED file eligible for LLM-only reprocessing reports
+      it would be reprocessed (tallied as llm_reprocessed) without the
+      fake cleanup_pdf() ever actually being called.
+    - run(): a fully up-to-date UNCHANGED file is reported as skipped.
+    - run(): dry_run=True with no client= injected never calls
+      load_mathpix_credentials() -- no Mathpix credentials are required at
+      all in dry-run mode.
+    - main(): a --dry-run argv flag is parsed and forwarded into run() as
+      its dry_run= kwarg.
 """
 
 from __future__ import annotations
@@ -1041,6 +1055,144 @@ def test_main_parses_course_flag_and_forwards_it_to_run(monkeypatch, tmp_path):
 
 
 @respx.mock
+def test_run_dry_run_reports_new_file_without_processing(client, tmp_path, monkeypatch):
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    submit_route = respx.post(f"{MATHPIX_BASE_URL}/v3/pdf").mock(
+        return_value=httpx.Response(200, json={"pdf_id": "abc123"})
+    )
+    llm_calls = _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        dry_run=True,
+    )
+
+    assert summary == RunSummary(processed=1, skipped=0, errors=0, ungrouped=0, llm_reprocessed=0)
+    assert not submit_route.called
+    assert llm_calls == []
+    assert get_entry(conn, str(pdf_path.resolve())) is None
+
+
+@respx.mock
+def test_run_dry_run_reports_llm_only_rerun_without_calling_llm(client, tmp_path, monkeypatch):
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    # llm_status=None -> stale, eligible for LLM-only reprocessing.
+    _upsert_unchanged_entry(conn, pdf_path, mathpix_status="success", llm_status=None)
+
+    submit_route = respx.post(f"{MATHPIX_BASE_URL}/v3/pdf").mock(
+        return_value=httpx.Response(200, json={"pdf_id": "abc123"})
+    )
+    llm_calls = _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        dry_run=True,
+    )
+
+    assert summary == RunSummary(processed=0, skipped=0, errors=0, ungrouped=0, llm_reprocessed=1)
+    assert not submit_route.called
+    assert llm_calls == []
+
+
+@respx.mock
+def test_run_dry_run_skips_fully_up_to_date_file(client, tmp_path, monkeypatch):
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    # llm_status="success" -> fully up to date, not eligible for any rerun.
+    _upsert_unchanged_entry(conn, pdf_path, mathpix_status="success", llm_status="success")
+
+    submit_route = respx.post(f"{MATHPIX_BASE_URL}/v3/pdf").mock(
+        return_value=httpx.Response(200, json={"pdf_id": "abc123"})
+    )
+    llm_calls = _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        dry_run=True,
+    )
+
+    assert summary == RunSummary(processed=0, skipped=1, errors=0, ungrouped=0, llm_reprocessed=0)
+    assert not submit_route.called
+    assert llm_calls == []
+
+
+def test_run_dry_run_requires_no_mathpix_credentials(tmp_path, monkeypatch):
+    import src.main as main_module
+
+    def _raise_if_called():
+        raise AssertionError("should not be called in dry run")
+
+    monkeypatch.setattr(main_module, "load_mathpix_credentials", _raise_if_called)
+
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    _write_pdf(course_dir / "lecture_01.pdf")
+
+    summary = run(
+        paths_config,
+        conn,
+        client=None,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        dry_run=True,
+    )
+
+    assert summary.processed == 1
+
+
+def test_main_parses_dry_run_flag_and_forwards_it_to_run(monkeypatch, tmp_path):
+    import src.main as main_module
+
+    paths_config = _make_paths_config(tmp_path)
+    monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+
+    received_kwargs: dict = {}
+
+    def _fake_run(paths_config, conn, **kwargs):
+        received_kwargs.update(kwargs)
+        return RunSummary(processed=0, skipped=0, errors=0, ungrouped=0)
+
+    monkeypatch.setattr(main_module, "run", _fake_run)
+
+    exit_code = main(["--dry-run"])
+
+    assert exit_code == 0
+    assert received_kwargs["dry_run"] is True
+
+
+@respx.mock
 def test_run_wires_real_output_and_naming_config_end_to_end(client, tmp_path, monkeypatch):
     """
     Issue #37: when output_config/naming_config are omitted, run() loads
@@ -1135,7 +1287,7 @@ def test_main_returns_zero_and_prints_summary_even_with_errors(monkeypatch, tmp_
     monkeypatch.setattr(
         main_module,
         "run",
-        lambda paths_config, conn, client=None, course=None: RunSummary(
+        lambda paths_config, conn, client=None, course=None, dry_run=False: RunSummary(
             processed=1,
             skipped=2,
             errors=1,
