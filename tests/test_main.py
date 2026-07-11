@@ -141,6 +141,22 @@ Covered here (issue #45 — --force-vault-overwrite):
     - run(): the same scenario under dry_run=True reports the would-be
       vault-write retry (tallied as skipped) without touching the vault
       file, state.db, or calling cleanup_pdf().
+
+Covered here (issue #46 — --no-llm):
+    - run(): no_llm=True on a NEW file runs process_pdf() as normal but
+      never calls cleanup_pdf() -- only mathpix_*/figure_count/page_count/
+      mathpix_processed_at are recorded, llm_status (and every other
+      llm_*/output_path field) stays None, and the vault note is written
+      from the raw .mathpix.md rather than any LLM-cleaned content.
+    - run(): a file processed with no_llm=True is picked up by a later
+      normal (non-no_llm) run via needs_llm_reprocessing() for a real LLM
+      pass -- no Mathpix API call the second time, exercised end-to-end
+      rather than just asserted by inspection.
+    - run(): no_llm=True on an UNCHANGED file otherwise eligible for
+      LLM-only reprocessing (llm_status=None or force_llm=True) is simply
+      skipped -- cleanup_pdf() is never called.
+    - main(): a --no-llm argv flag is parsed and forwarded into run() as
+      its no_llm= kwarg.
 """
 
 from __future__ import annotations
@@ -646,6 +662,189 @@ def test_run_force_on_new_file_matches_plain_run(client, tmp_path, monkeypatch):
     assert entry is not None
     assert entry.mathpix_status == "success"
     assert entry.llm_status == "success"
+
+
+@respx.mock
+def test_run_no_llm_processes_mathpix_only_and_writes_raw_vault_note(
+    client, tmp_path, monkeypatch
+):
+    """
+    Issue #46: no_llm=True on a NEW file runs process_pdf() as normal but
+    never calls cleanup_pdf() -- only mathpix_*/figure_count/page_count/
+    mathpix_processed_at are recorded, llm_status (and every other llm_*/
+    output_path field) stays None, and the vault note is written straight
+    from the raw .mathpix.md (not any LLM-cleaned content).
+    """
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    _mock_happy_path()
+    llm_calls = _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        no_llm=True,
+    )
+
+    assert summary == RunSummary(
+        processed=1,
+        skipped=0,
+        errors=0,
+        ungrouped=0,
+        llm_reprocessed=0,
+        total_pages_processed=2,
+    )
+    # cleanup_pdf() was never called for this file.
+    assert len(llm_calls) == 0
+
+    entry = get_entry(conn, str(pdf_path.resolve()))
+    assert entry is not None
+    assert entry.mathpix_status == "success"
+    assert entry.mathpix_pdf_id == "abc123"
+    assert entry.figure_count == 2
+    assert entry.page_count == 2
+    assert entry.mathpix_processed_at is not None
+
+    # LLM stage was never attempted.
+    assert entry.llm_status is None
+    assert entry.llm_model is None
+    assert entry.llm_prompt_version is None
+    assert entry.llm_processed_at is None
+    assert entry.output_path is None
+    assert entry.llm_input_tokens is None
+    assert entry.llm_output_tokens is None
+    assert entry.llm_cost_estimate is None
+
+    # Vault note was still written, sourced from the raw .mathpix.md.
+    assert entry.vault_status == "success"
+    vault_path = paths_config.vault_root / "class_1" / "Lecture 01.md"
+    assert Path(entry.vault_path) == vault_path
+    assert vault_path.is_file()
+    vault_content = vault_path.read_text(encoding="utf-8")
+    assert "Some intro text discussing vectors and matrices." in vault_content
+    assert "cleaned markdown" not in vault_content
+
+
+@respx.mock
+def test_run_no_llm_file_picked_up_by_later_normal_run(client, tmp_path, monkeypatch):
+    """
+    Issue #46: a file processed with no_llm=True has llm_status left None,
+    so a later normal run (no_llm=False, no --force/--rerun-llm needed)
+    picks it up via needs_llm_reprocessing() for a real LLM pass -- no
+    Mathpix API call the second time, and the vault note is rewritten with
+    the LLM-cleaned content.
+    """
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    submit_route = _mock_happy_path()
+    first_run_llm_calls = _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    first_summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        no_llm=True,
+    )
+    assert first_summary.processed == 1
+    assert len(first_run_llm_calls) == 0
+    assert submit_route.call_count == 1
+
+    entry_after_first_run = get_entry(conn, str(pdf_path.resolve()))
+    assert entry_after_first_run.llm_status is None
+
+    second_run_llm_calls = _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    second_summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
+
+    # No further Mathpix API call -- the file is UNCHANGED, only its LLM
+    # stage is (re)run.
+    assert submit_route.call_count == 1
+    assert second_summary == RunSummary(
+        processed=0,
+        skipped=0,
+        errors=0,
+        ungrouped=0,
+        llm_reprocessed=1,
+        total_input_tokens=100,
+        total_output_tokens=50,
+        total_cost_estimate=0.001,
+    )
+    assert len(second_run_llm_calls) == 1
+
+    entry = get_entry(conn, str(pdf_path.resolve()))
+    assert entry.llm_status == "success"
+    assert entry.mathpix_status == "success"
+
+    vault_path = paths_config.vault_root / "class_1" / "Lecture 01.md"
+    assert "cleaned markdown" in vault_path.read_text(encoding="utf-8")
+
+
+@respx.mock
+def test_run_no_llm_skips_unchanged_file_eligible_for_llm_reprocessing(
+    client, tmp_path, monkeypatch
+):
+    """
+    Issue #46: no_llm=True on an UNCHANGED file that's otherwise eligible
+    for LLM-only reprocessing (llm_status=None, or force_llm=True) is
+    simply skipped -- there's nothing for --no-llm to do there, and
+    cleanup_pdf() is never called.
+    """
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    # llm_status=None -> would normally trigger LLM-only reprocessing.
+    _upsert_unchanged_entry(conn, pdf_path, mathpix_status="success", llm_status=None)
+
+    submit_route = respx.post(f"{MATHPIX_BASE_URL}/v3/pdf").mock(
+        return_value=httpx.Response(200, json={"pdf_id": "abc123"})
+    )
+    llm_calls = _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        no_llm=True,
+        force_llm=True,
+    )
+
+    assert summary == RunSummary(
+        processed=0,
+        skipped=1,
+        errors=0,
+        ungrouped=0,
+        llm_reprocessed=0,
+    )
+    assert not submit_route.called
+    assert len(llm_calls) == 0
 
 
 @respx.mock
@@ -1674,6 +1873,26 @@ def test_main_parses_force_vault_overwrite_flag_and_forwards_it_to_run(monkeypat
     assert received_kwargs["force_vault_overwrite"] is True
 
 
+def test_main_parses_no_llm_flag_and_forwards_it_to_run(monkeypatch, tmp_path):
+    import src.main as main_module
+
+    paths_config = _make_paths_config(tmp_path)
+    monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+
+    received_kwargs: dict = {}
+
+    def _fake_run(paths_config, conn, **kwargs):
+        received_kwargs.update(kwargs)
+        return RunSummary(processed=0, skipped=0, errors=0, ungrouped=0)
+
+    monkeypatch.setattr(main_module, "run", _fake_run)
+
+    exit_code = main(["--no-llm"])
+
+    assert exit_code == 0
+    assert received_kwargs["no_llm"] is True
+
+
 def test_main_parses_rerun_llm_flag_and_forwards_it_to_run(monkeypatch, tmp_path):
     import src.main as main_module
 
@@ -1959,7 +2178,7 @@ def test_main_returns_zero_and_prints_summary_even_with_errors(monkeypatch, tmp_
     monkeypatch.setattr(
         main_module,
         "run",
-        lambda paths_config, conn, client=None, course=None, dry_run=False, force=False, force_llm=False, target_source_path=None, force_vault_overwrite=False: RunSummary(
+        lambda paths_config, conn, client=None, course=None, dry_run=False, force=False, force_llm=False, target_source_path=None, force_vault_overwrite=False, no_llm=False: RunSummary(
             processed=1,
             skipped=2,
             errors=1,

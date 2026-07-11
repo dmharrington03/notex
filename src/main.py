@@ -13,14 +13,16 @@ lecture_prefix params. Phase 7 (issue #41) adds real argparse scaffolding
 --file PATH (thin CLI surfaces for the already-existing force_llm/
 target_source_path params below -- no new pipeline logic); issue #45 adds
 --force-vault-overwrite (issue #40's escape hatch for clearing a detected
-vault_status="conflict"). The remaining flags (--verbose, --no-llm) are
-later Phase 7 issues per docs/spec.md's roadmap.
+vault_status="conflict"); issue #46 adds --no-llm (skip the LLM cleanup
+stage entirely for the run). The remaining flag (--verbose) is a later
+Phase 7 issue per docs/spec.md's roadmap.
 
 Two entry points:
     - run(paths_config, conn, client=None, llm_config=None,
           output_config=None, naming_config=None, force_llm=False,
           target_source_path=None, course=None, dry_run=False,
-          force=False, force_vault_overwrite=False) -> RunSummary
+          force=False, force_vault_overwrite=False,
+          no_llm=False) -> RunSummary
         The core, directly testable orchestration logic. Takes an already-
         loaded PathsConfig and an already-open state.db connection so tests
         can supply a tmp_path input_root tree, a real temp state.db, and an
@@ -70,7 +72,9 @@ Per-file flow (see AGENTS.md issue #11/#18 notes):
       wrote). This is expected, handled behavior, not an error -- tallied
       separately as RunSummary.vault_conflicts, not folded into errors.
       force_vault_overwrite=True (issue #45) bypasses this detection
-      entirely -- see its own bullet below.
+      entirely -- see its own bullet below. no_llm=True (issue #46) skips
+      cleanup_pdf() entirely on this path -- see its own bullet below for
+      the full behavior.
     - UNGROUPED_COURSE_KEY files (PDFs directly under input_root, not in any
       course subfolder) are, in the normal (non-target_source_path) run,
       deliberately *not* processed: there's no course to mirror in
@@ -146,6 +150,27 @@ Per-file flow (see AGENTS.md issue #11/#18 notes):
       scope. Composes with both _write_to_vault() call sites (the
       actionable NEW/CHANGED/RETRY path and the UNCHANGED LLM-only-rerun
       path), since a conflict can be detected on either one.
+    - no_llm=True (issue #46, wired to --no-llm): skips cleanup_pdf()
+      entirely for this run. On the actionable NEW/CHANGED/RETRY path,
+      process_pdf() still runs as normal, but only mathpix_*/figure_count/
+      page_count/mathpix_processed_at are upserted -- llm_status and every
+      other llm_*/output_path field are left untouched (NULL for a
+      freshly-discovered file), so needs_llm_reprocessing() (llm_status is
+      None) automatically routes this file through a real LLM pass on a
+      later normal (non-no_llm) run, with no extra state to track. The
+      vault note is still written this run (there's always something to
+      write), sourced directly from process_pdf()'s raw
+      ProcessResult.markdown_path (the same raw-.mathpix.md fallback
+      content cleanup_pdf() itself would use on an LLM failure) -- this is
+      tallied as processed=1 with no error contribution from skipping the
+      LLM stage (skipping by explicit request isn't a failure, unlike a
+      genuine LLM fallback-to-raw). On the UNCHANGED path, no_llm=True
+      unconditionally skips the LLM-only-rerun branch regardless of
+      force_llm/needs_llm_reprocessing() -- there is nothing for --no-llm
+      to do to a file whose Mathpix stage is already cached and whose LLM
+      stage isn't being run this pass anyway, so it's simply tallied as
+      skipped (falling through to the existing force_vault_overwrite
+      conflict-retry check first, same as any other skip).
 
 A single MathpixClient and a single LLMClient are each constructed once per
 run() call (when not injected/configured) and reused across every file in
@@ -466,6 +491,7 @@ def _process_file(
     force_llm: bool,
     dry_run: bool,
     force_vault_overwrite: bool,
+    no_llm: bool,
     course_label: str,
 ) -> _FileOutcome:
     """
@@ -528,6 +554,19 @@ def _process_file(
             than the file being fully skipped -- otherwise
             force_vault_overwrite could never take effect for a file whose
             Mathpix/LLM stages already both succeeded in a prior run.
+        no_llm: issue #46 -- when True, skips cleanup_pdf() entirely on
+            the actionable NEW/CHANGED/RETRY path below: only
+            mathpix_*/figure_count/page_count/mathpix_processed_at are
+            upserted (llm_status and every other llm_*/output_path field
+            stay untouched/NULL), and the vault note is written straight
+            from process_pdf()'s raw ProcessResult.markdown_path -- no
+            error is contributed just for skipping the LLM stage by
+            request. On the UNCHANGED path, no_llm=True unconditionally
+            skips the LLM-only-rerun branch regardless of force_llm/
+            needs_llm_reprocessing() -- there's nothing for --no-llm to do
+            there, so the file is simply tallied as skipped (falling
+            through to the existing force_vault_overwrite conflict-retry
+            check first, same as any other skip).
         course_label: display-only label for progress print lines (a real
             course name, or "_ungrouped") -- doubles as resolve_tags()'s
             course_name lookup key (issue #37).
@@ -550,7 +589,7 @@ def _process_file(
         if entry is None or entry.mathpix_status != "success":
             return _FileOutcome(skipped=1)
 
-        if force_llm or needs_llm_reprocessing(entry):
+        if not no_llm and (force_llm or needs_llm_reprocessing(entry)):
             print(f"[{course_label}] {filename}: would reprocess LLM stage only")
             return _FileOutcome(llm_reprocessed=1)
 
@@ -583,6 +622,54 @@ def _process_file(
                 mathpix_status="failed",
             )
             return _FileOutcome(errors=1)
+
+        if no_llm:
+            # Issue #46: skip cleanup_pdf() entirely -- only the
+            # mathpix_*/figure_count/page_count/mathpix_processed_at
+            # fields are upserted, leaving llm_status (and every other
+            # llm_*/output_path field) untouched/NULL, matching a
+            # freshly-discovered-but-not-yet-LLM-processed file.
+            # needs_llm_reprocessing() already treats llm_status is None
+            # as needing reprocessing, so a later normal (non-no_llm) run
+            # picks this file up for a real LLM pass automatically.
+            print(f"[{course_label}] {filename}: done (LLM stage skipped, --no-llm)")
+            upsert_entry(
+                conn,
+                result.source_path,
+                source_hash=result.source_hash,
+                source_mtime=result.source_mtime,
+                source_size=result.source_size,
+                mathpix_status="success",
+                mathpix_pdf_id=process_result.pdf_id,
+                figure_count=process_result.figure_count,
+                page_count=process_result.page_count,
+                mathpix_processed_at=process_result.processed_at,
+            )
+            # Vault-writing still needs a content source -- reuse the raw
+            # .mathpix.md, the same fallback content cleanup_pdf() itself
+            # would use on an LLM failure (see LLMResult's docstring).
+            vault_errors, vault_conflicts = _write_to_vault(
+                conn,
+                result.source_path,
+                process_result.markdown_path,
+                cache_dir / "figures",
+                vault_course_dir,
+                result.source_mtime,
+                process_result.processed_at,
+                course_label,
+                filename,
+                output_config.figures_dark_mode_flag,
+                tags,
+                output_config.date_format,
+                naming_config.lecture_prefix,
+                force_vault_overwrite,
+            )
+            return _FileOutcome(
+                processed=1,
+                errors=vault_errors,
+                pages=process_result.page_count or 0,
+                vault_conflicts=vault_conflicts,
+            )
 
         lecture_stem = Path(result.source_path).stem
         llm_result = cleanup_pdf(
@@ -652,7 +739,12 @@ def _process_file(
     if entry is None or entry.mathpix_status != "success":
         return _FileOutcome(skipped=1)
 
-    if not (force_llm or needs_llm_reprocessing(entry)):
+    if no_llm or not (force_llm or needs_llm_reprocessing(entry)):
+        # Issue #46: no_llm=True unconditionally skips the LLM-only-rerun
+        # branch below, regardless of force_llm/needs_llm_reprocessing() --
+        # there's nothing for --no-llm to do to a file whose Mathpix stage
+        # is already cached and whose LLM stage isn't being run this pass
+        # anyway.
         if _needs_vault_conflict_retry(entry, force_vault_overwrite):
             # Issue #45 follow-up: neither force_llm nor
             # needs_llm_reprocessing() applies (this file's LLM stage
@@ -769,6 +861,7 @@ def run(
     dry_run: bool = False,
     force: bool = False,
     force_vault_overwrite: bool = False,
+    no_llm: bool = False,
 ) -> RunSummary:
     """
     Discover new/changed/failed-retry PDFs under paths_config.input_root (or,
@@ -869,6 +962,32 @@ def run(
             force_vault_overwrite with force_llm (or --rerun-llm) still
             works as before -- that reruns cleanup_pdf() too, same as any
             other forced LLM reprocessing.
+        no_llm: when True (issue #46, wired to --no-llm), skip the LLM
+            cleanup stage entirely for this run. On the actionable
+            NEW/CHANGED/RETRY path, process_pdf() still runs as normal,
+            but cleanup_pdf() is never called -- only mathpix_*/
+            figure_count/page_count/mathpix_processed_at are upserted to
+            state.db, leaving llm_status (and every other llm_*/
+            output_path field) untouched/NULL, exactly like a freshly-
+            discovered-but-not-yet-LLM-processed file. Since
+            needs_llm_reprocessing() already treats llm_status is None as
+            needing reprocessing, a later normal (non-no_llm) run
+            automatically picks the file up for a real LLM pass -- no new
+            state.db status value or extra bookkeeping needed. The vault
+            note is still written this run, sourced directly from
+            process_pdf()'s raw ProcessResult.markdown_path (the same
+            raw-.mathpix.md fallback content cleanup_pdf() itself would
+            use on an LLM failure); this never contributes an error just
+            for skipping the LLM stage by request (unlike a genuine LLM
+            fallback-to-raw, which does count as an error today). On the
+            UNCHANGED path, no_llm=True unconditionally skips the
+            LLM-only-rerun branch regardless of force_llm/
+            needs_llm_reprocessing() -- there is nothing for --no-llm to
+            do to a file whose Mathpix stage is already cached and whose
+            LLM stage isn't being (re)run this pass anyway, so it's simply
+            tallied as skipped (still composing with
+            force_vault_overwrite's own conflict-retry check on that same
+            path).
 
     Raises:
         ValueError: if both course and target_source_path are given.
@@ -942,6 +1061,7 @@ def run(
                 force_llm,
                 dry_run,
                 force_vault_overwrite,
+                no_llm,
                 course_label,
             )
             processed += outcome.processed
@@ -995,6 +1115,7 @@ def run(
                         force_llm,
                         dry_run,
                         force_vault_overwrite,
+                        no_llm,
                         course_name,
                     )
                     processed += outcome.processed
@@ -1048,13 +1169,14 @@ def main(argv: list[str] | None = None) -> int:
     -> record pipeline once, print a summary.
 
     --course (issue #41), --dry-run (issue #42), --force (issue #43),
-    --rerun-llm / --file (issue #44), and --force-vault-overwrite (issue
-    #45) are wired up so far -- --verbose and --no-llm are later Phase 7
-    issues. --force does not set force_llm=True itself, since forcing full
-    reprocessing already implies a fresh LLM pass regardless (see run()'s
-    docstring). Hits the real, paid Mathpix and LLM APIs -- same caution as
-    scripts/smoke_test_mathpix.py / scripts/smoke_test_llm.py (unless
-    --dry-run is given, which makes no API calls at all).
+    --rerun-llm / --file (issue #44), --force-vault-overwrite (issue #45),
+    and --no-llm (issue #46) are wired up so far -- --verbose is a later
+    Phase 7 issue. --force does not set force_llm=True itself, since
+    forcing full reprocessing already implies a fresh LLM pass regardless
+    (see run()'s docstring). Hits the real, paid Mathpix and LLM APIs --
+    same caution as scripts/smoke_test_mathpix.py / scripts/smoke_test_llm.py
+    (unless --dry-run or --no-llm is given, which skip the LLM API
+    entirely -- --dry-run additionally skips Mathpix too).
 
     --file is validated here, before run() is ever called: the path must
     exist, end in .pdf (case-insensitive), and resolve to somewhere under
@@ -1102,6 +1224,7 @@ def main(argv: list[str] | None = None) -> int:
         force_llm=args.rerun_llm,
         target_source_path=target_source_path,
         force_vault_overwrite=args.force_vault_overwrite,
+        no_llm=args.no_llm,
     )
     _print_summary(summary, dry_run=args.dry_run)
     return 0

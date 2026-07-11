@@ -5,7 +5,7 @@ Holds the argparse scaffolding for src/main.py's main() -- split into its own
 module rather than built inline in main() (a deliberate deviation from issue
 #41's literal "Add an argparse.ArgumentParser in main()" wording, confirmed
 with the user) since the full Phase 7 scope adds seven more flags across
-follow-up issues (#46, #48: --no-llm, --verbose/-v), several with their
+follow-up issues (#46: --no-llm, #48: --verbose/-v), several with their
 own cross-flag validation (e.g. --course/--file mutual exclusion). Keeping
 parser construction here mirrors the project's existing one-module-per-
 concern convention (src/config.py, src/discovery.py, etc.) and lets
@@ -27,9 +27,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     Build the CLI's argument parser.
 
     Currently --course NAME (issue #41), --dry-run (issue #42), --force
-    (issue #43), --rerun-llm / --file PATH (issue #44), and
-    --force-vault-overwrite (issue #45); later Phase 7 issues add
-    --no-llm / --verbose to this same parser.
+    (issue #43), --rerun-llm / --file PATH (issue #44),
+    --force-vault-overwrite (issue #45), and --no-llm (issue #46); a later
+    Phase 7 issue adds --verbose to this same parser.
     """
     parser = argparse.ArgumentParser(
         prog="notex",
@@ -113,6 +113,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "unconditionally with the pipeline's version instead of being "
             "skipped. A blunt, whole-run instrument: there is no way to "
             "target one conflicted file while leaving others alone."
+        ),
+    )
+    parser.add_argument(
+        "--no-llm",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip the LLM cleanup stage entirely for this run -- only the "
+            "Mathpix stage runs, and the vault note is written from the raw "
+            ".mathpix.md. llm_status stays unset in state.db, so a later "
+            "normal run (without --no-llm) automatically picks the file up "
+            "for a real LLM pass. Has no effect on an UNCHANGED file that "
+            "would otherwise only need its LLM stage (re)run -- there's "
+            "nothing for --no-llm to do there, so it's simply skipped."
         ),
     )
     return parser

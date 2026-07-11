@@ -524,7 +524,63 @@ narrative and real-data-validation findings.
   vault note is correctly overwritten; a matching `dry_run=True` companion
   test confirming the would-be retry is reported without touching
   anything.
-- Remaining issues (#46-#51) filed, not started yet. See "Phase 7 Plan"
+- **#46 (done)** — `src/main.py`'s `_process_file()`/`run()` gained a
+  `no_llm: bool = False` param. On the actionable NEW/CHANGED/RETRY path,
+  `no_llm=True` skips `cleanup_pdf()` entirely right after `process_pdf()`
+  succeeds: only `mathpix_status`/`mathpix_pdf_id`/`figure_count`/
+  `page_count`/`mathpix_processed_at` are upserted — every `llm_*` field
+  plus `output_path` are left untouched/`NULL`, deliberately not just
+  `llm_status` (confirmed with the user: `output_path` stays `NULL` too,
+  matching the issue's literal "only mathpix_* fields" wording, even
+  though nothing downstream currently reads `entry.output_path` while
+  `llm_status is None`). No new `"skipped"` status value — since
+  `needs_llm_reprocessing()` already treats `llm_status is None` as
+  needing reprocessing (no change needed there), a later normal
+  (non-`no_llm`) run automatically picks the file up for a real LLM pass.
+  The vault note is still written this run — `_write_to_vault()` is
+  called with `process_result.markdown_path` (the raw `.mathpix.md`) as
+  its content source and `process_result.processed_at` as its timestamp,
+  the same raw-fallback content `cleanup_pdf()` itself would use on an
+  LLM failure — tallied as `processed=1` with **no error** contribution
+  from skipping the LLM stage by request (confirmed with the user: this
+  is deliberately different from the existing "LLM fell back to raw →
+  `errors+=1`" rule, since skipping by explicit flag isn't a failure). On
+  the UNCHANGED path, the LLM-only-rerun trigger condition changed from
+  `force_llm or needs_llm_reprocessing(entry)` to `no_llm or not
+  (force_llm or needs_llm_reprocessing(entry))` — i.e. `no_llm=True`
+  unconditionally routes to the existing skip/vault-conflict-retry branch
+  regardless of `force_llm`/staleness, confirmed as the intended
+  interaction (there's nothing for `--no-llm` to do to a file whose
+  Mathpix stage is already cached and whose LLM stage isn't running this
+  pass anyway). Same gating applied to the `dry_run=True` short-circuit
+  branch. `src/cli.py` gained `--no-llm` (`action="store_true"`, default
+  `False`); `main()` forwards it into `run()`. `src/llm.py` needed no
+  changes at all — `needs_llm_reprocessing()`'s existing `llm_status is
+  None` check already provides the "picked up automatically" behavior the
+  issue asked for. Known narrow interaction (not fixed, not tested):
+  because `output_path` stays `NULL` on a `no_llm`-only-processed row,
+  `_needs_vault_conflict_retry()`'s `entry.output_path is not None`
+  requirement means `--force-vault-overwrite` alone can't retry a vault
+  conflict recorded against a file that was *only* ever processed with
+  `--no-llm` (no real LLM pass yet) — combining `--no-llm` with a
+  vault-conflict-clearing retry needs a real LLM pass first (or
+  `--rerun-llm`/`--force` alongside `--force-vault-overwrite`). Not
+  expected to come up in practice and not in this issue's scope to fix.
+  Tests added: `tests/test_main.py` — a `no_llm=True` run over a NEW file
+  records `mathpix_status="success"`/`llm_status=None` (and every other
+  `llm_*`/`output_path` field `None`), never calls the fake `cleanup_pdf`,
+  and writes a vault note containing the raw Mathpix content (not any
+  LLM-cleaned text); a second, plain (`no_llm=False`) run over that same
+  now-`UNCHANGED` file actually calls `cleanup_pdf()` via
+  `needs_llm_reprocessing()` with no further Mathpix API call, ending with
+  `llm_status="success"` and the vault note rewritten with the cleaned
+  content — exercised end-to-end per the issue's explicit ask, not just
+  asserted by inspection; `no_llm=True` combined with an UNCHANGED file
+  that's otherwise eligible for LLM-only reprocessing
+  (`llm_status=None`/`force_llm=True`) is skipped with zero `cleanup_pdf()`
+  calls; `tests/test_cli.py` parsing/defaults for `--no-llm`; a
+  `main()`-level flag-forwarding test mirroring `--force`'s precedent.
+- Remaining issues (#47-#51) filed, not started yet. See "Phase 7 Plan"
   under "Remaining Work — Phases 4-7 Plan" above for the full
   issue-by-issue breakdown and implementation order.
 

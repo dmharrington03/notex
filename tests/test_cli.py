@@ -1,14 +1,14 @@
 """
 Unit tests for src/cli.py (issue #41 — argparse scaffolding + --course NAME;
 issue #42 — --dry-run; issue #43 — --force; issue #44 — --rerun-llm and
---file PATH; issue #45 — --force-vault-overwrite).
+--file PATH; issue #45 — --force-vault-overwrite; issue #46 — --no-llm).
 
 Pure argparse-level tests: no PathsConfig/state.db/tmp_path fixtures needed,
 since build_arg_parser() has no dependency on the pipeline itself. See
 tests/test_main.py for run()/main()-level coverage of --course's/--dry-run's/
---force's/--rerun-llm's/--file's/--force-vault-overwrite's actual behavior
-(including --file's exists/.pdf/under-input_root validation, which lives in
-main(), not here).
+--force's/--rerun-llm's/--file's/--force-vault-overwrite's/--no-llm's actual
+behavior (including --file's exists/.pdf/under-input_root validation, which
+lives in main(), not here).
 """
 
 from __future__ import annotations
@@ -93,3 +93,15 @@ def test_force_vault_overwrite_flag_sets_true():
     args = build_arg_parser().parse_args(["--force-vault-overwrite"])
 
     assert args.force_vault_overwrite is True
+
+
+def test_no_llm_defaults_to_false_when_omitted():
+    args = build_arg_parser().parse_args([])
+
+    assert args.no_llm is False
+
+
+def test_no_llm_flag_sets_true():
+    args = build_arg_parser().parse_args(["--no-llm"])
+
+    assert args.no_llm is True
