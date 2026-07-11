@@ -106,6 +106,41 @@ Covered here (issue #43 — --force):
       regression to the existing actionable path.
     - main(): a --force argv flag is parsed and forwarded into run() as its
       force= kwarg.
+
+Covered here (issue #44 — --rerun-llm / --file):
+    - main(): --rerun-llm/--file argv flags are parsed and forwarded into
+      run() as its force_llm=/target_source_path= kwargs.
+    - main(): --file is rejected (exit code 1, run() never called) when
+      the path doesn't exist, doesn't end in .pdf (case-insensitive
+      accepted), or resolves outside paths.input_root.
+    - main(): --file combined with --rerun-llm reprocesses only the
+      target's LLM stage when it's UNCHANGED (no Mathpix call), leaving a
+      sibling file's state.db row untouched -- the documented "reprocess
+      just this one lecture's LLM stage after tweaking the prompt"
+      workflow, exercised end-to-end through main(argv) itself.
+
+Covered here (issue #45 — --force-vault-overwrite):
+    - run(): force_vault_overwrite=True clears a previously-recorded
+      vault_status="conflict" -- the manually-edited vault note is
+      overwritten with the pipeline's content, vault_status returns to
+      "success", and a fresh vault_path/vault_written_at/
+      vault_content_hash are recorded. RunSummary.vault_conflicts stays 0
+      for that file, since the write was never actually skipped.
+    - run(): force_vault_overwrite=False (the default) leaves issue #40's
+      conflict-preserving behavior completely unaffected.
+    - main(): a --force-vault-overwrite argv flag is parsed and forwarded
+      into run() as its force_vault_overwrite= kwarg.
+    - run(): force_vault_overwrite=True passed *alone* (no force_llm/
+      --rerun-llm) still retries the vault write for a file that's
+      UNCHANGED with mathpix_status="success"/llm_status="success" already
+      recorded but whose vault write was recorded as a conflict -- a
+      real-world gap found after this issue's initial implementation (see
+      _needs_vault_conflict_retry()): reuses the cached LLM output with no
+      new Mathpix/LLM API calls, tallied as skipped (not llm_reprocessed,
+      since no LLM call happened).
+    - run(): the same scenario under dry_run=True reports the would-be
+      vault-write retry (tallied as skipped) without touching the vault
+      file, state.db, or calling cleanup_pdf().
 """
 
 from __future__ import annotations
@@ -815,6 +850,304 @@ def test_run_detects_manually_edited_vault_note_and_skips_overwrite(
 
 
 @respx.mock
+def test_run_force_vault_overwrite_clears_recorded_conflict(client, tmp_path, monkeypatch):
+    """
+    Issue #45: force_vault_overwrite=True is the escape hatch for a
+    previously-recorded vault_status="conflict" (issue #40) -- the user
+    has decided the pipeline's version should win, so a subsequent run
+    with the flag set overwrites the manually-edited vault note
+    unconditionally and clears vault_status back to "success" with a
+    fresh vault_content_hash/vault_path/vault_written_at.
+
+    Scenario: same conflict setup as
+    test_run_detects_manually_edited_vault_note_and_skips_overwrite (a
+    successful first write, a manual edit, then a reprocessing run that
+    detects the conflict and skips), followed by a third run with
+    force_vault_overwrite=True.
+    """
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf", b"original pdf bytes")
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(monkeypatch, status="success", content="first cleaned markdown")
+
+    first_summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
+    assert first_summary.vault_conflicts == 0
+    entry_after_first = get_entry(conn, str(pdf_path.resolve()))
+    vault_path = Path(entry_after_first.vault_path)
+    original_vault_content_hash = entry_after_first.vault_content_hash
+
+    # Simulate a manual edit, then change the source PDF to force
+    # reprocessing (mirrors the #40 test's setup exactly).
+    manual_content = "MANUALLY EDITED -- do not clobber!\n"
+    vault_path.write_text(manual_content, encoding="utf-8")
+    _write_pdf(pdf_path, b"changed pdf bytes -- forces reprocessing")
+    _install_fake_cleanup_pdf(monkeypatch, status="success", content="second cleaned markdown")
+
+    second_summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
+    assert second_summary.vault_conflicts == 1
+
+    entry_after_second = get_entry(conn, str(pdf_path.resolve()))
+    assert entry_after_second.vault_status == "conflict"
+    assert vault_path.read_text(encoding="utf-8") == manual_content
+
+    # Third run: same already-reprocessed state (UNCHANGED now), but with
+    # force_vault_overwrite=True -- the conflict must clear.
+    third_summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        force_llm=True,
+        force_vault_overwrite=True,
+    )
+
+    assert third_summary.errors == 0
+    assert third_summary.vault_conflicts == 0
+
+    entry_after_third = get_entry(conn, str(pdf_path.resolve()))
+    assert entry_after_third.vault_status == "success"
+    assert entry_after_third.vault_content_hash is not None
+    assert entry_after_third.vault_content_hash != original_vault_content_hash
+    # The manual edit is gone -- overwritten with the pipeline's content.
+    written = vault_path.read_text(encoding="utf-8")
+    assert "second cleaned markdown" in written
+    assert "MANUALLY EDITED" not in written
+
+
+@respx.mock
+def test_run_force_vault_overwrite_leaves_non_conflicting_write_unaffected(
+    client, tmp_path, monkeypatch
+):
+    """Issue #45: force_vault_overwrite=True on a file with no recorded
+    conflict behaves identically to a normal write -- vault_status is
+    "success" and the content matches, same as force_vault_overwrite's
+    default (False)."""
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(monkeypatch, status="success", content="cleaned markdown")
+
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        force_vault_overwrite=True,
+    )
+
+    assert summary.errors == 0
+    assert summary.vault_conflicts == 0
+    entry = get_entry(conn, str(pdf_path.resolve()))
+    assert entry.vault_status == "success"
+    assert "cleaned markdown" in Path(entry.vault_path).read_text(encoding="utf-8")
+
+
+@respx.mock
+def test_run_force_vault_overwrite_alone_retries_vault_write_without_rerun_llm(
+    client, tmp_path, monkeypatch
+):
+    """
+    Regression test for a real-world gap found after issue #45's initial
+    implementation: force_vault_overwrite=True passed *alone* (no
+    force_llm/--rerun-llm) must still retry the vault write for a file
+    that's UNCHANGED with mathpix_status="success" and llm_status="success"
+    already recorded (e.g. from a prior run that fully reprocessed it) but
+    whose vault write was recorded as a conflict.
+
+    Before this fix: needs_llm_reprocessing() returns False once
+    llm_status="success" is recorded, so with force_llm left at its
+    default (False), the file was fully skipped by _process_file() before
+    it ever reached _write_to_vault() again -- force_vault_overwrite had
+    no effect at all in this scenario, since nothing routed the file back
+    through a branch that calls _write_to_vault().
+
+    Scenario: process a file successfully; manually edit its vault note;
+    change the source PDF so the next run reprocesses it fully (mathpix +
+    llm), detecting and recording the conflict; then, with the source PDF
+    left unchanged (UNCHANGED classification) and llm_status already
+    "success", run a third time with force_vault_overwrite=True alone --
+    the vault write must be retried (no new Mathpix/LLM API calls), the
+    manual edit overwritten, and vault_status returned to "success".
+    """
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf", b"original pdf bytes")
+
+    submit_route = _mock_happy_path()
+    _install_fake_cleanup_pdf(monkeypatch, status="success", content="first cleaned markdown")
+
+    first_summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
+    assert first_summary.vault_conflicts == 0
+    assert submit_route.call_count == 1
+
+    entry_after_first = get_entry(conn, str(pdf_path.resolve()))
+    vault_path = Path(entry_after_first.vault_path)
+
+    # Manual edit to the vault note, then change the source PDF so the
+    # next run reprocesses it fully (same setup as the #40 conflict test).
+    manual_content = "MANUALLY EDITED -- do not clobber!\n"
+    vault_path.write_text(manual_content, encoding="utf-8")
+    _write_pdf(pdf_path, b"changed pdf bytes -- forces reprocessing")
+    llm_calls = _install_fake_cleanup_pdf(
+        monkeypatch, status="success", content="second cleaned markdown"
+    )
+
+    second_summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
+    assert second_summary.vault_conflicts == 1
+    assert submit_route.call_count == 2
+    assert len(llm_calls) == 1
+
+    entry_after_second = get_entry(conn, str(pdf_path.resolve()))
+    assert entry_after_second.vault_status == "conflict"
+    assert entry_after_second.mathpix_status == "success"
+    assert entry_after_second.llm_status == "success"
+    assert vault_path.read_text(encoding="utf-8") == manual_content
+
+    # Third run: source PDF unchanged since run 2 (UNCHANGED
+    # classification) and llm_status is already "success" -- not eligible
+    # for needs_llm_reprocessing(). Only force_vault_overwrite is passed,
+    # deliberately without force_llm/--rerun-llm.
+    third_summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        force_vault_overwrite=True,
+    )
+
+    assert third_summary.errors == 0
+    assert third_summary.vault_conflicts == 0
+    assert third_summary.processed == 0
+    assert third_summary.llm_reprocessed == 0
+    assert third_summary.skipped == 1
+    # No additional Mathpix/LLM calls -- only the vault write was retried.
+    assert submit_route.call_count == 2
+    assert len(llm_calls) == 1
+
+    entry_after_third = get_entry(conn, str(pdf_path.resolve()))
+    assert entry_after_third.vault_status == "success"
+    assert entry_after_third.vault_content_hash is not None
+    written = vault_path.read_text(encoding="utf-8")
+    assert "second cleaned markdown" in written
+    assert "MANUALLY EDITED" not in written
+
+
+@respx.mock
+def test_run_dry_run_reports_vault_conflict_retry_without_writing(client, tmp_path, monkeypatch):
+    """
+    Companion dry-run coverage for the regression test above: --dry-run
+    --force-vault-overwrite on the same UNCHANGED/llm-already-succeeded/
+    recorded-conflict scenario reports the would-be vault-write retry
+    (tallied as skipped, mirroring the real run's tally) without touching
+    the vault file, state.db, or calling cleanup_pdf().
+    """
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf", b"original pdf bytes")
+
+    submit_route = _mock_happy_path()
+    _install_fake_cleanup_pdf(monkeypatch, status="success", content="first cleaned markdown")
+
+    run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
+    entry_after_first = get_entry(conn, str(pdf_path.resolve()))
+    vault_path = Path(entry_after_first.vault_path)
+    manual_content = "MANUALLY EDITED -- do not clobber!\n"
+    vault_path.write_text(manual_content, encoding="utf-8")
+    _write_pdf(pdf_path, b"changed pdf bytes -- forces reprocessing")
+    llm_calls = _install_fake_cleanup_pdf(
+        monkeypatch, status="success", content="second cleaned markdown"
+    )
+
+    run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
+    assert get_entry(conn, str(pdf_path.resolve())).vault_status == "conflict"
+    assert submit_route.call_count == 2
+    assert len(llm_calls) == 1
+
+    dry_run_summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        force_vault_overwrite=True,
+        dry_run=True,
+    )
+
+    assert dry_run_summary.skipped == 1
+    assert dry_run_summary.processed == 0
+    assert dry_run_summary.llm_reprocessed == 0
+    assert dry_run_summary.errors == 0
+    assert dry_run_summary.vault_conflicts == 0
+    # Nothing actually happened -- no new API calls, vault untouched,
+    # state.db's vault_status still "conflict".
+    assert submit_route.call_count == 2
+    assert len(llm_calls) == 1
+    assert vault_path.read_text(encoding="utf-8") == manual_content
+    assert get_entry(conn, str(pdf_path.resolve())).vault_status == "conflict"
+
+
+@respx.mock
 def test_run_skips_ungrouped_pdfs_without_writing_state(client, tmp_path, monkeypatch):
     paths_config = _make_paths_config(tmp_path)
     conn = init_db(paths_config.state_db)
@@ -1321,6 +1654,26 @@ def test_main_parses_force_flag_and_forwards_it_to_run(monkeypatch, tmp_path):
     assert received_kwargs["force"] is True
 
 
+def test_main_parses_force_vault_overwrite_flag_and_forwards_it_to_run(monkeypatch, tmp_path):
+    import src.main as main_module
+
+    paths_config = _make_paths_config(tmp_path)
+    monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+
+    received_kwargs: dict = {}
+
+    def _fake_run(paths_config, conn, **kwargs):
+        received_kwargs.update(kwargs)
+        return RunSummary(processed=0, skipped=0, errors=0, ungrouped=0)
+
+    monkeypatch.setattr(main_module, "run", _fake_run)
+
+    exit_code = main(["--force-vault-overwrite"])
+
+    assert exit_code == 0
+    assert received_kwargs["force_vault_overwrite"] is True
+
+
 def test_main_parses_rerun_llm_flag_and_forwards_it_to_run(monkeypatch, tmp_path):
     import src.main as main_module
 
@@ -1606,7 +1959,7 @@ def test_main_returns_zero_and_prints_summary_even_with_errors(monkeypatch, tmp_
     monkeypatch.setattr(
         main_module,
         "run",
-        lambda paths_config, conn, client=None, course=None, dry_run=False, force=False, force_llm=False, target_source_path=None: RunSummary(
+        lambda paths_config, conn, client=None, course=None, dry_run=False, force=False, force_llm=False, target_source_path=None, force_vault_overwrite=False: RunSummary(
             processed=1,
             skipped=2,
             errors=1,

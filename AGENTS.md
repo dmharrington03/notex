@@ -129,9 +129,8 @@ freshly-written vault notes, then reran with `force_llm=True` (no CLI flag
 for this yet) — both correctly skipped with `vault_status="conflict"`,
 manual edits preserved byte-for-byte, `vault_path`/`vault_content_hash`/
 `vault_written_at` unchanged, reprocessed content landed in `_cache/` as
-expected. Still open: nothing yet lets a conflict be resolved/cleared once
-recorded (the deferred `--force-vault-overwrite` flag is the intended
-fix, Phase 7).
+expected. The escape hatch this note originally deferred is now
+implemented — see issue #45's entry below (`--force-vault-overwrite`).
 
 **Known interaction between #39 (won't-fix) and #40's conflict
 detection**: `state.db` only tracks a single `vault_path`/
@@ -145,8 +144,8 @@ correctly-but-unhelpfully surfaces as `vault_status="conflict"` on the
 revert, even though nobody manually touched the orphaned file. Accepted
 as a narrow, foreseeable edge case of combining "leave orphans" (#39)
 with hash-baseline conflict detection (#40) — not planned to be
-specifically handled; the deferred `--force-vault-overwrite` flag (Phase
-7) is the general escape hatch for this too.
+specifically handled; `--force-vault-overwrite` (issue #45) is the
+general escape hatch for this too, same as any other recorded conflict.
 
 **Scope correction — `output.base_tags` (a global/default tag list) is
 dropped entirely, not deferred.** docs/spec.md's `output:` schema included
@@ -447,7 +446,85 @@ narrative and real-data-validation findings.
   `--file X --rerun-llm` end-to-end workflow test through `main(argv)`
   itself (not just `run()` directly) confirming the LLM-only-hit behavior
   and that a sibling file's state.db row is untouched.
-- Remaining issues (#45-#51) filed, not started yet. See "Phase 7 Plan"
+- **#45 (done)** — `src/vault.py`'s `write_lecture_note()` gained a
+  `force_overwrite: bool = False` param — when `True`, bypasses issue
+  #40's `previous_content_hash` conflict check entirely (the condition
+  became `if not force_overwrite and previous_content_hash is not None
+  and output_path.exists():`), behaving exactly like the no-baseline
+  (`previous_content_hash=None`) case: unconditional write,
+  `written=True` always. `src/main.py`'s `_write_to_vault()` gained a
+  matching `force_overwrite` param forwarded straight through — no other
+  logic changes needed there, since the existing success-path
+  `upsert_entry(vault_status="success", ...)` already runs whenever
+  `written=True`, so a forced write naturally clears a stale
+  `vault_status="conflict"` for free. `_process_file()`/`run()` gained a
+  `force_vault_overwrite: bool = False` param, threaded to both
+  `_write_to_vault()` call sites (actionable NEW/CHANGED/RETRY path and
+  the UNCHANGED LLM-only-rerun path — a conflict can be detected on
+  either). `src/cli.py` gained `--force-vault-overwrite`
+  (`action="store_true"`, default `False`); `main()` forwards it into
+  `run()`. Confirmed with the user: a force-overwritten file never counts
+  toward `RunSummary.vault_conflicts` (falls out for free from
+  `written=True` skipping the `(0, 1)`-conflict return branch entirely —
+  not a new decision, just how the existing branching already works).
+  Confirmed with the user this is deliberately a blunt, whole-run
+  instrument — no per-file conflict targeting, documented as an accepted
+  Phase 7 scope limit and a possible future refinement, not a gap.
+  Drive-by fix while touching these docstrings: two stale
+  "no CLI flag yet" mentions of `target_source_path`/`force_llm` in
+  `run()`'s module docstring (predating issue #44's actual `--file`/
+  `--rerun-llm` wiring) were corrected to reference issue #44. Tests
+  added: `tests/test_vault.py`'s `force_overwrite=True` bypasses a
+  reconstructed conflict scenario (mirroring #40's existing conflict
+  test) — `written=True`, manual edit overwritten, figures still copied
+  normally; `tests/test_cli.py` parsing/defaults for
+  `--force-vault-overwrite`; `tests/test_main.py`'s
+  `run(force_vault_overwrite=True)` clears a previously-recorded
+  `vault_status="conflict"` (reusing #40's existing conflict-reproduction
+  setup as a third run) with a fresh `vault_content_hash`/`vault_path`/
+  `vault_written_at` and `vault_conflicts == 0`; a non-conflicting file's
+  write is unaffected by `force_vault_overwrite=True` (identical to the
+  default-False behavior); `main()`-level flag-forwarding test mirroring
+  `--force`'s precedent.
+  **Follow-up fix (found via real-behavior testing, same issue/commit):**
+  the initial implementation above only threaded `force_vault_overwrite`
+  into `_write_to_vault()` calls that were already going to happen —
+  it missed that a file which is `UNCHANGED` with `mathpix_status`/
+  `llm_status` both already `"success"` (e.g. a file a *prior* run fully
+  reprocessed, whose vault write was then recorded as a conflict) is
+  fully skipped by `_process_file()` *before* ever reaching
+  `_write_to_vault()` again, since `needs_llm_reprocessing()` correctly
+  returns `False` once `llm_status="success"` is recorded. Concretely:
+  run once cleanly, manually edit the vault note, edit the source
+  `.md`/PDF, rerun (correctly reprocesses and records the conflict as
+  designed), then rerun a third time with *only* `--force-vault-overwrite`
+  (no `--rerun-llm`) — the file was silently skipped with no vault
+  retry at all, since nothing routed it back through a code path that
+  calls `_write_to_vault()`. Fixed with a new `_needs_vault_conflict_retry
+  (entry, force_vault_overwrite)` helper, consulted at the exact point
+  `_process_file()`'s `UNCHANGED` branch would otherwise return
+  `skipped=1`: when `force_vault_overwrite=True` and `entry.vault_status
+  == "conflict"` (deliberately not `"failed"` — an unrelated failure like
+  a bad filename isn't something this flag can fix — or `"success"` —
+  nothing to retry), the vault write alone is retried, reusing
+  `entry.output_path`/`entry.llm_processed_at` as `_write_to_vault()`'s
+  content source/timestamp with **no `cleanup_pdf()` call** (the LLM
+  stage itself doesn't need to rerun, only the write does) — tallied as
+  `skipped` (not `llm_reprocessed`, since no LLM call happened). The same
+  check is threaded into `dry_run=True`'s short-circuit branch too, so a
+  `--dry-run --force-vault-overwrite` report stays accurate for this case
+  (also tallied as `skipped`, printing "would retry vault write" instead).
+  Combining `force_vault_overwrite` with `force_llm`/`--rerun-llm` is
+  unaffected — that still reruns `cleanup_pdf()` as before, this new path
+  only applies when neither would otherwise trigger any work. Tests
+  added: a full regression test in `tests/test_main.py` reproducing the
+  exact reported scenario end-to-end (clean run → manual edit + source
+  change → conflict recorded → third run with `force_vault_overwrite`
+  alone), asserting no additional Mathpix/LLM API calls happened and the
+  vault note is correctly overwritten; a matching `dry_run=True` companion
+  test confirming the would-be retry is reported without touching
+  anything.
+- Remaining issues (#46-#51) filed, not started yet. See "Phase 7 Plan"
   under "Remaining Work — Phases 4-7 Plan" above for the full
   issue-by-issue breakdown and implementation order.
 

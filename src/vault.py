@@ -21,6 +21,7 @@ Implementation status:
       real config wiring surfaced the missing param)
     - write_lecture_note()'s previous_content_hash param / manual-edit
       conflict detection   implemented (issue #40)
+    - write_lecture_note()'s force_overwrite param   implemented (issue #45)
 
 Deliberately no config.py reading here — dark_mode/tags/date_format/
 lecture_prefix are taken as plain params (same precedent as
@@ -67,9 +68,12 @@ class VaultWriteResult:
       was skipped due to a conflict (issue #40; figures are never touched
       when a conflict is detected).
     - written: whether output_path was actually (over)written this call.
-      False only when previous_content_hash was given, output_path already
-      existed on disk, and its current content hash didn't match --
-      i.e. a manually-edited vault note was detected (issue #40).
+      False only when force_overwrite is False, previous_content_hash was
+      given, output_path already existed on disk, and its current content
+      hash didn't match -- i.e. a manually-edited vault note was detected
+      (issue #40). force_overwrite=True (issue #45) bypasses this check
+      entirely, so written is always True on that path (barring a real
+      I/O error).
     - content_hash: the SHA-256 hex digest of the content just written,
       when written is True. None when written is False (nothing was
       written this call, so there's no new hash to report).
@@ -94,6 +98,7 @@ def write_lecture_note(
     date_format: str = DATE_FORMAT,
     lecture_prefix: str = DEFAULT_LECTURE_PREFIX,
     previous_content_hash: str | None = None,
+    force_overwrite: bool = False,
 ) -> VaultWriteResult:
     """
     Assemble and write a single lecture's final vault Markdown file.
@@ -159,6 +164,15 @@ def write_lecture_note(
             manually edited and is left untouched -- no figure copy, no
             content read/rewrite, nothing under vault/{course}/... is
             touched at all for this call (see VaultWriteResult.written).
+        force_overwrite: when True (issue #45), bypasses the
+            previous_content_hash conflict check entirely -- the write
+            proceeds unconditionally, exactly as if previous_content_hash
+            were None, regardless of what previous_content_hash actually
+            is or whether it would otherwise mismatch. This is the escape
+            hatch for a manually-edited vault note the caller has decided
+            the pipeline's version should overwrite. Defaults to False
+            (issue #40's conflict-preserving behavior is unaffected unless
+            a caller explicitly opts in).
 
     Returns:
         A VaultWriteResult recording the target output_path, the
@@ -186,7 +200,7 @@ def write_lecture_note(
         vault_course_dir / f"{lecture_prefix} {info.lecture_number:02d}.md"
     )
 
-    if previous_content_hash is not None and output_path.exists():
+    if not force_overwrite and previous_content_hash is not None and output_path.exists():
         current_hash = hashlib.sha256(output_path.read_bytes()).hexdigest()
         if current_hash != previous_content_hash:
             # Manually edited since our last write -- skip the write

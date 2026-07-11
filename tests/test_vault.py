@@ -25,6 +25,10 @@ Covered here:
       (no figure copy, content preserved); a matching hash overwrites
       normally; no baseline (None) with a pre-existing file overwrites,
       matching pre-#40 behavior
+    - force_overwrite=True (issue #45): bypasses the previous_content_hash
+      conflict check entirely, overwriting a manually-edited vault file
+      unconditionally -- the default (force_overwrite=False) leaves
+      issue #40's conflict-preserving behavior completely unaffected
 
 All tmp_path-backed, no mocking, no network (matches tests/test_figures.py's
 precedent).
@@ -427,6 +431,50 @@ def test_conflict_detected_skips_write_entirely(tmp_path):
     assert output_path.read_text(encoding="utf-8") == manual_content
     # Figures must never be copied/overwritten on a conflict.
     assert not (vault_course_dir / "figures").exists()
+
+
+def test_force_overwrite_bypasses_conflict_detection(tmp_path):
+    """Issue #45: force_overwrite=True bypasses the previous_content_hash
+    conflict check entirely -- a manually-edited vault note is overwritten
+    unconditionally, exactly as if previous_content_hash were None."""
+    source_pdf = tmp_path / "notes_raw" / "class_1" / "lecture_02.pdf"
+    source_pdf.parent.mkdir(parents=True)
+    source_pdf.write_bytes(b"fake-pdf")
+    content_path = _make_content_file(tmp_path, "New pipeline content.\n")
+    cache_figures_dir = tmp_path / "_cache" / "class_1" / "figures"
+    cache_figures_dir.mkdir(parents=True)
+    (cache_figures_dir / "lecture_02_fig_001.jpg").write_bytes(b"fake-jpeg")
+    vault_course_dir = tmp_path / "vault" / "class_1"
+    vault_course_dir.mkdir(parents=True)
+
+    # Same manually-edited-vault-note setup as
+    # test_conflict_detected_skips_write_entirely -- a stale hash that
+    # would otherwise be detected as a conflict.
+    manual_content = "Manually edited notes -- do not clobber!\n"
+    output_path = vault_course_dir / "Lecture 02.md"
+    output_path.write_text(manual_content, encoding="utf-8")
+    stale_hash = hashlib.sha256(b"original pipeline content").hexdigest()
+
+    result = write_lecture_note(
+        source_pdf_path=source_pdf,
+        content_source_path=content_path,
+        course_cache_figures_dir=cache_figures_dir,
+        vault_course_dir=vault_course_dir,
+        source_mtime=datetime(2024, 1, 15).timestamp(),
+        processed_at=datetime(2024, 1, 16, tzinfo=timezone.utc),
+        previous_content_hash=stale_hash,
+        force_overwrite=True,
+    )
+
+    assert result.written is True
+    assert result.content_hash is not None
+    assert result.output_path == output_path
+    # The manual edit is gone -- overwritten with the pipeline's content.
+    written = output_path.read_text(encoding="utf-8")
+    assert "New pipeline content." in written
+    assert "Manually edited notes" not in written
+    # Figures are copied normally too, unlike the skipped-conflict path.
+    assert (vault_course_dir / "figures" / "lecture_02_fig_001.jpg").is_file()
 
 
 def test_no_conflict_hash_matches_overwrites_normally(tmp_path):

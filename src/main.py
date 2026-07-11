@@ -11,15 +11,16 @@ lecture_prefix params. Phase 7 (issue #41) adds real argparse scaffolding
 (src/cli.py's build_arg_parser()) and the first flag, --course NAME; issue
 #42 adds --dry-run; issue #43 adds --force; issue #44 adds --rerun-llm and
 --file PATH (thin CLI surfaces for the already-existing force_llm/
-target_source_path params below -- no new pipeline logic). The remaining
-flags (--verbose, and the eventual --force-vault-overwrite / --no-llm) are
+target_source_path params below -- no new pipeline logic); issue #45 adds
+--force-vault-overwrite (issue #40's escape hatch for clearing a detected
+vault_status="conflict"). The remaining flags (--verbose, --no-llm) are
 later Phase 7 issues per docs/spec.md's roadmap.
 
 Two entry points:
     - run(paths_config, conn, client=None, llm_config=None,
           output_config=None, naming_config=None, force_llm=False,
           target_source_path=None, course=None, dry_run=False,
-          force=False) -> RunSummary
+          force=False, force_vault_overwrite=False) -> RunSummary
         The core, directly testable orchestration logic. Takes an already-
         loaded PathsConfig and an already-open state.db connection so tests
         can supply a tmp_path input_root tree, a real temp state.db, and an
@@ -68,6 +69,8 @@ Per-file flow (see AGENTS.md issue #11/#18 notes):
       untouched (they still correctly describe the last file we actually
       wrote). This is expected, handled behavior, not an error -- tallied
       separately as RunSummary.vault_conflicts, not folded into errors.
+      force_vault_overwrite=True (issue #45) bypasses this detection
+      entirely -- see its own bullet below.
     - UNGROUPED_COURSE_KEY files (PDFs directly under input_root, not in any
       course subfolder) are, in the normal (non-target_source_path) run,
       deliberately *not* processed: there's no course to mirror in
@@ -76,7 +79,8 @@ Per-file flow (see AGENTS.md issue #11/#18 notes):
       than folded into processed/skipped/errors. The one exception is the
       target_source_path branch below, which force-processes an ungrouped
       target file anyway (see its own docstring note).
-    - target_source_path (issue #18 infra, no CLI flag yet): when given,
+    - target_source_path (issue #18 infra, wired to --file since issue #44):
+      when given,
       restricts the entire run to exactly that one PDF instead of walking
       discover_pdfs() over all of input_root. Its course is resolved from
       the path's first component relative to input_root (or
@@ -90,7 +94,8 @@ Per-file flow (see AGENTS.md issue #11/#18 notes):
       discovery.py). Combined with force_llm=True, this gives exactly the
       "reprocess just this one lecture's LLM stage after tweaking the
       prompt" workflow described in AGENTS.md.
-    - force_llm=True (issue #18 infra, no CLI flag yet): bypasses
+    - force_llm=True (issue #18 infra, wired to --rerun-llm since issue
+      #44): bypasses
       needs_llm_reprocessing() for UNCHANGED files, reprocessing every
       eligible file's LLM stage with the currently configured
       llm.prompt_version regardless of its stored status/version. Never
@@ -126,6 +131,21 @@ Per-file flow (see AGENTS.md issue #11/#18 notes):
       way is reported as "would process" rather than "would reprocess LLM
       stage only", since the short-circuit in _process_file() also
       branches off the already-reclassified result).
+    - force_vault_overwrite=True (issue #45, wired to
+      --force-vault-overwrite): bypasses issue #40's manually-edited-vault-
+      note conflict detection for every file this run -- a file that would
+      otherwise be recorded as vault_status="conflict" is instead
+      overwritten unconditionally with the pipeline's version, forwarded
+      straight through _write_to_vault() into write_lecture_note()'s own
+      force_overwrite param (see src/vault.py). A forced write always sets
+      written=True, so RunSummary.vault_conflicts never counts a
+      force-overwritten file -- there's no code branch left for it to hit.
+      Deliberately a blunt, whole-run instrument: there is no way to force
+      just one conflicted file while leaving other conflicts (if any)
+      alone this run -- a possible future refinement, not in this issue's
+      scope. Composes with both _write_to_vault() call sites (the
+      actionable NEW/CHANGED/RETRY path and the UNCHANGED LLM-only-rerun
+      path), since a conflict can be detected on either one.
 
 A single MathpixClient and a single LLMClient are each constructed once per
 run() call (when not injected/configured) and reused across every file in
@@ -186,7 +206,7 @@ from src.discovery import (
 from src.llm import LLMClient, cleanup_pdf, needs_llm_reprocessing
 from src.mathpix import MathpixClient, MathpixError, process_pdf
 from src.postprocess import PostprocessError, resolve_tags
-from src.state import get_entry, init_db, upsert_entry
+from src.state import StateEntry, get_entry, init_db, upsert_entry
 from src.vault import write_lecture_note
 
 # Reserved cache_dir subfolder name for a force-processed ungrouped
@@ -223,6 +243,41 @@ def _apply_force(result: ClassificationResult, force: bool) -> ClassificationRes
     if force and result.classification == Classification.UNCHANGED:
         return replace(result, classification=Classification.RETRY)
     return result
+
+
+def _needs_vault_conflict_retry(entry: StateEntry | None, force_vault_overwrite: bool) -> bool:
+    """
+    Issue #45 follow-up: whether an UNCHANGED file whose Mathpix/LLM stages
+    are both already successful (so neither needs_llm_reprocessing() nor
+    force_llm would trigger any reprocessing) still needs its vault-write
+    stage retried this run.
+
+    Without this check, such a file is fully skipped by _process_file()
+    before it ever reaches _write_to_vault() again -- so
+    force_vault_overwrite=True alone could never take effect for a file
+    whose *previous* run already reprocessed it but had its vault write
+    skipped as a conflict (issue #40): state.db already shows
+    mathpix_status="success"/llm_status="success" from that previous run,
+    making it ineligible for LLM-only reprocessing on every subsequent run,
+    with nothing else short of a real source-file change (or --force) ever
+    routing it back through a branch that calls _write_to_vault() again.
+
+    True only when force_vault_overwrite is True, entry exists, its
+    vault_status is exactly "conflict" (not "failed" or "success" -- an
+    unrelated vault failure, e.g. a bad filename, isn't something
+    force_overwrite can fix, and there's nothing to retry if it already
+    succeeded), and it has both a cached output_path and llm_processed_at
+    to reuse as _write_to_vault()'s content_source_path/processed_at
+    (skipping cleanup_pdf() entirely, since the LLM stage itself doesn't
+    need to rerun -- only the vault write does).
+    """
+    return (
+        force_vault_overwrite
+        and entry is not None
+        and entry.vault_status == "conflict"
+        and entry.output_path is not None
+        and entry.llm_processed_at is not None
+    )
 
 
 @dataclass(frozen=True)
@@ -271,6 +326,7 @@ def _write_to_vault(
     tags: tuple[str, ...],
     date_format: str,
     lecture_prefix: str,
+    force_overwrite: bool,
 ) -> tuple[int, int]:
     """
     Write this file's final vault Markdown note (src/vault.py's
@@ -311,6 +367,11 @@ def _write_to_vault(
             param (used for both the output filename and the frontmatter
             title) -- the caller resolves this from
             NamingConfig.lecture_prefix (issue #37).
+        force_overwrite: forwarded verbatim to write_lecture_note()'s
+            force_overwrite param (issue #45) -- the caller resolves this
+            from run()'s force_vault_overwrite param. When True, bypasses
+            the previous_content_hash conflict check below entirely, so
+            this call can never return a (0, 1) conflict tuple.
 
     Returns:
         A (errors, conflicts) tuple -- each 1 or 0, never both 1 at once.
@@ -339,6 +400,10 @@ def _write_to_vault(
     and only vault_status="conflict" is recorded -- vault_path/
     vault_written_at/vault_content_hash are left untouched, since they
     still correctly describe the last file this pipeline actually wrote.
+    force_overwrite=True (issue #45) bypasses this detection entirely --
+    write_lecture_note() then always reports written=True, so this
+    function always falls through to the normal success-path upsert below
+    instead, clearing any previously-recorded vault_status="conflict".
     """
     entry = get_entry(conn, source_path)
     previous_content_hash = entry.vault_content_hash if entry is not None else None
@@ -356,6 +421,7 @@ def _write_to_vault(
             date_format=date_format,
             lecture_prefix=lecture_prefix,
             previous_content_hash=previous_content_hash,
+            force_overwrite=force_overwrite,
         )
     except (PostprocessError, OSError) as exc:
         print(f"[{course_label}] {filename}: vault write FAILED: {exc}")
@@ -399,6 +465,7 @@ def _process_file(
     conn: sqlite3.Connection,
     force_llm: bool,
     dry_run: bool,
+    force_vault_overwrite: bool,
     course_label: str,
 ) -> _FileOutcome:
     """
@@ -447,6 +514,20 @@ def _process_file(
             accurate would-be counts without doing any real work --
             errors/vault_conflicts always stay 0 in dry-run since nothing
             can fail.
+        force_vault_overwrite: issue #45 -- forwarded verbatim to every
+            _write_to_vault() call's force_overwrite param, bypassing
+            issue #40's manually-edited-vault-note conflict check for this
+            file. A forced write always succeeds (barring a real I/O
+            error), so it can never contribute to the returned
+            _FileOutcome.vault_conflicts. Also consulted (via
+            _needs_vault_conflict_retry()) on the UNCHANGED path below when
+            neither force_llm nor needs_llm_reprocessing() would otherwise
+            trigger any work: if this file's last vault-write attempt was
+            recorded as a conflict, the vault write alone is retried
+            (reusing the cached LLM output, no cleanup_pdf() call) rather
+            than the file being fully skipped -- otherwise
+            force_vault_overwrite could never take effect for a file whose
+            Mathpix/LLM stages already both succeeded in a prior run.
         course_label: display-only label for progress print lines (a real
             course name, or "_ungrouped") -- doubles as resolve_tags()'s
             course_name lookup key (issue #37).
@@ -472,6 +553,13 @@ def _process_file(
         if force_llm or needs_llm_reprocessing(entry):
             print(f"[{course_label}] {filename}: would reprocess LLM stage only")
             return _FileOutcome(llm_reprocessed=1)
+
+        if _needs_vault_conflict_retry(entry, force_vault_overwrite):
+            print(
+                f"[{course_label}] {filename}: would retry vault write "
+                f"(force_vault_overwrite)"
+            )
+            return _FileOutcome(skipped=1)
 
         return _FileOutcome(skipped=1)
 
@@ -546,6 +634,7 @@ def _process_file(
             tags,
             output_config.date_format,
             naming_config.lecture_prefix,
+            force_vault_overwrite,
         )
         errors += vault_errors
         return _FileOutcome(
@@ -564,6 +653,38 @@ def _process_file(
         return _FileOutcome(skipped=1)
 
     if not (force_llm or needs_llm_reprocessing(entry)):
+        if _needs_vault_conflict_retry(entry, force_vault_overwrite):
+            # Issue #45 follow-up: neither force_llm nor
+            # needs_llm_reprocessing() applies (this file's LLM stage
+            # already succeeded), but force_vault_overwrite=True and its
+            # last vault-write attempt was recorded as a conflict -- retry
+            # just the vault write, reusing the already-cached LLM output
+            # (entry.output_path) rather than calling cleanup_pdf() again.
+            print(
+                f"[{course_label}] {filename}: retrying vault write "
+                f"(force_vault_overwrite)..."
+            )
+            vault_errors, vault_conflicts = _write_to_vault(
+                conn,
+                result.source_path,
+                Path(entry.output_path),
+                cache_dir / "figures",
+                vault_course_dir,
+                result.source_mtime,
+                entry.llm_processed_at,
+                course_label,
+                filename,
+                output_config.figures_dark_mode_flag,
+                tags,
+                output_config.date_format,
+                naming_config.lecture_prefix,
+                force_vault_overwrite,
+            )
+            return _FileOutcome(
+                skipped=1,
+                errors=vault_errors,
+                vault_conflicts=vault_conflicts,
+            )
         return _FileOutcome(skipped=1)
 
     lecture_stem = Path(result.source_path).stem
@@ -622,6 +743,7 @@ def _process_file(
         tags,
         output_config.date_format,
         naming_config.lecture_prefix,
+        force_vault_overwrite,
     )
     errors += vault_errors
     return _FileOutcome(
@@ -646,6 +768,7 @@ def run(
     course: str | None = None,
     dry_run: bool = False,
     force: bool = False,
+    force_vault_overwrite: bool = False,
 ) -> RunSummary:
     """
     Discover new/changed/failed-retry PDFs under paths_config.input_root (or,
@@ -719,6 +842,33 @@ def run(
             "would reprocess LLM stage only", since dry_run's
             short-circuit in _process_file() branches off the
             already-reclassified result too).
+        force_vault_overwrite: when True (issue #45, wired to
+            --force-vault-overwrite), bypass issue #40's manually-edited-
+            vault-note conflict detection for every file this run -- a
+            file that would otherwise be recorded as
+            vault_status="conflict" is instead overwritten unconditionally
+            with the pipeline's version, and any previously-recorded
+            conflict is cleared back to vault_status="success" with a
+            fresh vault_content_hash. Forwarded straight through
+            _process_file() into every _write_to_vault() call's
+            force_overwrite param -- see src/vault.py's
+            write_lecture_note() for the actual bypass logic. Deliberately
+            a blunt, whole-run instrument: there's no way to force-clear
+            just one conflicted file while leaving others alone this run
+            (a possible future refinement, out of scope here). Composes
+            freely with course/target_source_path/dry_run/force -- none of
+            them interact with vault-conflict detection. Critically, this
+            also retries the vault write *alone* (no cleanup_pdf() call)
+            for an UNCHANGED file whose Mathpix/LLM stages already both
+            succeeded in a prior run but whose vault write was recorded as
+            a conflict -- without this, such a file is fully skipped
+            before ever reaching _write_to_vault() again on any later run,
+            so force_vault_overwrite by itself would otherwise never take
+            effect for it (see _process_file()'s
+            _needs_vault_conflict_retry() check). Combining
+            force_vault_overwrite with force_llm (or --rerun-llm) still
+            works as before -- that reruns cleanup_pdf() too, same as any
+            other forced LLM reprocessing.
 
     Raises:
         ValueError: if both course and target_source_path are given.
@@ -791,6 +941,7 @@ def run(
                 conn,
                 force_llm,
                 dry_run,
+                force_vault_overwrite,
                 course_label,
             )
             processed += outcome.processed
@@ -843,6 +994,7 @@ def run(
                         conn,
                         force_llm,
                         dry_run,
+                        force_vault_overwrite,
                         course_name,
                     )
                     processed += outcome.processed
@@ -895,9 +1047,9 @@ def main(argv: list[str] | None = None) -> int:
     load config.yaml's paths:, open/init state.db, run the discover -> process
     -> record pipeline once, print a summary.
 
-    --course (issue #41), --dry-run (issue #42), --force (issue #43), and
-    --rerun-llm / --file (issue #44) are wired up so far -- --verbose, and
-    the eventual --force-vault-overwrite/--no-llm, are later Phase 7
+    --course (issue #41), --dry-run (issue #42), --force (issue #43),
+    --rerun-llm / --file (issue #44), and --force-vault-overwrite (issue
+    #45) are wired up so far -- --verbose and --no-llm are later Phase 7
     issues. --force does not set force_llm=True itself, since forcing full
     reprocessing already implies a fresh LLM pass regardless (see run()'s
     docstring). Hits the real, paid Mathpix and LLM APIs -- same caution as
@@ -949,6 +1101,7 @@ def main(argv: list[str] | None = None) -> int:
         force=args.force,
         force_llm=args.rerun_llm,
         target_source_path=target_source_path,
+        force_vault_overwrite=args.force_vault_overwrite,
     )
     _print_summary(summary, dry_run=args.dry_run)
     return 0
