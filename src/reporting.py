@@ -56,14 +56,16 @@ Reporter has five hook methods:
       (issue #49) treats verbose the same way: when False, on_detail is a
       no-op; when True, the message is appended as a dim trailing suffix
       on that file's Status cell (see RichReporter's own docstring).
-    - on_done(source_path, status): terminal per-file outcome signal.
-      Still genuinely unused plumbing as of issue #49 -- no call site in
-      src/main.py calls it. RichReporter deliberately does not require it
-      either: on_discover's classification-seeding plus the last on_stage
-      call it observes are sufficient to give every row a sensible
-      resting state, so this was consciously left unwired rather than
-      adding new call sites to src/main.py as part of #49 (confirmed with
-      the user). Both PlainReporter and RichReporter treat it as a no-op.
+    - on_done(runtime_secs): a #49 follow-up -- terminal *run*-level (not
+      per-file) signal, called exactly once by src/main.py's main(), right
+      after run() returns (still inside the `with reporter:` block), with
+      the run's total wall-clock duration in seconds. Note the shape
+      change from on_done's original (source_path, status) per-file
+      signature: nothing ever called it with that signature (run() itself
+      never calls on_done at all -- only main() does), so this is a clean
+      break, not a migration. PlainReporter prints a trailing
+      "Finished in {runtime_secs:.2f} s" line; RichReporter re-renders its
+      table with a "Done in {runtime_secs:.1f} s" Panel subtitle.
 
 Reporter also has two context-manager hook methods, `__enter__`/`__exit__`,
 used only by src/main.py's main() (issue #49) -- it constructs a reporter
@@ -99,7 +101,7 @@ on_stage transition it belongs under, e.g.:
 
     [class_1] lecture_01.pdf: processing (new)...
         [class_1] lecture_01.pdf: mathpix pdf: poll 3/40 status=loaded
-    [class_1] lecture_01.pdf: done (LLM cleanup succeeded)
+    [class_1] lecture_01.pdf: ✓ Done
 
 message is always the already-fully-composed free-form text passed in --
 there is no canonical-token vocabulary for detail lines (unlike on_stage),
@@ -126,6 +128,10 @@ try:
     from rich.console import Console
     from rich.live import Live
     from rich.table import Table
+    from rich.panel import Panel
+    from rich.align import Align
+    from rich.spinner import Spinner
+    from rich import box
 
     _RICH_AVAILABLE = True
 except ImportError:  # pragma: no cover -- exercised only without rich installed
@@ -141,7 +147,7 @@ class Reporter(Protocol):
 
     def on_detail(self, source_path: str, message: str) -> None: ...
 
-    def on_done(self, source_path: str, status: str) -> None: ...
+    def on_done(self, runtime_secs: float) -> None: ...
 
     def __enter__(self) -> "Reporter": ...
 
@@ -163,9 +169,15 @@ _STAGE_TEXT: dict[str, str] = {
     "submitting:new": "processing (new)...",
     "submitting:changed": "processing (changed)...",
     "submitting:retry": "processing (retry)...",
-    "editing:llm": "editing (LLM cleanup)...",
+    "editing:llm": "Editing...",
     "done:no_llm": "done (LLM stage skipped, --no-llm)",
-    "done:llm_success": "done (LLM cleanup succeeded)",
+    # Plain text only -- no embedded Rich markup here (this dict is printed
+    # verbatim by PlainReporter's print(), which doesn't interpret Rich
+    # markup). RichReporter still renders this in green: its existing
+    # _CANONICAL_STYLE mechanism wraps whatever text is looked up here in
+    # the row's style, so no color tags need to be embedded in the text
+    # itself.
+    "done:llm_success": "✓ Done",
     "done:llm_fallback": "done (LLM cleanup fell back to raw output)",
     "retrying_vault_write": "retrying vault write (force_vault_overwrite)...",
     "reprocessing_llm": "reprocessing LLM stage only...",
@@ -219,10 +231,11 @@ class PlainReporter:
         filename = Path(source_path).name
         print(f"    [{label}] {filename}: {message}")
 
-    def on_done(self, source_path: str, status: str) -> None:
-        # Still unused plumbing as of issue #49 -- no-op, no current
-        # visible-output requirement.
-        pass
+    def on_done(self, runtime_secs: float) -> None:
+        # #49 follow-up: on_done is now a once-per-run completion signal
+        # (see module docstring) -- prints a trailing line with the run's
+        # total wall-clock duration.
+        print(f"\nFinished in {runtime_secs:.2f} s")
 
     def __enter__(self) -> "PlainReporter":
         # Issue #49: main() now always does `with reporter:` around the
@@ -274,6 +287,26 @@ def _style_for(stage: str, text: str) -> str:
     return "cyan"
 
 
+# RichReporter-only: on_stage tokens for genuinely in-progress (not yet
+# terminal) work, mapped to the rich.spinner.Spinner color/style to use
+# while that row sits in this stage -- an animated spinner replaces the
+# plain static text a non-spinner stage would otherwise show (see
+# RichReporter.on_stage()/_render()). Cyan for the non-LLM (Mathpix
+# submit / vault-write-retry) stages, yellow for the two LLM-stage ones --
+# mirrors _CANONICAL_STYLE's yellow-for-fallback/LLM-adjacent convention.
+# Any stage not listed here (including every terminal "done:*"/
+# "llm_only:*" outcome) never gets a spinner, regardless of _style_for()'s
+# own (unrelated) style heuristic.
+_SPINNER_STAGES: dict[str, str] = {
+    "submitting:new": "cyan",
+    "submitting:changed": "cyan",
+    "submitting:retry": "cyan",
+    "editing:llm": "yellow",
+    "reprocessing_llm": "yellow",
+    "retrying_vault_write": "cyan",
+}
+
+
 class RichReporter:
     """
     Reporter implementation (issue #49): a rich.live.Live + rich.table.Table
@@ -286,29 +319,59 @@ class RichReporter:
     (self._rows: dict[str, dict]), each entry holding "course"/"filename"
     (derived from source_path exactly like PlainReporter),
     "status" (the current display text), "style" (a rich style string for
-    the status text), and "detail" (the latest on_detail message, only
-    ever set when verbose=True -- None otherwise). rich.table.Table cells
-    can't be mutated in place, so every hook rebuilds a fresh Table from
-    this dict and pushes it via Live.update(...) -- the standard Rich
-    Live+Table pattern.
+    the status text), "spinner" (None, or a color/style string when this
+    row is currently in one of _SPINNER_STAGES' in-progress stages -- see
+    below), and "detail" (the latest on_detail message, only ever set when
+    verbose=True -- None otherwise). rich.table.Table cells can't be
+    mutated in place, so every hook rebuilds a fresh Table from this dict
+    and pushes it via Live.update(...) -- the standard Rich Live+Table
+    pattern.
 
     Columns: Course | File | Status. on_detail's message (verbose=True
     only) is rendered as a dim trailing suffix appended to the Status
     cell's text (" -- {message}") rather than a separate column -- picked
     per the issue's explicit "whichever is simpler" allowance, since a
     single mutable Status string is simpler to manage than a second
-    per-row mutable field rendered in its own column.
+    per-row mutable field rendered in its own column. The table is wrapped
+    in a centered, titled Panel ("NoTeX") -- a formatting pass on top of
+    #49's original bare Table, with the Table's own title showing a live
+    "{N} documents found" count (derived from len(self._rows), so it's
+    always accurate rather than a fixed string) and the Panel's subtitle
+    left blank until on_done() sets it to "Done in {runtime_secs:.1f} s".
+
+    Spinners (a further follow-up): while a row is in one of
+    _SPINNER_STAGES' four in-progress stages (submitting:*/editing:llm/
+    reprocessing_llm/retrying_vault_write), its Status cell renders as an
+    animated rich.spinner.Spinner instead of plain static text -- e.g.
+    Spinner("dots", text="[yellow]Editing...", style="yellow") for
+    editing:llm. _render() constructs a brand-new Spinner object every
+    time it runs (same as every other cell), but this still animates
+    correctly: Spinner computes its current frame from real elapsed wall-
+    clock time (not an internal counter advanced by repeated render
+    calls), and between our own on_stage()/on_detail()-triggered
+    Live.update() calls, Live's own background auto-refresh thread
+    (refresh_per_second=8) keeps re-rendering whatever Table/Spinner
+    object we last pushed -- so the spinner keeps animating during a
+    stage even though nothing in our code calls _render() again until the
+    next hook fires. Every other (non-spinner) stage, including every
+    terminal "done:*"/"llm_only:*" outcome, renders as plain styled text
+    exactly as before.
 
     on_discover(items) seeds one row per (source_path, classification) --
     see _INITIAL_STATUS above for each classification's starting
-    status/style. on_stage(source_path, stage) updates that row's
-    status/style (via _STAGE_TEXT's canonical-token text, same dict
-    PlainReporter uses, plus _style_for()'s heuristic) and clears any
-    stale detail suffix from a previous stage. on_detail is a no-op unless
-    verbose=True, in which case it sets/replaces the row's detail suffix.
-    on_done is a no-op (see module docstring -- no call site exists in
-    src/main.py as of this issue; on_discover's seeding already avoids the
-    "row never updates" problem for silently-skipped UNCHANGED files).
+    status/style (spinner always starts None -- "waiting"/"up to date"
+    are not in-progress stages). on_stage(source_path, stage) updates that
+    row's status/style (via _STAGE_TEXT's canonical-token text, same dict
+    PlainReporter uses, plus _style_for()'s heuristic) and spinner (via
+    _SPINNER_STAGES.get(stage), None for anything not listed there -- so a
+    row's spinner is automatically cleared the moment it moves to a
+    terminal stage) and clears any stale detail suffix from a previous
+    stage. on_detail is a no-op unless verbose=True, in which case it
+    sets/replaces the row's detail suffix -- shown as a trailing suffix
+    inside the Spinner's own text when a spinner is active, same as the
+    plain-text case. on_done (a #49 follow-up) is no longer a no-op: see
+    module docstring -- it's now a once-per-run completion signal, and
+    sets the Panel's subtitle to "Done in {runtime_secs:.1f} s".
 
     __enter__ starts the Live display; __exit__ stops it, so the table
     finalizes cleanly (last frame stays visible) even if the run raises.
@@ -324,30 +387,46 @@ class RichReporter:
         self._rows: dict[str, dict[str, str | None]] = {}
         self._console = Console()
         self._live = Live(self._render(), console=self._console, refresh_per_second=8)
+        # A blank line before the Live display starts, purely cosmetic
+        # spacing -- printed once at construction, before __enter__ starts
+        # the Live (so it doesn't interfere with in-place updates).
+        self._console.print()
 
-    def _render(self) -> "Table":
-        table = Table()
-        table.add_column("Course")
-        table.add_column("File")
+    def _render(self, subtitle: str | None = None) -> "Align":
+        count = len(self._rows)
+        title = f"{count} document{'' if count == 1 else 's'} found"
+        table = Table(title=title, box=box.SIMPLE_HEAD)
+        table.add_column("Course", style="cyan")
+        table.add_column("File", style="magenta")
         table.add_column("Status")
         for row in self._rows.values():
             status = row["status"]
             if row["detail"]:
                 status = f"{status} -- [dim]{row['detail']}[/dim]"
-            table.add_row(row["course"], row["filename"], f"[{row['style']}]{status}[/{row['style']}]")
-        return table
+            spinner_style = row["spinner"]
+            if spinner_style:
+                cell = Spinner("dots", text=f"[{spinner_style}]{status}", style=spinner_style)
+            else:
+                cell = f"[{row['style']}]{status}[/{row['style']}]"
+            table.add_row(row["course"], row["filename"], cell)
 
-    def _refresh(self) -> None:
-        self._live.update(self._render())
+        return Align(
+            Panel(table, title="[bold]NoTeX", expand=False, padding=(1, 5), subtitle=subtitle),
+            "center",
+        )
+
+    def _refresh(self, subtitle: str | None = None) -> None:
+        self._live.update(self._render(subtitle=subtitle))
 
     def on_discover(self, items: Sequence[tuple[str, str]]) -> None:
         for source_path, classification in items:
             status, style = _INITIAL_STATUS.get(classification, ("waiting", "dim"))
             self._rows[source_path] = {
                 "course": Path(source_path).parent.name,
-                "filename": Path(source_path).name,
+                "filename": Path(source_path).stem,
                 "status": status,
                 "style": style,
+                "spinner": None,
                 "detail": None,
             }
         self._refresh()
@@ -363,15 +442,17 @@ class RichReporter:
             source_path,
             {
                 "course": label,
-                "filename": Path(source_path).name,
+                "filename": Path(source_path).stem,
                 "status": text,
                 "style": _style_for(stage, text),
+                "spinner": None,
                 "detail": None,
             },
         )
         row["course"] = label
         row["status"] = text
         row["style"] = _style_for(stage, text)
+        row["spinner"] = _SPINNER_STAGES.get(stage)
         row["detail"] = None
         self._refresh()
 
@@ -382,19 +463,21 @@ class RichReporter:
             source_path,
             {
                 "course": Path(source_path).parent.name,
-                "filename": Path(source_path).name,
+                "filename": Path(source_path).stem,
                 "status": "waiting",
                 "style": "dim",
+                "spinner": None,
                 "detail": None,
             },
         )
         row["detail"] = message
         self._refresh()
 
-    def on_done(self, source_path: str, status: str) -> None:
-        # Still unused plumbing as of issue #49 -- see module/class
-        # docstrings.
-        pass
+    def on_done(self, runtime_secs: float) -> None:
+        # #49 follow-up: on_done is now a once-per-run completion signal
+        # (see module docstring) -- sets the Panel's subtitle to the run's
+        # total wall-clock duration.
+        self._refresh(subtitle=f"Done in {runtime_secs:.1f} s")
 
     def __enter__(self) -> "RichReporter":
         self._live.start()

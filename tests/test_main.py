@@ -2497,13 +2497,18 @@ class _RecordingReporter:
     instead of printing anything. Used to assert on run()'s actual wiring
     (which source_path/stage/message/status values reach the Reporter)
     without depending on any particular rendering of them.
+
+    on_done's signature matches its #49-follow-up (runtime_secs, once per
+    run) shape, even though run() itself never calls it (only main() does,
+    after run() returns) -- kept here purely for Reporter-protocol
+    consistency with the real implementations.
     """
 
     def __init__(self):
         self.discovered: list[tuple[str, str]] = []
         self.stages: list[tuple[str, str]] = []
         self.details: list[tuple[str, str]] = []
-        self.done: list[tuple[str, str]] = []
+        self.done: list[float] = []
 
     def on_discover(self, items):
         self.discovered.extend(items)
@@ -2514,8 +2519,8 @@ class _RecordingReporter:
     def on_detail(self, source_path, message):
         self.details.append((source_path, message))
 
-    def on_done(self, source_path, status):
-        self.done.append((source_path, status))
+    def on_done(self, runtime_secs):
+        self.done.append(runtime_secs)
 
 
 @respx.mock
@@ -2673,8 +2678,8 @@ def test_run_default_reporter_still_prints_to_stdout(client, tmp_path, monkeypat
     assert summary.processed == 1
     out = capsys.readouterr().out
     assert "[class_1] lecture_01.pdf: processing (new)..." in out
-    assert "[class_1] lecture_01.pdf: editing (LLM cleanup)..." in out
-    assert "[class_1] lecture_01.pdf: done (LLM cleanup succeeded)" in out
+    assert "[class_1] lecture_01.pdf: Editing..." in out
+    assert "[class_1] lecture_01.pdf: ✓ Done" in out
 
 
 @respx.mock
@@ -2787,7 +2792,7 @@ def test_main_verbose_flag_prints_detail_lines_not_seen_by_default(
 
     # Existing (non-verbose) output lines are still present, unchanged.
     assert "[class_1] lecture_01.pdf: processing (new)..." in out
-    assert "[class_1] lecture_01.pdf: done (LLM cleanup succeeded)" in out
+    assert "[class_1] lecture_01.pdf: ✓ Done" in out
 
     # New verbose-only detail lines.
     assert "mathpix pdf: poll" in out
@@ -2809,12 +2814,41 @@ def test_main_without_verbose_omits_detail_lines(tmp_path, monkeypatch, capsys):
 
     # Existing (non-verbose) output lines are still present.
     assert "[class_1] lecture_01.pdf: processing (new)..." in out
-    assert "[class_1] lecture_01.pdf: done (LLM cleanup succeeded)" in out
+    assert "[class_1] lecture_01.pdf: ✓ Done" in out
 
     # None of the verbose-only detail lines appear by default.
     assert "mathpix pdf: poll" not in out
     assert "copied figure:" not in out
     assert "vault write confirmed:" not in out
+
+
+@respx.mock
+def test_main_calls_on_done_with_runtime_and_still_prints_full_summary(
+    tmp_path, monkeypatch, capsys
+):
+    """
+    A #49 follow-up: main() times the run() call end-to-end and calls
+    reporter.on_done(runtime_secs=...) once it returns, still inside the
+    `with reporter:` block -- PlainReporter's on_done() prints a trailing
+    "Finished in X.XX s" line. _print_summary()'s full processed/skipped/
+    errors/tokens/cost breakdown still prints afterward too, unaffected by
+    on_done() -- the two lines are complementary, not a replacement for
+    one another.
+    """
+    import re
+
+    paths_config, conn, pdf_path = _setup_main_end_to_end(monkeypatch, tmp_path)
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    exit_code = main([])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+
+    assert re.search(r"Finished in \d+\.\d\d s", out)
+    assert "Documents processed: 1" in out
 
 
 # --- Issue #49: _select_reporter() TTY auto-detection ---
@@ -2882,4 +2916,4 @@ def test_main_selects_plain_reporter_end_to_end_when_not_a_tty(tmp_path, monkeyp
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "[class_1] lecture_01.pdf: processing (new)..." in out
-    assert "[class_1] lecture_01.pdf: done (LLM cleanup succeeded)" in out
+    assert "[class_1] lecture_01.pdf: ✓ Done" in out

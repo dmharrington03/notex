@@ -1,7 +1,9 @@
 """
 Unit tests for src/reporting.py (issue #47 -- Reporter protocol +
 PlainReporter; issue #48 -- --verbose wiring for on_detail(); issue #49 --
-RichReporter + on_discover()/context-manager protocol additions).
+RichReporter + on_discover()/context-manager protocol additions, plus a
+follow-up adding the "editing:llm" stage and turning on_done() into a
+once-per-run completion signal).
 
 PlainReporter is designed to reproduce, byte-for-byte, the exact print()
 output src/main.py used to produce directly before the #47 refactor -- these
@@ -9,12 +11,15 @@ tests assert on that exact text for a representative set of stage/status
 transitions, plus the free-form-message fallback and the "ungrouped_skip"
 special case. on_detail() is a no-op by default (verbose=False) -- issue #48
 adds a verbose=True constructor param that makes it actually print, tested
-separately below. on_done() is verified as a pure no-op regardless (still
-unwired as of issue #49 -- see RichReporter's own docstring).
+separately below. on_done() is no longer a no-op (a #49 follow-up) -- it's a
+once-per-run completion signal called by main() with the run's total
+duration; PlainReporter prints a trailing "Finished in X.XX s" line.
 
 RichReporter's tests (below) deliberately never assert on actual rendered
 Rich output -- per AGENTS.md's testing conventions, they check its internal
-_rows state dict and Reporter-protocol conformance instead.
+_rows state dict, the Table/Panel objects _render() constructs (title/
+subtitle text, not rendered pixels), and Reporter-protocol conformance
+instead.
 """
 
 from __future__ import annotations
@@ -44,9 +49,9 @@ def test_on_stage_covers_every_canonical_transition(capsys):
         "submitting:new": "processing (new)...",
         "submitting:changed": "processing (changed)...",
         "submitting:retry": "processing (retry)...",
-        "editing:llm": "editing (LLM cleanup)...",
+        "editing:llm": "Editing...",
         "done:no_llm": "done (LLM stage skipped, --no-llm)",
-        "done:llm_success": "done (LLM cleanup succeeded)",
+        "done:llm_success": "✓ Done",
         "done:llm_fallback": "done (LLM cleanup fell back to raw output)",
         "retrying_vault_write": "retrying vault write (force_vault_overwrite)...",
         "reprocessing_llm": "reprocessing LLM stage only...",
@@ -84,7 +89,7 @@ def test_on_stage_derives_course_and_filename_from_source_path(capsys):
     reporter.on_stage("/notes_raw/class_2/lecture_03.pdf", "done:llm_success")
 
     out = capsys.readouterr().out
-    assert out == "[class_2] lecture_03.pdf: done (LLM cleanup succeeded)\n"
+    assert out == "[class_2] lecture_03.pdf: ✓ Done\n"
 
 
 def test_on_stage_ungrouped_skip_uses_fixed_label_not_derived_from_path(capsys):
@@ -161,12 +166,17 @@ def test_on_detail_verbose_message_printed_verbatim(capsys):
     )
 
 
-def test_on_done_is_a_no_op(capsys):
+def test_on_done_prints_runtime(capsys):
+    """
+    #49 follow-up: on_done() is now a once-per-run completion signal
+    (runtime_secs, not the original per-file (source_path, status)) --
+    PlainReporter prints a trailing "Finished in X.XX s" line.
+    """
     reporter = PlainReporter()
 
-    reporter.on_done("/notes_raw/class_1/lecture_01.pdf", "success")
+    reporter.on_done(runtime_secs=12.345)
 
-    assert capsys.readouterr().out == ""
+    assert capsys.readouterr().out == "\nFinished in 12.35 s\n"
 
 
 def test_plain_reporter_satisfies_reporter_protocol():
@@ -182,7 +192,7 @@ def test_plain_reporter_satisfies_reporter_protocol():
     reporter.on_discover([("/x/y.pdf", "new")])
     reporter.on_stage("/x/y.pdf", "done:llm_success")
     reporter.on_detail("/x/y.pdf", "detail")
-    reporter.on_done("/x/y.pdf", "success")
+    reporter.on_done(runtime_secs=1.0)
 
 
 def test_plain_reporter_context_manager_is_a_no_op(capsys):
@@ -210,7 +220,7 @@ def test_rich_reporter_satisfies_reporter_protocol():
     reporter.on_discover([("/x/y.pdf", "new")])
     reporter.on_stage("/x/y.pdf", "done:llm_success")
     reporter.on_detail("/x/y.pdf", "detail")
-    reporter.on_done("/x/y.pdf", "success")
+    reporter.on_done(runtime_secs=1.0)
 
 
 def test_rich_reporter_on_discover_seeds_rows_by_classification():
@@ -232,7 +242,9 @@ def test_rich_reporter_on_discover_seeds_rows_by_classification():
     assert rows["/notes_raw/class_1/lecture_03.pdf"]["status"] == "waiting"
     assert rows["/notes_raw/class_1/lecture_04.pdf"]["status"] == "waiting"
     assert rows["/notes_raw/class_1/lecture_01.pdf"]["course"] == "class_1"
-    assert rows["/notes_raw/class_1/lecture_01.pdf"]["filename"] == "lecture_01.pdf"
+    # Filenames are shown without their extension (Path.stem, not .name) --
+    # a formatting choice for the table's File column.
+    assert rows["/notes_raw/class_1/lecture_01.pdf"]["filename"] == "lecture_01"
 
 
 def test_rich_reporter_on_stage_updates_seeded_row():
@@ -246,7 +258,7 @@ def test_rich_reporter_on_stage_updates_seeded_row():
     assert reporter._rows[source_path]["status"] == "processing (new)..."
 
     reporter.on_stage(source_path, "done:llm_success")
-    assert reporter._rows[source_path]["status"] == "done (LLM cleanup succeeded)"
+    assert reporter._rows[source_path]["status"] == "✓ Done"
     assert reporter._rows[source_path]["style"] == "green"
 
 
@@ -255,8 +267,8 @@ def test_rich_reporter_full_lifecycle_waiting_processing_editing_done():
     The full waiting -> processing -> editing -> done progression a
     live-updating reporter observes for one actionable (NEW/CHANGED/RETRY)
     file: seeded as "waiting" by on_discover, "processing (...)" during the
-    Mathpix stage (submitting:*), "editing (LLM cleanup)..." once the LLM
-    stage begins (a #49 follow-up), and finally a "done" outcome.
+    Mathpix stage (submitting:*), "Editing..." once the LLM stage begins (a
+    #49 follow-up), and finally a "done" outcome.
     """
     from src.reporting import RichReporter
 
@@ -265,15 +277,124 @@ def test_rich_reporter_full_lifecycle_waiting_processing_editing_done():
 
     reporter.on_discover([(source_path, "new")])
     assert reporter._rows[source_path]["status"] == "waiting"
+    assert reporter._rows[source_path]["spinner"] is None
 
     reporter.on_stage(source_path, "submitting:new")
     assert reporter._rows[source_path]["status"] == "processing (new)..."
+    assert reporter._rows[source_path]["spinner"] == "cyan"
 
     reporter.on_stage(source_path, "editing:llm")
-    assert reporter._rows[source_path]["status"] == "editing (LLM cleanup)..."
+    assert reporter._rows[source_path]["status"] == "Editing..."
+    assert reporter._rows[source_path]["spinner"] == "yellow"
 
     reporter.on_stage(source_path, "done:llm_success")
-    assert reporter._rows[source_path]["status"] == "done (LLM cleanup succeeded)"
+    assert reporter._rows[source_path]["status"] == "✓ Done"
+    assert reporter._rows[source_path]["spinner"] is None
+
+
+# --- Spinner (a #49 follow-up): submitting:*/editing:llm/reprocessing_llm/
+# retrying_vault_write render as an animated rich.spinner.Spinner instead of
+# plain text, cleared back to None the moment a row reaches any other
+# (terminal) stage. ---
+
+
+def test_rich_reporter_spinner_set_for_every_in_progress_stage():
+    from src.reporting import RichReporter
+
+    reporter = RichReporter()
+    source_path = "/notes_raw/class_1/lecture_01.pdf"
+
+    cases = {
+        "submitting:new": "cyan",
+        "submitting:changed": "cyan",
+        "submitting:retry": "cyan",
+        "editing:llm": "yellow",
+        "reprocessing_llm": "yellow",
+        "retrying_vault_write": "cyan",
+    }
+    for stage, expected_color in cases.items():
+        reporter.on_stage(source_path, stage)
+        assert reporter._rows[source_path]["spinner"] == expected_color, stage
+
+
+def test_rich_reporter_spinner_cleared_on_terminal_stage():
+    from src.reporting import RichReporter
+
+    reporter = RichReporter()
+    source_path = "/notes_raw/class_1/lecture_01.pdf"
+    reporter.on_stage(source_path, "editing:llm")
+    assert reporter._rows[source_path]["spinner"] == "yellow"
+
+    reporter.on_stage(source_path, "done:llm_fallback")
+
+    assert reporter._rows[source_path]["spinner"] is None
+
+
+def test_rich_reporter_on_discover_never_seeds_a_spinner():
+    from src.reporting import RichReporter
+
+    reporter = RichReporter()
+    reporter.on_discover(
+        [
+            ("/x/a.pdf", "new"),
+            ("/x/b.pdf", "unchanged"),
+        ]
+    )
+
+    assert reporter._rows["/x/a.pdf"]["spinner"] is None
+    assert reporter._rows["/x/b.pdf"]["spinner"] is None
+
+
+def test_rich_reporter_render_uses_a_spinner_renderable_for_in_progress_row():
+    from rich.spinner import Spinner
+
+    from src.reporting import RichReporter
+
+    reporter = RichReporter()
+    source_path = "/notes_raw/class_1/lecture_01.pdf"
+    reporter.on_stage(source_path, "editing:llm")
+
+    rendered = reporter._render()
+    table = rendered.renderable.renderable
+    cell = table.columns[2]._cells[0]
+
+    assert isinstance(cell, Spinner)
+    assert cell.name == "dots"
+    assert cell.style == "yellow"
+    assert cell.text.plain == "Editing..."
+
+
+def test_rich_reporter_render_uses_plain_text_for_terminal_row():
+    from rich.spinner import Spinner
+
+    from src.reporting import RichReporter
+
+    reporter = RichReporter()
+    source_path = "/notes_raw/class_1/lecture_01.pdf"
+    reporter.on_stage(source_path, "done:llm_success")
+
+    rendered = reporter._render()
+    table = rendered.renderable.renderable
+    cell = table.columns[2]._cells[0]
+
+    assert not isinstance(cell, Spinner)
+    assert cell == "[green]\u2713 Done[/green]"
+
+
+def test_rich_reporter_spinner_includes_verbose_detail_suffix():
+    from src.reporting import RichReporter
+
+    reporter = RichReporter(verbose=True)
+    source_path = "/notes_raw/class_1/lecture_01.pdf"
+    reporter.on_stage(source_path, "editing:llm")
+
+    reporter.on_detail(source_path, "using model claude-haiku-4-5")
+
+    rendered = reporter._render()
+    table = rendered.renderable.renderable
+    cell = table.columns[2]._cells[0]
+
+    assert cell.text.plain == "Editing... -- using model claude-haiku-4-5"
 
 
 def test_rich_reporter_on_stage_can_add_a_row_not_seeded_by_on_discover():
@@ -288,7 +409,7 @@ def test_rich_reporter_on_stage_can_add_a_row_not_seeded_by_on_discover():
 
     row = reporter._rows["/notes_raw/class_2/lecture_03.pdf"]
     assert row["course"] == "class_2"
-    assert row["filename"] == "lecture_03.pdf"
+    assert row["filename"] == "lecture_03"
     assert row["status"] == "done (LLM cleanup fell back to raw output)"
     assert row["style"] == "yellow"
 
@@ -353,7 +474,13 @@ def test_rich_reporter_on_stage_clears_stale_detail_suffix():
     assert reporter._rows[source_path]["detail"] is None
 
 
-def test_rich_reporter_on_done_is_a_no_op():
+def test_rich_reporter_on_done_does_not_change_row_state():
+    """
+    #49 follow-up: on_done() is now a once-per-run completion signal, not a
+    per-file one -- it only affects the Panel's subtitle (see
+    test_rich_reporter_render_title_and_subtitle below), never any row's
+    state.
+    """
     from src.reporting import RichReporter
 
     reporter = RichReporter()
@@ -361,9 +488,52 @@ def test_rich_reporter_on_done_is_a_no_op():
     reporter.on_discover([(source_path, "new")])
     before = dict(reporter._rows[source_path])
 
-    reporter.on_done(source_path, "success")
+    reporter.on_done(runtime_secs=1.0)
 
     assert reporter._rows[source_path] == before
+
+
+def test_rich_reporter_render_title_reflects_row_count():
+    """
+    The Table's title shows a live "{N} documents found" count derived from
+    len(self._rows) -- not a hardcoded string -- so it stays accurate as
+    files are discovered.
+    """
+    from src.reporting import RichReporter
+
+    reporter = RichReporter()
+    rendered = reporter._render()
+    table = rendered.renderable.renderable
+    assert table.title == "0 documents found"
+
+    reporter.on_discover([("/x/a.pdf", "new")])
+    rendered = reporter._render()
+    table = rendered.renderable.renderable
+    assert table.title == "1 document found"
+
+    reporter.on_discover([("/x/b.pdf", "new")])
+    rendered = reporter._render()
+    table = rendered.renderable.renderable
+    assert table.title == "2 documents found"
+
+
+def test_rich_reporter_render_subtitle_reflects_on_done():
+    """
+    _render()'s subtitle param (set by on_done() via _refresh()) becomes
+    the wrapping Panel's subtitle.
+    """
+    from src.reporting import RichReporter
+
+    reporter = RichReporter()
+
+    rendered = reporter._render()
+    panel = rendered.renderable
+    assert panel.subtitle is None
+
+    reporter.on_done(runtime_secs=12.3)
+
+    panel = reporter._live.renderable.renderable
+    assert panel.subtitle == "Done in 12.3 s"
 
 
 def test_rich_reporter_context_manager_starts_and_stops_live():

@@ -752,6 +752,57 @@ narrative and real-data-validation findings.
   `"editing:llm"` is recorded between `"submitting:new"` and
   `"done:llm_success"` in `_RecordingReporter`'s stage list, and that the
   default (`PlainReporter`) path prints the new line to stdout.
+  **Second follow-up (user-made `RichReporter` formatting changes,
+  reviewed/fixed and extended with a spinner):** the user hand-edited
+  `src/reporting.py`/`src/main.py` to wrap the table in a centered,
+  titled (`"NoTeX"`) `Panel`, shorten `"editing:llm"`'s text to
+  `"Editing..."` and `"done:llm_success"`'s to a `"✓ Done"` checkmark, and
+  turn `on_done()` into a once-per-run (not per-file) completion signal
+  taking `runtime_secs`, timed by `main()` and called once after `run()`
+  returns (still inside `with reporter:`). Reviewing that diff surfaced
+  four real bugs, fixed rather than just papered over with matching
+  tests: (1) the `"✓ Done"` text had raw Rich markup (`"[green]..."`)
+  embedded directly in the shared `_STAGE_TEXT` dict, which
+  `PlainReporter` prints verbatim with `print()` — it would have literally
+  shown `[green]✓ Done` in a non-TTY terminal; fixed by stripping the
+  markup from the shared dict (`RichReporter` still colors it green via
+  its existing `_CANONICAL_STYLE` mechanism, no markup needs to be
+  embedded in the text itself). (2) the table's title was hardcoded to
+  `"2 documents found"` (matching the user's local 2-file test setup) —
+  now computed from `len(self._rows)`. (3) `on_discover`'s row-creation
+  used `Path(source_path).stem` (dropping `.pdf`) but `on_stage`/
+  `on_detail`'s defensive fallback row-creation still used `.name` —
+  made all three consistent. (4) `main()`'s `_print_summary(...)` call was
+  commented out, silently dropping the processed/skipped/errors/tokens/
+  cost breakdown for every run regardless of reporter — restored it
+  (confirmed as accidental, not a decision to replace it with `on_done`'s
+  duration-only message; the two are complementary). Also added a spinner:
+  `submitting:new/changed/retry`, `editing:llm`,
+  `reprocessing_llm`, and `retrying_vault_write` (all four in-progress,
+  not-yet-terminal stages) now render as an animated `rich.spinner.Spinner`
+  (`"dots"`, cyan for the three non-LLM stages, yellow for the two
+  LLM-stage ones) instead of static text, via a new `_SPINNER_STAGES`
+  token→color dict consulted by `RichReporter.on_stage()`/`_render()`;
+  cleared back to plain text the moment a row reaches any stage not in
+  that dict (every terminal `"done:*"`/`"llm_only:*"` outcome). Confirmed
+  by experiment before implementing: a fresh `Spinner` object constructed
+  on every `_render()` call still animates correctly between explicit
+  `on_stage()`/`on_detail()`-triggered `Live.update()` calls, because
+  `Live`'s own background auto-refresh thread (`refresh_per_second=8`)
+  keeps re-rendering whatever `Table`/`Spinner` object was last pushed,
+  and `Spinner` computes its current frame from real elapsed wall-clock
+  time rather than a counter tied to explicit render calls — no need to
+  persist `Spinner` instances across hook calls in `self._rows`. Verified
+  manually end-to-end (real TTY via `script`) that the spinner text
+  actually cycles through multiple frames during a stage, not just a
+  single static frame. Tests added/updated throughout
+  `tests/test_reporting.py` (dynamic title, subtitle-from-`on_done`,
+  `on_done`'s new signature, spinner presence/color per stage, spinner
+  clearing on terminal stages, `_render()`'s actual `Spinner` vs. plain-
+  string cell type, verbose detail suffix rendering inside an active
+  spinner's text) and `tests/test_main.py` (`_RecordingReporter.on_done`'s
+  signature updated to match, a new end-to-end test confirming `main()`
+  prints the `"Finished in X.XX s"` line *and* the full summary).
 - **#50, #51** — filed, not started yet. See "Phase 7 Plan" under
   "Remaining Work — Phases 4-7 Plan" above for the full issue-by-issue
   breakdown and implementation order.

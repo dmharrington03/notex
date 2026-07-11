@@ -1333,7 +1333,14 @@ def main(argv: list[str] | None = None) -> int:
     (issue #47), since --verbose only ever changes what the reporter itself
     chooses to print, not any pipeline logic. The run() call is wrapped in
     `with reporter:` so a RichReporter's Live display starts/stops cleanly,
-    including if run() raises.
+    including if run() raises. A #49 follow-up times the run() call and
+    calls reporter.on_done(runtime_secs=...) once it returns (still inside
+    the `with reporter:` block) -- PlainReporter prints a trailing
+    "Finished in X.XX s" line, RichReporter sets its Panel's subtitle to
+    "Done in X.X s". _print_summary() still always runs afterward,
+    independently of on_done() -- the two are complementary (on_done's
+    message is just a duration, _print_summary's is the full processed/
+    skipped/errors/tokens/cost breakdown).
 
     --file is validated here, before run() is ever called: the path must
     exist, end in .pdf (case-insensitive), and resolve to somewhere under
@@ -1371,6 +1378,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
+    # A #49 follow-up: timed end-to-end so on_done() (below) can report the
+    # run's total wall-clock duration -- PlainReporter prints a trailing
+    # "Finished in X.XX s" line, RichReporter sets its Panel's subtitle.
+    start_time = datetime.now()
+
     conn = init_db(paths_config.state_db)
     reporter = _select_reporter(args.verbose)
     with reporter:
@@ -1386,6 +1398,9 @@ def main(argv: list[str] | None = None) -> int:
             no_llm=args.no_llm,
             reporter=reporter,
         )
+        runtime_secs = (datetime.now() - start_time).total_seconds()
+        reporter.on_done(runtime_secs=runtime_secs)
+
     _print_summary(summary, dry_run=args.dry_run)
     return 0
 
