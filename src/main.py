@@ -154,10 +154,14 @@ Per-file flow (see AGENTS.md issue #11/#18 notes):
       entirely for this run. On the actionable NEW/CHANGED/RETRY path,
       process_pdf() still runs as normal, but only mathpix_*/figure_count/
       page_count/mathpix_processed_at are upserted -- llm_status and every
-      other llm_*/output_path field are left untouched (NULL for a
-      freshly-discovered file), so needs_llm_reprocessing() (llm_status is
-      None) automatically routes this file through a real LLM pass on a
-      later normal (non-no_llm) run, with no extra state to track. The
+      other llm_*/output_path field are *explicitly* reset to None (issue
+      #52 fix; previously these were merely omitted from the upsert, which
+      left a prior genuine LLM success's stale data untouched when this
+      branch was reached for an already-processed file -- see #52), so
+      needs_llm_reprocessing() (llm_status is None) automatically routes
+      this file through a real LLM pass on a later normal (non-no_llm)
+      run, with no extra state to track, whether the file is genuinely
+      NEW or was already LLM-processed before this no_llm reprocess. The
       vault note is still written this run (there's always something to
       write), sourced directly from process_pdf()'s raw
       ProcessResult.markdown_path (the same raw-.mathpix.md fallback
@@ -557,12 +561,17 @@ def _process_file(
         no_llm: issue #46 -- when True, skips cleanup_pdf() entirely on
             the actionable NEW/CHANGED/RETRY path below: only
             mathpix_*/figure_count/page_count/mathpix_processed_at are
-            upserted (llm_status and every other llm_*/output_path field
-            stay untouched/NULL), and the vault note is written straight
-            from process_pdf()'s raw ProcessResult.markdown_path -- no
-            error is contributed just for skipping the LLM stage by
-            request. On the UNCHANGED path, no_llm=True unconditionally
-            skips the LLM-only-rerun branch regardless of force_llm/
+            upserted, and llm_status and every other llm_*/output_path
+            field are explicitly reset to None (issue #52 fix -- a no-op
+            for a genuinely fresh file, since those columns are already
+            NULL, but correctly clears a prior genuine LLM success's now-
+            stale data when this branch is reached for an already-
+            processed file, e.g. via a real second source edit or
+            --force), and the vault note is written straight from
+            process_pdf()'s raw ProcessResult.markdown_path -- no error is
+            contributed just for skipping the LLM stage by request. On the
+            UNCHANGED path, no_llm=True unconditionally skips the LLM-
+            only-rerun branch regardless of force_llm/
             needs_llm_reprocessing() -- there's nothing for --no-llm to do
             there, so the file is simply tallied as skipped (falling
             through to the existing force_vault_overwrite conflict-retry
@@ -626,12 +635,26 @@ def _process_file(
         if no_llm:
             # Issue #46: skip cleanup_pdf() entirely -- only the
             # mathpix_*/figure_count/page_count/mathpix_processed_at
-            # fields are upserted, leaving llm_status (and every other
-            # llm_*/output_path field) untouched/NULL, matching a
-            # freshly-discovered-but-not-yet-LLM-processed file.
-            # needs_llm_reprocessing() already treats llm_status is None
-            # as needing reprocessing, so a later normal (non-no_llm) run
-            # picks this file up for a real LLM pass automatically.
+            # fields are upserted. Issue #52 fix: every llm_*/output_path
+            # field is *explicitly* reset to None here (not simply
+            # omitted) -- for a freshly-discovered file these columns are
+            # already NULL, so this is a no-op there, but for a file that
+            # already had a genuine prior LLM success (a real second edit
+            # producing a CHANGED reclassification, or --force
+            # reclassifying an UNCHANGED file to RETRY) an *omitted*
+            # upsert would leave that old "success" data stale and
+            # untouched even though it now describes content from before
+            # this run's fresh Mathpix reprocess -- see issue #52's real-
+            # data findings (linked from #51's validation comment) for the
+            # concretely observed consequence: state.db kept claiming
+            # llm_status="success" while the vault note was silently
+            # overwritten with fresh raw (uncleaned) OCR text, and
+            # needs_llm_reprocessing() then permanently refused to ever
+            # auto-pick the file up for a real LLM pass again. Explicitly
+            # nulling these columns here instead makes this upsert
+            # equivalent to a freshly-discovered file's in every case,
+            # restoring needs_llm_reprocessing()'s correct "pick this up
+            # on the next normal (non-no_llm) run" behavior uniformly.
             print(f"[{course_label}] {filename}: done (LLM stage skipped, --no-llm)")
             upsert_entry(
                 conn,
@@ -644,6 +667,15 @@ def _process_file(
                 figure_count=process_result.figure_count,
                 page_count=process_result.page_count,
                 mathpix_processed_at=process_result.processed_at,
+                llm_model=None,
+                llm_prompt_version=None,
+                llm_status=None,
+                llm_validation_result=None,
+                llm_processed_at=None,
+                output_path=None,
+                llm_input_tokens=None,
+                llm_output_tokens=None,
+                llm_cost_estimate=None,
             )
             # Vault-writing still needs a content source -- reuse the raw
             # .mathpix.md, the same fallback content cleanup_pdf() itself

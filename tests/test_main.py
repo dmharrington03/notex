@@ -157,6 +157,21 @@ Covered here (issue #46 — --no-llm):
       skipped -- cleanup_pdf() is never called.
     - main(): a --no-llm argv flag is parsed and forwarded into run() as
       its no_llm= kwarg.
+
+Covered here (issue #52 — found during #51's real-data validation:
+no_llm=True used to leave a previously-successful file's stale llm_status
+untouched when reprocessing it):
+    - run(): force=True + no_llm=True reprocessing a file that already has
+      a genuine prior llm_status="success" (and populated llm_model/
+      output_path/tokens/etc.) explicitly resets every llm_*/output_path
+      field to None, rather than leaving the old success data stale --
+      the vault note ends up with fresh raw content, matching what
+      state.db now (correctly) says about the LLM stage.
+    - run(): after that reset, a later plain run (no flags) still
+      auto-picks the file up for a real LLM pass via
+      needs_llm_reprocessing() -- proving the fix restores issue #46's
+      "later normal run picks it up automatically" guarantee for a
+      previously-processed file, not just a genuinely fresh one.
 """
 
 from __future__ import annotations
@@ -845,6 +860,204 @@ def test_run_no_llm_skips_unchanged_file_eligible_for_llm_reprocessing(
     )
     assert not submit_route.called
     assert len(llm_calls) == 0
+
+
+@respx.mock
+def test_run_no_llm_resets_stale_llm_fields_when_reprocessing_already_successful_file(
+    client, tmp_path, monkeypatch
+):
+    """
+    Issue #52 (found live during #51's real-data validation): the
+    actionable-path no_llm=True upsert used to only ever be reached for a
+    genuinely fresh file, whose llm_*/output_path columns are already
+    None -- so simply *omitting* those columns from the upsert (issue
+    #46's original implementation) looked like a no-op. But the same
+    branch is also reached when force=True reclassifies an
+    already-fully-successful UNCHANGED file to RETRY (or, in real usage,
+    a genuine second edit to the source PDF) -- and there, omitting those
+    columns left the *previous* run's real llm_status="success" (and
+    llm_model/output_path/token counts/etc.) stale and untouched, even
+    though the vault note was correctly overwritten with fresh raw
+    (uncleaned) OCR text this run. Confirms the fix: every llm_*/
+    output_path column is explicitly reset to None in this case too.
+    """
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    # Seed a state.db row describing a genuine prior mathpix+LLM success,
+    # with real-looking llm_* data populated -- mirroring what an actual
+    # earlier cleanup_pdf() success would have written.
+    stat = pdf_path.stat()
+    stale_processed_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    upsert_entry(
+        conn,
+        str(pdf_path.resolve()),
+        source_hash="whatever",
+        source_mtime=stat.st_mtime,
+        source_size=stat.st_size,
+        mathpix_status="success",
+        mathpix_pdf_id="old-pdf-id",
+        llm_model="old-llm-model",
+        llm_prompt_version="cleanup_v0",
+        llm_status="success",
+        llm_validation_result=json.dumps({"length_ratio": True}),
+        output_path="_cache/class_1/lecture_01.llm.md",
+        mathpix_processed_at=stale_processed_at,
+        llm_processed_at=stale_processed_at,
+        llm_input_tokens=999,
+        llm_output_tokens=888,
+        llm_cost_estimate=0.5,
+    )
+
+    _mock_happy_path(pdf_id="new-pdf-id")
+    llm_calls = _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        force=True,
+        no_llm=True,
+    )
+
+    assert summary == RunSummary(
+        processed=1,
+        skipped=0,
+        errors=0,
+        ungrouped=0,
+        llm_reprocessed=0,
+        total_pages_processed=2,
+    )
+    # cleanup_pdf() must never be called -- --no-llm skips the LLM stage
+    # entirely, even on this reprocessed-not-fresh path.
+    assert len(llm_calls) == 0
+
+    entry = get_entry(conn, str(pdf_path.resolve()))
+    assert entry is not None
+    # Mathpix stage reprocessed fresh.
+    assert entry.mathpix_status == "success"
+    assert entry.mathpix_pdf_id == "new-pdf-id"
+
+    # The bug: these used to keep their stale pre-reprocess values. The
+    # fix: every llm_*/output_path field is explicitly reset to None.
+    assert entry.llm_status is None
+    assert entry.llm_model is None
+    assert entry.llm_prompt_version is None
+    assert entry.llm_validation_result is None
+    assert entry.llm_processed_at is None
+    assert entry.output_path is None
+    assert entry.llm_input_tokens is None
+    assert entry.llm_output_tokens is None
+    assert entry.llm_cost_estimate is None
+
+    # Vault note reflects the fresh raw (uncleaned) content -- not the old
+    # LLM-cleaned content its now-cleared output_path used to point at.
+    assert entry.vault_status == "success"
+    vault_path = paths_config.vault_root / "class_1" / "Lecture 01.md"
+    vault_content = vault_path.read_text(encoding="utf-8")
+    assert "Some intro text discussing vectors and matrices." in vault_content
+    assert "cleaned markdown" not in vault_content
+
+
+@respx.mock
+def test_run_no_llm_reset_allows_auto_pickup_after_forced_reprocess(
+    client, tmp_path, monkeypatch
+):
+    """
+    Issue #52 follow-up to the test above: once a previously-successful
+    file's llm_status is correctly reset to None by a force=True,
+    no_llm=True reprocess, a later plain run (no flags at all) must still
+    auto-pick it up for a real LLM pass via needs_llm_reprocessing() --
+    proving the fix restores issue #46's original "a later normal run
+    picks this file up automatically" guarantee for a previously-
+    processed file, not just a genuinely fresh one (already covered by
+    test_run_no_llm_file_picked_up_by_later_normal_run).
+    """
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    stat = pdf_path.stat()
+    stale_processed_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    upsert_entry(
+        conn,
+        str(pdf_path.resolve()),
+        source_hash="whatever",
+        source_mtime=stat.st_mtime,
+        source_size=stat.st_size,
+        mathpix_status="success",
+        mathpix_pdf_id="old-pdf-id",
+        llm_model="old-llm-model",
+        llm_prompt_version="cleanup_v0",
+        llm_status="success",
+        llm_validation_result=json.dumps({"length_ratio": True}),
+        output_path="_cache/class_1/lecture_01.llm.md",
+        mathpix_processed_at=stale_processed_at,
+        llm_processed_at=stale_processed_at,
+        llm_input_tokens=999,
+        llm_output_tokens=888,
+        llm_cost_estimate=0.5,
+    )
+
+    submit_route = _mock_happy_path(pdf_id="new-pdf-id")
+    first_run_llm_calls = _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        force=True,
+        no_llm=True,
+    )
+    assert len(first_run_llm_calls) == 0
+    assert submit_route.call_count == 1
+
+    entry_after_reprocess = get_entry(conn, str(pdf_path.resolve()))
+    assert entry_after_reprocess.llm_status is None
+
+    second_run_llm_calls = _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    second_summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
+
+    # No further Mathpix API call -- the file is UNCHANGED (relative to
+    # the force+no_llm reprocess above), only its LLM stage is (re)run.
+    assert submit_route.call_count == 1
+    assert second_summary == RunSummary(
+        processed=0,
+        skipped=0,
+        errors=0,
+        ungrouped=0,
+        llm_reprocessed=1,
+        total_input_tokens=100,
+        total_output_tokens=50,
+        total_cost_estimate=0.001,
+    )
+    assert len(second_run_llm_calls) == 1
+
+    entry = get_entry(conn, str(pdf_path.resolve()))
+    assert entry.llm_status == "success"
+    assert entry.mathpix_status == "success"
+
+    vault_path = paths_config.vault_root / "class_1" / "Lecture 01.md"
+    assert "cleaned markdown" in vault_path.read_text(encoding="utf-8")
 
 
 @respx.mock

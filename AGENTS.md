@@ -147,6 +147,32 @@ with hash-baseline conflict detection (#40) — not planned to be
 specifically handled; `--force-vault-overwrite` (issue #45) is the
 general escape hatch for this too, same as any other recorded conflict.
 
+**#52 (done, untriaged, no phase label)** — found live during #51's real-
+data validation: `--no-llm`'s actionable-path upsert in `_process_file()`
+used to only *omit* `llm_*`/`output_path` columns rather than explicitly
+clearing them, which is a no-op for a genuinely fresh file (those columns
+are already `NULL`) but left a *stale* prior `llm_status="success"` (and
+`llm_model`/`output_path`/token counts/etc.) untouched when the same
+branch was reached for a file that already had a genuine earlier LLM
+success — reachable via a real second edit to the source PDF, or via
+`--force` reclassifying an `UNCHANGED` file to `RETRY`. Consequence: the
+vault note was correctly overwritten with fresh raw (uncleaned) OCR text
+per `--no-llm`'s design, but `state.db` kept falsely claiming
+`llm_status="success"`, permanently blocking `needs_llm_reprocessing()`
+from ever auto-picking the file up for a real LLM pass again. Fixed by
+explicitly resetting every `llm_*`/`output_path` column to `None` in that
+upsert (a no-op for the fresh-file case, matching #46's original intent
+uniformly for both cases now). Real-data re-validated against the exact
+`class_2/lecture_01.pdf` repro from #51's finding: `llm_status`/
+`output_path` now correctly reset to `None` after a real `--force --no-llm`
+run, `--dry-run` correctly reports "would reprocess LLM stage only", and a
+following plain run correctly auto-picks it up for a real LLM pass,
+restoring proper cleaned vault content. Broader flag-combination sanity
+re-checked against real data too (plain `--no-llm` on a fresh file,
+`--force` alone, batch `--rerun-llm`, `--force-vault-overwrite`, and a
+final full-tree idempotency run) — no regressions. See #52's own GitHub
+comments for the full real-data validation detail.
+
 **Scope correction — `output.base_tags` (a global/default tag list) is
 dropped entirely, not deferred.** docs/spec.md's `output:` schema included
 a `base_tags` global default tag list, with `course_tags` merging/
