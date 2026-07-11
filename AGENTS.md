@@ -857,7 +857,28 @@ narrative and real-data-validation findings.
   `tests/test_reporting.py` (exact-text/spinner-color/title assertions)
   and `tests/test_main.py` (`PlainReporter` output text, unaffected by
   the color changes since it has no color).
-- **#50, #51** — filed, not started yet. See "Phase 7 Plan" under
+- **#50 (done)** — new `scripts/manual_convert.py`: stateless manual
+  conversion (source PDF + exact destination `.md` path as CLI args),
+  never touching `state.db`/`discovery.py`. Deviates from the issue's
+  literal wording: does not call `src/vault.py`'s `write_lecture_note()` or
+  `src/postprocess.py`'s `parse_lecture_filename()`/`build_frontmatter()`
+  directly (both assume a course-folder/`lecture_NN...`-named source,
+  which an arbitrary manual conversion may not have) — instead calls the
+  lower building blocks (`process_pdf()` → `cleanup_pdf()` →
+  `copy_figures_to_vault()` → `rewrite_image_references()` →
+  `scan_delimiter_issues()`) plus a new local `_build_manual_frontmatter()`
+  that only renders `title`/`course`/`lecture_number`/`tags` when the
+  corresponding optional `--course`/`--lecture-number`/`--tags` CLI flag
+  is given (`output.course_tags` is never consulted). Figures land in
+  `dest_path.parent / "figures"`. Mathpix/LLM cache is a fresh
+  `tempfile.mkdtemp()`, deleted after the run (`--keep-cache` to retain
+  for debugging). `previous_content_hash` is always `None` (unconditional
+  overwrite) — manual mode is exempt from #40's conflict detection since
+  the user named this exact destination file explicitly. Lightweight
+  argparse-only tests added in `tests/test_manual_convert.py` (no real API
+  calls), per the issue's own testing-scope note. See #50's GitHub
+  comments for full implementation detail.
+- **#51** — filed, not started yet. See "Phase 7 Plan" under
   "Remaining Work — Phases 4-7 Plan" above for the full issue-by-issue
   breakdown and implementation order.
 
@@ -1144,7 +1165,7 @@ notex/                      ← repo root
 ├── scripts/
 │   ├── smoke_test_mathpix.py   ← manual, real-API Mathpix validation
 │   ├── smoke_test_llm.py       ← manual, real-API LLM prompt-iteration script
-│   └── manual_convert.py       ← [Phase 7, not yet implemented] manual mode: exact source PDF -> exact destination .md, full pipeline, stateless (no state.db/discovery.py)
+│   └── manual_convert.py       ← manual mode: exact source PDF -> exact destination .md, full pipeline, stateless (no state.db/discovery.py)
 ├── tests/
 │   ├── fixtures/           ← fixture data for mocked tests
 │   ├── test_mathpix.py
