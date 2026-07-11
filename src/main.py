@@ -235,11 +235,13 @@ import httpx
 
 from src.cli import build_arg_parser
 from src.config import (
+    CLIConfig,
     ConfigError,
     LLMConfig,
     NamingConfig,
     OutputConfig,
     PathsConfig,
+    load_cli_config,
     load_llm_config,
     load_mathpix_credentials,
     load_naming_config,
@@ -1337,10 +1339,13 @@ def main(argv: list[str] | None = None) -> int:
     calls reporter.on_done(runtime_secs=...) once it returns (still inside
     the `with reporter:` block) -- PlainReporter prints a trailing
     "Finished in X.XX s" line, RichReporter sets its Panel's subtitle to
-    "Done in X.X s". _print_summary() still always runs afterward,
-    independently of on_done() -- the two are complementary (on_done's
-    message is just a duration, _print_summary's is the full processed/
-    skipped/errors/tokens/cost breakdown).
+    "Done in X.X s". _print_summary() (the full processed/skipped/errors/
+    tokens/cost breakdown) is independent of on_done()'s duration message,
+    but -- unlike on_done() -- is gated behind config.yaml's cli:
+    print_summary flag (load_cli_config(), a further follow-up): it prints
+    only when print_summary is explicitly set true; the default (false, no
+    config.yaml, or no cli: section) is to omit it, since the live reporter
+    plus on_done()'s duration already cover most runs' needs.
 
     --file is validated here, before run() is ever called: the path must
     exist, end in .pdf (case-insensitive), and resolve to somewhere under
@@ -1358,6 +1363,8 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+
+    cli_config = load_cli_config()
 
     target_source_path = args.file
     if target_source_path is not None:
@@ -1401,7 +1408,8 @@ def main(argv: list[str] | None = None) -> int:
         runtime_secs = (datetime.now() - start_time).total_seconds()
         reporter.on_done(runtime_secs=runtime_secs)
 
-    _print_summary(summary, dry_run=args.dry_run)
+    if cli_config.print_summary:
+        _print_summary(summary, dry_run=args.dry_run)
     return 0
 
 

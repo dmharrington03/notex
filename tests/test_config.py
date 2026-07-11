@@ -42,6 +42,15 @@ Also covered here (issue #34 — config.yaml naming: settings):
       naming: section is absent, or lecture_prefix itself is missing —
       never raises ConfigError
     - lecture_prefix is a single global value, no per-course override
+
+Also covered here (Phase 7 follow-up — config.yaml cli: settings):
+    - load_cli_config() reads print_summary from a config.yaml's cli:
+      section
+    - falls back to DEFAULT_PRINT_SUMMARY (False) when the file is
+      missing, the cli: section is absent, or print_summary itself is
+      missing — never raises ConfigError
+    - print_summary gates src/main.py's main()'s full summary print (see
+      tests/test_main.py for the main()-level wiring)
 """
 
 from pathlib import Path
@@ -58,14 +67,17 @@ from src.config import (
     DEFAULT_MAX_POLL_ATTEMPTS,
     DEFAULT_MIN_LENGTH_RATIO,
     DEFAULT_POLL_INTERVAL_SECONDS,
+    DEFAULT_PRINT_SUMMARY,
     DEFAULT_PROMPT_VERSION,
     DEFAULT_STATE_DB,
+    CLIConfig,
     ConfigError,
     LLMConfig,
     MathpixPollingConfig,
     NamingConfig,
     OutputConfig,
     PathsConfig,
+    load_cli_config,
     load_llm_config,
     load_mathpix_polling_config,
     load_naming_config,
@@ -395,3 +407,59 @@ def test_naming_config_falls_back_to_defaults_when_lecture_prefix_key_missing(
     config = load_naming_config(config_path)
 
     assert config == NamingConfig(lecture_prefix=DEFAULT_LECTURE_PREFIX)
+
+
+def test_default_print_summary_is_false():
+    """
+    DEFAULT_PRINT_SUMMARY itself is False -- print_summary is off unless
+    config.yaml explicitly opts in (confirmed design decision).
+    """
+    assert DEFAULT_PRINT_SUMMARY is False
+
+
+def test_loads_cli_config_from_yaml(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("cli:\n  print_summary: true\n")
+
+    config = load_cli_config(config_path)
+
+    assert config == CLIConfig(print_summary=True)
+
+
+def test_cli_config_falls_back_to_defaults_when_file_missing(tmp_path):
+    missing_path = tmp_path / "does_not_exist.yaml"
+
+    config = load_cli_config(missing_path)
+
+    assert config == CLIConfig(print_summary=DEFAULT_PRINT_SUMMARY)
+
+
+def test_cli_config_falls_back_to_defaults_when_cli_section_missing(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("paths:\n  input_root: /tmp/notes_raw\n")
+
+    config = load_cli_config(config_path)
+
+    assert config == CLIConfig(print_summary=DEFAULT_PRINT_SUMMARY)
+
+
+def test_cli_config_falls_back_to_defaults_when_print_summary_key_missing(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("cli:\n  unrelated_key: \"foo\"\n")
+
+    config = load_cli_config(config_path)
+
+    assert config == CLIConfig(print_summary=DEFAULT_PRINT_SUMMARY)
+
+
+def test_cli_config_explicit_false_is_respected(tmp_path):
+    """
+    An explicit `print_summary: false` in config.yaml behaves identically
+    to it being absent -- both resolve to CLIConfig(print_summary=False).
+    """
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("cli:\n  print_summary: false\n")
+
+    config = load_cli_config(config_path)
+
+    assert config == CLIConfig(print_summary=False)

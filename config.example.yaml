@@ -32,3 +32,10 @@ naming:
   # Global prefix used for both the vault filename ("Lecture 01.md") and the
   # frontmatter title. No per-course override.
   lecture_prefix: "Lecture"
+
+cli:
+  # Whether main() prints the full processed/skipped/errors/tokens/cost
+  # breakdown at the end of a run. Off by default -- the live reporter
+  # (plus its "Finished in X.XX s"/"Done in X.X s" completion message)
+  # already covers most runs' needs.
+  print_summary: false

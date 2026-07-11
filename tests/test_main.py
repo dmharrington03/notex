@@ -185,7 +185,7 @@ import pytest
 import respx
 import yaml
 
-from src.config import ConfigError, LLMConfig, NamingConfig, OutputConfig, PathsConfig
+from src.config import CLIConfig, ConfigError, LLMConfig, NamingConfig, OutputConfig, PathsConfig
 from src.llm import LLMResult
 from src.main import RunSummary, main, run
 from src.mathpix import MathpixClient
@@ -2464,6 +2464,10 @@ def test_main_returns_zero_and_prints_summary_even_with_errors(monkeypatch, tmp_
 
     paths_config = _make_paths_config(tmp_path)
     monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+    # A later follow-up gated _print_summary() behind config.yaml's cli:
+    # print_summary flag, off by default -- explicitly enable it here so
+    # this test can still exercise/assert on the printed summary text.
+    monkeypatch.setattr(main_module, "load_cli_config", lambda: CLIConfig(print_summary=True))
     monkeypatch.setattr(
         main_module,
         "run",
@@ -2744,9 +2748,15 @@ def _setup_main_end_to_end(monkeypatch, tmp_path):
     test_main_file_and_rerun_llm_combined_reprocesses_only_that_files_llm_stage's
     precedent) and writes one course/lecture PDF. Returns
     (paths_config, conn, pdf_path).
+
+    load_cli_config is mocked to print_summary=True -- a later follow-up
+    gated the full summary print behind this flag (off by default), and
+    one of this helper's dependent tests
+    (test_main_calls_on_done_with_runtime_and_still_prints_full_summary)
+    asserts on that printed summary text.
     """
     import src.main as main_module
-    from src.config import MathpixCredentials
+    from src.config import CLIConfig, MathpixCredentials
 
     paths_config = _make_paths_config(tmp_path)
     monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
@@ -2758,6 +2768,7 @@ def _setup_main_end_to_end(monkeypatch, tmp_path):
     monkeypatch.setattr(main_module, "load_llm_config", _make_llm_config)
     monkeypatch.setattr(main_module, "load_output_config", _make_output_config)
     monkeypatch.setattr(main_module, "load_naming_config", _make_naming_config)
+    monkeypatch.setattr(main_module, "load_cli_config", lambda: CLIConfig(print_summary=True))
 
     conn = init_db(paths_config.state_db)
     course_dir = paths_config.input_root / "class_1"
@@ -2831,7 +2842,9 @@ def test_main_calls_on_done_with_runtime_and_still_prints_full_summary(
     reporter.on_done(runtime_secs=...) once it returns, still inside the
     `with reporter:` block -- PlainReporter's on_done() prints a trailing
     "Finished in X.XX s" line. _print_summary()'s full processed/skipped/
-    errors/tokens/cost breakdown still prints afterward too, unaffected by
+    errors/tokens/cost breakdown still prints afterward too (with
+    cli.print_summary explicitly enabled by _setup_main_end_to_end -- a
+    later follow-up made this opt-in, off by default), unaffected by
     on_done() -- the two lines are complementary, not a replacement for
     one another.
     """
@@ -2849,6 +2862,91 @@ def test_main_calls_on_done_with_runtime_and_still_prints_full_summary(
 
     assert re.search(r"Finished in \d+\.\d\d s", out)
     assert "Documents processed: 1" in out
+
+
+# --- Phase 7 follow-up: config.yaml's cli: print_summary flag ---
+
+
+def test_main_omits_summary_by_default(monkeypatch, tmp_path, capsys):
+    """
+    print_summary defaults to False (DEFAULT_PRINT_SUMMARY) -- when
+    load_cli_config() isn't overridden to say otherwise, main() never
+    calls _print_summary() at all. on_done()'s "Finished in X.XX s" line
+    still prints regardless, since it isn't gated by this flag.
+    """
+    import re
+
+    import src.main as main_module
+
+    paths_config = _make_paths_config(tmp_path)
+    monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+    monkeypatch.setattr(
+        main_module,
+        "run",
+        lambda paths_config, conn, client=None, course=None, dry_run=False, force=False, force_llm=False, target_source_path=None, force_vault_overwrite=False, no_llm=False, reporter=None: RunSummary(
+            processed=1, skipped=0, errors=0, ungrouped=0
+        ),
+    )
+
+    exit_code = main([])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "Documents processed" not in out
+    assert re.search(r"Finished in \d+\.\d\d s", out)
+
+
+def test_main_explicit_print_summary_false_omits_summary(monkeypatch, tmp_path, capsys):
+    import src.main as main_module
+
+    paths_config = _make_paths_config(tmp_path)
+    monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+    monkeypatch.setattr(main_module, "load_cli_config", lambda: CLIConfig(print_summary=False))
+    monkeypatch.setattr(
+        main_module,
+        "run",
+        lambda paths_config, conn, client=None, course=None, dry_run=False, force=False, force_llm=False, target_source_path=None, force_vault_overwrite=False, no_llm=False, reporter=None: RunSummary(
+            processed=1, skipped=0, errors=0, ungrouped=0
+        ),
+    )
+
+    exit_code = main([])
+
+    assert exit_code == 0
+    assert "Documents processed" not in capsys.readouterr().out
+
+
+def test_main_reads_print_summary_from_real_config_yaml(monkeypatch, tmp_path, capsys):
+    """
+    End-to-end confirmation of the internal load_cli_config()-if-not-
+    overridden path (no CLIConfig injected) -- a real on-disk config.yaml
+    with cli.print_summary: true actually causes main() to print the
+    summary, mirroring the existing real-config.yaml precedent used for
+    output_config/naming_config (see run()'s own such test).
+    """
+    import src.main as main_module
+
+    paths_config = _make_paths_config(tmp_path)
+    monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+    monkeypatch.setattr(
+        main_module,
+        "run",
+        lambda paths_config, conn, client=None, course=None, dry_run=False, force=False, force_llm=False, target_source_path=None, force_vault_overwrite=False, no_llm=False, reporter=None: RunSummary(
+            processed=1, skipped=0, errors=0, ungrouped=0
+        ),
+    )
+
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text("cli:\n  print_summary: true\n", encoding="utf-8")
+    # load_cli_config() (called directly by main(), not overridden above)
+    # resolves config.yaml relative to cwd -- chdir so it picks up the
+    # file just written.
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = main([])
+
+    assert exit_code == 0
+    assert "Documents processed: 1" in capsys.readouterr().out
 
 
 # --- Issue #49: _select_reporter() TTY auto-detection ---

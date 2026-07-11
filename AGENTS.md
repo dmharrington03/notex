@@ -801,8 +801,41 @@ narrative and real-data-validation findings.
   clearing on terminal stages, `_render()`'s actual `Spinner` vs. plain-
   string cell type, verbose detail suffix rendering inside an active
   spinner's text) and `tests/test_main.py` (`_RecordingReporter.on_done`'s
-  signature updated to match, a new end-to-end test confirming `main()`
+   signature updated to match, a new end-to-end test confirming `main()`
   prints the `"Finished in X.XX s"` line *and* the full summary).
+- **`cli.print_summary` config flag (done, untriaged, no GitHub issue
+  filed, no phase label)** — `src/config.py` gained `CLIConfig`
+  (`print_summary: bool`) + `load_cli_config()`, the same fully-optional
+  fallback pattern as every other `load_*_config()` here;
+  `DEFAULT_PRINT_SUMMARY = False`. `src/main.py`'s `main()` calls
+  `load_cli_config()` directly (unconditional, same as `load_paths_config()`
+  — not threaded through `run()`, since `_print_summary()` is a `main()`-
+  only concern) and now only calls `_print_summary(...)` when
+  `cli_config.print_summary` is `True`; `on_done()`'s `"Finished in X.XX s"`
+  line is unaffected either way (not gated by this flag). Off by default,
+  per explicit user direction — the live reporter plus `on_done()`'s
+  duration message already cover most runs' needs, so the full processed/
+  skipped/errors/tokens/cost breakdown is now opt-in via `config.yaml`'s
+  new `cli: print_summary: true`. Added to both `config.example.yaml` and
+  the local `config.yaml` (both defaulting `false`). Since `main()` calls
+  `load_cli_config()` unconditionally just like `load_paths_config()`, any
+  test invoking `main()` without mocking it falls back to reading the
+  real on-disk `config.yaml` — harmless (matches the `False` default
+  regardless) for the ~15 existing flag-parsing tests that don't assert on
+  summary text; only the two tests that do assert on it
+  (`test_main_returns_zero_and_prints_summary_even_with_errors`,
+  `_setup_main_end_to_end`'s dependents) needed an explicit
+  `load_cli_config` mock (`CLIConfig(print_summary=True)`) to keep passing,
+  a deliberate, minimal-blast-radius choice over updating every unrelated
+  test. New tests: `tests/test_config.py` covers `load_cli_config()`'s
+  full fallback matrix (missing file/section/key, explicit `true`/`false`);
+  `tests/test_main.py` adds a default-omits-summary test (mocked `run()`,
+  no `CLIConfig` override), an explicit-`False` test, and a real-on-disk-
+  `config.yaml` end-to-end test (`monkeypatch.chdir`, no `load_cli_config`
+  override) mirroring the existing `output_config`/`naming_config`
+  real-file-fallback precedent. Manually verified end-to-end against the
+  real `config.yaml` (`--dry-run`, toggling `print_summary` true/false)
+  before restoring it to `false`.
 - **#50, #51** — filed, not started yet. See "Phase 7 Plan" under
   "Remaining Work — Phases 4-7 Plan" above for the full issue-by-issue
   breakdown and implementation order.

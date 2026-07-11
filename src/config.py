@@ -12,9 +12,10 @@ config.yaml (all optional, same fully-optional fallback pattern as the
 mathpix: section), the output: course_tags / date_format /
 figures_dark_mode_flag settings from config.yaml (also fully optional, same
 pattern; course_tags has no global/default fallback — see OutputConfig's
-docstring), and the naming: lecture_prefix setting from config.yaml (also
+docstring), the naming: lecture_prefix setting from config.yaml (also
 fully optional, same pattern; a single global value, no per-course
-override).
+override), and the cli: print_summary setting from config.yaml (also fully
+optional, same pattern; defaults to False -- see CLIConfig's docstring).
 """
 
 from __future__ import annotations
@@ -66,6 +67,14 @@ DEFAULT_FIGURES_DARK_MODE_FLAG = False
 # DEFAULT_DATE_FORMAT above).
 DEFAULT_LECTURE_PREFIX = "Lecture"
 
+# Phase 7 — cli: section default. Controls whether src/main.py's main()
+# prints the full processed/skipped/errors/tokens/cost breakdown
+# (_print_summary()) at the end of a run -- off by default, since the
+# live reporter (PlainReporter/RichReporter) already surfaces per-file
+# progress and RichReporter's on_done() already shows a duration; the
+# full breakdown is an opt-in extra, not something every run needs.
+DEFAULT_PRINT_SUMMARY = False
+
 
 class ConfigError(Exception):
     """Raised when required configuration is missing or invalid."""
@@ -116,6 +125,11 @@ class OutputConfig:
 @dataclass(frozen=True)
 class NamingConfig:
     lecture_prefix: str
+
+
+@dataclass(frozen=True)
+class CLIConfig:
+    print_summary: bool
 
 
 def load_mathpix_credentials(env_file: str | None = None) -> MathpixCredentials:
@@ -381,3 +395,37 @@ def load_naming_config(config_path: str | Path | None = None) -> NamingConfig:
         lecture_prefix = naming_section.get("lecture_prefix", lecture_prefix)
 
     return NamingConfig(lecture_prefix=lecture_prefix)
+
+
+def load_cli_config(config_path: str | Path | None = None) -> CLIConfig:
+    """
+    Load the cli: print_summary setting from config.yaml.
+
+    Args:
+        config_path: optional explicit path to config.yaml. If not given,
+            defaults to DEFAULT_CONFIG_PATH (config.yaml in the current
+            working directory), matching the project convention of running
+            the CLI from the repo root.
+
+    config.yaml (and the cli: section/key within it) is fully optional
+    here, same fallback pattern as load_naming_config()/load_output_config():
+    if the file doesn't exist, the cli: section is absent, or print_summary
+    itself is missing, DEFAULT_PRINT_SUMMARY (False) is used instead. Never
+    raises ConfigError.
+
+    print_summary gates src/main.py's main()'s call to _print_summary() --
+    the full processed/skipped/errors/tokens/cost breakdown printed after a
+    run. See CLIConfig's docstring/DEFAULT_PRINT_SUMMARY's comment for why
+    it defaults to off.
+    """
+    path = Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
+
+    print_summary: bool = DEFAULT_PRINT_SUMMARY
+
+    if path.is_file():
+        with path.open("r") as fh:
+            data: dict[str, Any] = yaml.safe_load(fh) or {}
+        cli_section = data.get("cli") or {}
+        print_summary = cli_section.get("print_summary", print_summary)
+
+    return CLIConfig(print_summary=print_summary)
