@@ -836,6 +836,27 @@ narrative and real-data-validation findings.
   real-file-fallback precedent. Manually verified end-to-end against the
   real `config.yaml` (`--dry-run`, toggling `print_summary` true/false)
   before restoring it to `false`.
+  **Third follow-up to #49 (capitalization + user-made color tweaks):**
+  capitalized the first word of every `_STAGE_TEXT` value (`"would
+  process..."` → `"Would process..."`, `"processing..."` →
+  `"Processing..."`, `"done..."` → `"Done..."`, `"retrying vault
+  write..."` → `"Retrying vault write..."`, `"reprocessing LLM stage
+  only..."` → `"Reprocessing LLM stage only..."`; `"Editing..."`,
+  `"✓ Done"`, and the two `"LLM cleanup..."` entries were already
+  capitalized). `_UNGROUPED_STAGE_TEXT` deliberately left as-is — a
+  separate constant, not part of `_STAGE_TEXT`. Also reviewed and kept
+  two user-made `RichReporter` color changes: `_style_for()`'s default
+  fallback style (dry-run `"Would process/reprocess/retry"` rows and any
+  other uncategorized stage) changed from cyan to white; the
+  `submitting:new/changed/retry` spinner color changed from cyan to
+  white to match (`editing:llm`/`reprocessing_llm` stay yellow,
+  `retrying_vault_write` stays cyan) — fixed one stale comment that still
+  described the old cyan/yellow spinner-color split. Also kept the
+  user-made table title format change, `"{N} documents found"` →
+  `"({N}) documents found"`. Tests updated throughout
+  `tests/test_reporting.py` (exact-text/spinner-color/title assertions)
+  and `tests/test_main.py` (`PlainReporter` output text, unaffected by
+  the color changes since it has no color).
 - **#50, #51** — filed, not started yet. See "Phase 7 Plan" under
   "Remaining Work — Phases 4-7 Plan" above for the full issue-by-issue
   breakdown and implementation order.
