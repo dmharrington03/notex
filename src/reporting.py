@@ -99,7 +99,7 @@ on_detail() (issue #48, when verbose=True) uses the exact same derived
 indent to visually distinguish a detail line as a sub-line of whichever
 on_stage transition it belongs under, e.g.:
 
-    [class_1] lecture_01.pdf: processing (new)...
+    [class_1] lecture_01.pdf: Processing (new)...
         [class_1] lecture_01.pdf: mathpix pdf: poll 3/40 status=loaded
     [class_1] lecture_01.pdf: ✓ Done
 
@@ -161,16 +161,16 @@ class Reporter(Protocol):
 # delimiter-balance warnings, which can't be enumerated into a fixed
 # vocabulary without losing information.
 _STAGE_TEXT: dict[str, str] = {
-    "would_process:new": "would process (new)",
-    "would_process:changed": "would process (changed)",
-    "would_process:retry": "would process (retry)",
-    "would_reprocess_llm": "would reprocess LLM stage only",
-    "would_retry_vault": "would retry vault write (force_vault_overwrite)",
-    "submitting:new": "processing (new)...",
-    "submitting:changed": "processing (changed)...",
-    "submitting:retry": "processing (retry)...",
+    "would_process:new": "Would process (new)",
+    "would_process:changed": "Would process (changed)",
+    "would_process:retry": "Would process (retry)",
+    "would_reprocess_llm": "Would reprocess LLM stage only",
+    "would_retry_vault": "Would retry vault write (force_vault_overwrite)",
+    "submitting:new": "Processing (new)...",
+    "submitting:changed": "Processing (changed)...",
+    "submitting:retry": "Processing (retry)...",
     "editing:llm": "Editing...",
-    "done:no_llm": "done (LLM stage skipped, --no-llm)",
+    "done:no_llm": "Done (LLM stage skipped, --no-llm)",
     # Plain text only -- no embedded Rich markup here (this dict is printed
     # verbatim by PlainReporter's print(), which doesn't interpret Rich
     # markup). RichReporter still renders this in green: its existing
@@ -178,9 +178,9 @@ _STAGE_TEXT: dict[str, str] = {
     # the row's style, so no color tags need to be embedded in the text
     # itself.
     "done:llm_success": "✓ Done",
-    "done:llm_fallback": "done (LLM cleanup fell back to raw output)",
-    "retrying_vault_write": "retrying vault write (force_vault_overwrite)...",
-    "reprocessing_llm": "reprocessing LLM stage only...",
+    "done:llm_fallback": "Done (LLM cleanup fell back to raw output)",
+    "retrying_vault_write": "Retrying vault write (force_vault_overwrite)...",
+    "reprocessing_llm": "Reprocessing LLM stage only...",
     "llm_only:llm_success": "LLM cleanup succeeded",
     "llm_only:llm_fallback": "LLM cleanup fell back to raw output",
 }
@@ -284,23 +284,23 @@ def _style_for(stage: str, text: str) -> str:
         return "bold red"
     if "WARNING" in text or "conflict" in text:
         return "yellow"
-    return "cyan"
+    return "white"
 
 
 # RichReporter-only: on_stage tokens for genuinely in-progress (not yet
 # terminal) work, mapped to the rich.spinner.Spinner color/style to use
 # while that row sits in this stage -- an animated spinner replaces the
 # plain static text a non-spinner stage would otherwise show (see
-# RichReporter.on_stage()/_render()). Cyan for the non-LLM (Mathpix
-# submit / vault-write-retry) stages, yellow for the two LLM-stage ones --
-# mirrors _CANONICAL_STYLE's yellow-for-fallback/LLM-adjacent convention.
-# Any stage not listed here (including every terminal "done:*"/
-# "llm_only:*" outcome) never gets a spinner, regardless of _style_for()'s
-# own (unrelated) style heuristic.
+# RichReporter.on_stage()/_render()). White for the Mathpix submit
+# stages, cyan for the vault-write-retry stage, yellow for the two
+# LLM-stage ones -- mirrors _CANONICAL_STYLE's yellow-for-fallback/
+# LLM-adjacent convention. Any stage not listed here (including every
+# terminal "done:*"/"llm_only:*" outcome) never gets a spinner,
+# regardless of _style_for()'s own (unrelated) style heuristic.
 _SPINNER_STAGES: dict[str, str] = {
-    "submitting:new": "cyan",
-    "submitting:changed": "cyan",
-    "submitting:retry": "cyan",
+    "submitting:new": "white",
+    "submitting:changed": "white",
+    "submitting:retry": "white",
     "editing:llm": "yellow",
     "reprocessing_llm": "yellow",
     "retrying_vault_write": "cyan",
@@ -394,7 +394,7 @@ class RichReporter:
 
     def _render(self, subtitle: str | None = None) -> "Align":
         count = len(self._rows)
-        title = f"{count} document{'' if count == 1 else 's'} found"
+        title = f"({count}) document{'' if count == 1 else 's'} found"
         table = Table(title=title, box=box.SIMPLE_HEAD)
         table.add_column("Course", style="cyan")
         table.add_column("File", style="magenta")

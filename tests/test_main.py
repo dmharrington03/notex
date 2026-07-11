@@ -2681,7 +2681,7 @@ def test_run_default_reporter_still_prints_to_stdout(client, tmp_path, monkeypat
 
     assert summary.processed == 1
     out = capsys.readouterr().out
-    assert "[class_1] lecture_01.pdf: processing (new)..." in out
+    assert "[class_1] lecture_01.pdf: Processing (new)..." in out
     assert "[class_1] lecture_01.pdf: Editing..." in out
     assert "[class_1] lecture_01.pdf: ✓ Done" in out
 
@@ -2802,7 +2802,7 @@ def test_main_verbose_flag_prints_detail_lines_not_seen_by_default(
     out = capsys.readouterr().out
 
     # Existing (non-verbose) output lines are still present, unchanged.
-    assert "[class_1] lecture_01.pdf: processing (new)..." in out
+    assert "[class_1] lecture_01.pdf: Processing (new)..." in out
     assert "[class_1] lecture_01.pdf: ✓ Done" in out
 
     # New verbose-only detail lines.
@@ -2824,7 +2824,7 @@ def test_main_without_verbose_omits_detail_lines(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
 
     # Existing (non-verbose) output lines are still present.
-    assert "[class_1] lecture_01.pdf: processing (new)..." in out
+    assert "[class_1] lecture_01.pdf: Processing (new)..." in out
     assert "[class_1] lecture_01.pdf: ✓ Done" in out
 
     # None of the verbose-only detail lines appear by default.
@@ -3013,5 +3013,5 @@ def test_main_selects_plain_reporter_end_to_end_when_not_a_tty(tmp_path, monkeyp
 
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "[class_1] lecture_01.pdf: processing (new)..." in out
+    assert "[class_1] lecture_01.pdf: Processing (new)..." in out
     assert "[class_1] lecture_01.pdf: ✓ Done" in out

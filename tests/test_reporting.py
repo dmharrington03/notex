@@ -33,7 +33,7 @@ def test_on_stage_canonical_token_renders_exact_text(capsys):
     reporter.on_stage("/notes_raw/class_1/lecture_01.pdf", "submitting:new")
 
     out = capsys.readouterr().out
-    assert out == "[class_1] lecture_01.pdf: processing (new)...\n"
+    assert out == "[class_1] lecture_01.pdf: Processing (new)...\n"
 
 
 def test_on_stage_covers_every_canonical_transition(capsys):
@@ -41,20 +41,20 @@ def test_on_stage_covers_every_canonical_transition(capsys):
     source_path = "/notes_raw/class_1/lecture_01.pdf"
 
     cases = {
-        "would_process:new": "would process (new)",
-        "would_process:changed": "would process (changed)",
-        "would_process:retry": "would process (retry)",
-        "would_reprocess_llm": "would reprocess LLM stage only",
-        "would_retry_vault": "would retry vault write (force_vault_overwrite)",
-        "submitting:new": "processing (new)...",
-        "submitting:changed": "processing (changed)...",
-        "submitting:retry": "processing (retry)...",
+        "would_process:new": "Would process (new)",
+        "would_process:changed": "Would process (changed)",
+        "would_process:retry": "Would process (retry)",
+        "would_reprocess_llm": "Would reprocess LLM stage only",
+        "would_retry_vault": "Would retry vault write (force_vault_overwrite)",
+        "submitting:new": "Processing (new)...",
+        "submitting:changed": "Processing (changed)...",
+        "submitting:retry": "Processing (retry)...",
         "editing:llm": "Editing...",
-        "done:no_llm": "done (LLM stage skipped, --no-llm)",
+        "done:no_llm": "Done (LLM stage skipped, --no-llm)",
         "done:llm_success": "✓ Done",
-        "done:llm_fallback": "done (LLM cleanup fell back to raw output)",
-        "retrying_vault_write": "retrying vault write (force_vault_overwrite)...",
-        "reprocessing_llm": "reprocessing LLM stage only...",
+        "done:llm_fallback": "Done (LLM cleanup fell back to raw output)",
+        "retrying_vault_write": "Retrying vault write (force_vault_overwrite)...",
+        "reprocessing_llm": "Reprocessing LLM stage only...",
         "llm_only:llm_success": "LLM cleanup succeeded",
         "llm_only:llm_fallback": "LLM cleanup fell back to raw output",
     }
@@ -255,7 +255,7 @@ def test_rich_reporter_on_stage_updates_seeded_row():
     reporter.on_discover([(source_path, "new")])
 
     reporter.on_stage(source_path, "submitting:new")
-    assert reporter._rows[source_path]["status"] == "processing (new)..."
+    assert reporter._rows[source_path]["status"] == "Processing (new)..."
 
     reporter.on_stage(source_path, "done:llm_success")
     assert reporter._rows[source_path]["status"] == "✓ Done"
@@ -280,8 +280,8 @@ def test_rich_reporter_full_lifecycle_waiting_processing_editing_done():
     assert reporter._rows[source_path]["spinner"] is None
 
     reporter.on_stage(source_path, "submitting:new")
-    assert reporter._rows[source_path]["status"] == "processing (new)..."
-    assert reporter._rows[source_path]["spinner"] == "cyan"
+    assert reporter._rows[source_path]["status"] == "Processing (new)..."
+    assert reporter._rows[source_path]["spinner"] == "white"
 
     reporter.on_stage(source_path, "editing:llm")
     assert reporter._rows[source_path]["status"] == "Editing..."
@@ -305,9 +305,9 @@ def test_rich_reporter_spinner_set_for_every_in_progress_stage():
     source_path = "/notes_raw/class_1/lecture_01.pdf"
 
     cases = {
-        "submitting:new": "cyan",
-        "submitting:changed": "cyan",
-        "submitting:retry": "cyan",
+        "submitting:new": "white",
+        "submitting:changed": "white",
+        "submitting:retry": "white",
         "editing:llm": "yellow",
         "reprocessing_llm": "yellow",
         "retrying_vault_write": "cyan",
@@ -410,7 +410,7 @@ def test_rich_reporter_on_stage_can_add_a_row_not_seeded_by_on_discover():
     row = reporter._rows["/notes_raw/class_2/lecture_03.pdf"]
     assert row["course"] == "class_2"
     assert row["filename"] == "lecture_03"
-    assert row["status"] == "done (LLM cleanup fell back to raw output)"
+    assert row["status"] == "Done (LLM cleanup fell back to raw output)"
     assert row["style"] == "yellow"
 
 
@@ -504,17 +504,17 @@ def test_rich_reporter_render_title_reflects_row_count():
     reporter = RichReporter()
     rendered = reporter._render()
     table = rendered.renderable.renderable
-    assert table.title == "0 documents found"
+    assert table.title == "(0) documents found"
 
     reporter.on_discover([("/x/a.pdf", "new")])
     rendered = reporter._render()
     table = rendered.renderable.renderable
-    assert table.title == "1 document found"
+    assert table.title == "(1) document found"
 
     reporter.on_discover([("/x/b.pdf", "new")])
     rendered = reporter._render()
     table = rendered.renderable.renderable
-    assert table.title == "2 documents found"
+    assert table.title == "(2) documents found"
 
 
 def test_rich_reporter_render_subtitle_reflects_on_done():
