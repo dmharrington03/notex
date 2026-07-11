@@ -87,14 +87,16 @@ Dependencies are tracked in `environment.yml` (reproduce with
 
 ## Current Phase
 
-**Phases 1-6 are all VALIDATED — complete** (see "Phase Progress" below for
-each phase's confirmed design/findings). **Phase 7 — CLI polish + new
-feature requests — IN PROGRESS**, issues #41-#51 filed (all open, none
-started yet). See "Remaining Work — Phases 4-7 Plan" below for Phase 7's
-full scope and the "Phase 7 Plan" subsection immediately below that for the
-issue-by-issue breakdown and implementation order. See `docs/spec.md` for
-the full original roadmap (note: follow this file, AGENTS.md, not spec.md,
-where they disagree).
+**Phases 1-7 are all VALIDATED — complete** (see "Phase Progress" below for
+each phase's confirmed design/findings). Issues #41-#51 (Phase 7's full
+scope) are all done, including #51's two-part real-data validation pass
+(pre- and post-#47-#50). See "Remaining Work — Phases 4-7 Plan" below for
+Phase 7's full scope and the "Phase 7 Plan" subsection immediately below
+that for the issue-by-issue breakdown and implementation order. See
+`docs/spec.md` for the full original roadmap (note: follow this file,
+AGENTS.md, not spec.md, where they disagree). No further phases are
+currently planned — future work would start a new phase/issue set as it's
+identified.
 
 **#39 (closed, won't-fix)**: `src/vault.py`'s `write_lecture_note()` derives
 its output filename from the current `lecture_prefix`, but never removes a
@@ -369,7 +371,7 @@ mode, validation last). `rich` is added to `environment.yml` inside the
 Brief status only — see each issue's GitHub comments for implementation
 narrative and real-data-validation findings.
 
-### Phase 7 (IN PROGRESS, issues #41-#51)
+### Phase 7 (VALIDATED — complete, issues #41-#51)
 
 - **#41 (done)** — `src/cli.py`: new module holding `build_arg_parser()`
   (argparse scaffolding) + the first flag, `--course NAME`. Deviates from
@@ -878,9 +880,29 @@ narrative and real-data-validation findings.
   argparse-only tests added in `tests/test_manual_convert.py` (no real API
   calls), per the issue's own testing-scope note. See #50's GitHub
   comments for full implementation detail.
-- **#51** — filed, not started yet. See "Phase 7 Plan" under
-  "Remaining Work — Phases 4-7 Plan" above for the full issue-by-issue
-  breakdown and implementation order.
+- **#51 (done)** — real-data validation, run in two parts since it
+  depended on every other Phase 7 issue landing first. Part 1 (pre-
+  `--verbose`/`RichReporter`/manual mode): 38 real invocations against
+  `--course`/`--dry-run`/`--force`/`--rerun-llm`/`--file`/
+  `--force-vault-overwrite`/`--no-llm`, individually and combined — all
+  behaved as designed; found and fixed #52 (`--force --no-llm` leaving a
+  stale `llm_status="success"`) and documented one still-open, narrow,
+  accepted UX gap (`--force-vault-overwrite` combined *again* with
+  `--no-llm` on a no-llm-only conflicted file silently no-ops with no
+  message). Part 2 (post-#47-#50): 5 real invocations covering the
+  remaining scope — `--verbose`'s detail lines (Mathpix poll counts,
+  LLM token/cost, figure-copy, vault-write confirmation) all correct;
+  `RichReporter`'s TTY auto-detection and fallback-when-piped both
+  confirmed (dry-run, free), plus one real end-to-end TTY run showing
+  the animated spinner genuinely cycling frames and the verbose detail
+  suffix rendering correctly; `scripts/manual_convert.py` validated
+  fully stateless (`state.db` checksum unchanged across two real runs)
+  with every optional flag (`--course`/`--lecture-number`/`--tags`/
+  `--dark-mode`/`--no-dark-mode`/`--keep-cache`/`--prompt-version`)
+  behaving correctly, alone and combined. No bugs found in part 2; no
+  code changes needed. All test fixtures/copies were cleaned up
+  afterward and `notes_raw`'s real files confirmed byte-identical
+  throughout both parts. Full detail in both parts' GitHub comments.
 
 ### Phase 6 (VALIDATED — complete, issues #33-#38)
 
