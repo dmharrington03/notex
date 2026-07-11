@@ -30,7 +30,13 @@ docstring for the full rationale. main() now selects between
 RichReporter/PlainReporter via _select_reporter() (stdout is an
 interactive TTY and rich is importable -> RichReporter; otherwise
 PlainReporter) and wraps the run() call in `with reporter:` so a
-RichReporter's Live display starts/stops cleanly.
+RichReporter's Live display starts/stops cleanly. A #49 follow-up adds one
+more on_stage() call, "editing:llm", fired right before cleanup_pdf() on
+the actionable NEW/CHANGED/RETRY path -- gives a live-updating reporter a
+distinct waiting -> processing -> editing -> done per-file progression
+(processing = Mathpix stage, editing = LLM stage) instead of jumping
+straight from "processing" to "done" with no signal the LLM call has
+started.
 
 Two entry points:
     - run(paths_config, conn, client=None, llm_config=None,
@@ -621,7 +627,14 @@ def _process_file(
             defaulting to PlainReporter()). process_pdf()'s on_status hook
             and cleanup_pdf()'s new equivalent are both wired here to call
             reporter.on_detail(source_path, ...) -- verbose-only, a no-op
-            in PlainReporter today.
+            in PlainReporter today. On the actionable NEW/CHANGED/RETRY
+            path (when not no_llm), reporter.on_stage(source_path,
+            "editing:llm") is fired immediately before cleanup_pdf() is
+            called -- a follow-up to issue #49, giving a live-updating
+            reporter (RichReporter) a distinct transitional state between
+            the Mathpix stage ("submitting:*") and the LLM outcome
+            ("done:llm_*"), rather than jumping straight from one to the
+            other with no signal that the LLM call has started.
 
     Returns:
         A _FileOutcome with the increments this file contributes to the
@@ -753,6 +766,7 @@ def _process_file(
             )
 
         lecture_stem = Path(result.source_path).stem
+        reporter.on_stage(result.source_path, "editing:llm")
         llm_result = cleanup_pdf(
             process_result.markdown_path,
             cache_dir,

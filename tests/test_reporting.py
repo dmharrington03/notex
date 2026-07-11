@@ -44,6 +44,7 @@ def test_on_stage_covers_every_canonical_transition(capsys):
         "submitting:new": "processing (new)...",
         "submitting:changed": "processing (changed)...",
         "submitting:retry": "processing (retry)...",
+        "editing:llm": "editing (LLM cleanup)...",
         "done:no_llm": "done (LLM stage skipped, --no-llm)",
         "done:llm_success": "done (LLM cleanup succeeded)",
         "done:llm_fallback": "done (LLM cleanup fell back to raw output)",
@@ -247,6 +248,32 @@ def test_rich_reporter_on_stage_updates_seeded_row():
     reporter.on_stage(source_path, "done:llm_success")
     assert reporter._rows[source_path]["status"] == "done (LLM cleanup succeeded)"
     assert reporter._rows[source_path]["style"] == "green"
+
+
+def test_rich_reporter_full_lifecycle_waiting_processing_editing_done():
+    """
+    The full waiting -> processing -> editing -> done progression a
+    live-updating reporter observes for one actionable (NEW/CHANGED/RETRY)
+    file: seeded as "waiting" by on_discover, "processing (...)" during the
+    Mathpix stage (submitting:*), "editing (LLM cleanup)..." once the LLM
+    stage begins (a #49 follow-up), and finally a "done" outcome.
+    """
+    from src.reporting import RichReporter
+
+    reporter = RichReporter()
+    source_path = "/notes_raw/class_1/lecture_01.pdf"
+
+    reporter.on_discover([(source_path, "new")])
+    assert reporter._rows[source_path]["status"] == "waiting"
+
+    reporter.on_stage(source_path, "submitting:new")
+    assert reporter._rows[source_path]["status"] == "processing (new)..."
+
+    reporter.on_stage(source_path, "editing:llm")
+    assert reporter._rows[source_path]["status"] == "editing (LLM cleanup)..."
+
+    reporter.on_stage(source_path, "done:llm_success")
+    assert reporter._rows[source_path]["status"] == "done (LLM cleanup succeeded)"
 
 
 def test_rich_reporter_on_stage_can_add_a_row_not_seeded_by_on_discover():

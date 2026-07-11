@@ -732,6 +732,26 @@ narrative and real-data-validation findings.
   file data, both already-processed real lectures correctly show "up to
   date", Live starts/stops cleanly, and the plain-text summary still
   prints afterward.
+  **Follow-up (same issue, user-requested after initial implementation):**
+  the actionable NEW/CHANGED/RETRY path had no transitional signal between
+  the Mathpix stage and the final LLM outcome — a live-updating reporter's
+  row would sit on `"processing (new)..."` for the entire LLM call, then
+  jump straight to `"done (LLM cleanup succeeded)"`. Added one new
+  `on_stage(source_path, "editing:llm")` call in `_process_file()`,
+  immediately before `cleanup_pdf()` is invoked (actionable path only —
+  `--no-llm` skips `cleanup_pdf()` entirely, and the separate UNCHANGED
+  LLM-only-rerun path already had its own pre-existing `"reprocessing_llm"`
+  stage announcing the same moment, left untouched). New `_STAGE_TEXT`
+  entry: `"editing:llm"` → `"editing (LLM cleanup)..."`. Gives every
+  reporter (`PlainReporter` prints a new line; `RichReporter`'s table shows
+  it) a `waiting → processing (Mathpix) → editing (LLM) → done` per-file
+  progression instead of `waiting → processing → done`. Tests added:
+  `tests/test_reporting.py` covers the new canonical token's exact text
+  plus a `RichReporter` full-lifecycle test asserting the row's status
+  string at each of the four stages in order; `tests/test_main.py` asserts
+  `"editing:llm"` is recorded between `"submitting:new"` and
+  `"done:llm_success"` in `_RecordingReporter`'s stage list, and that the
+  default (`PlainReporter`) path prints the new line to stdout.
 - **#50, #51** — filed, not started yet. See "Phase 7 Plan" under
   "Remaining Work — Phases 4-7 Plan" above for the full issue-by-issue
   breakdown and implementation order.

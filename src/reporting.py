@@ -163,6 +163,7 @@ _STAGE_TEXT: dict[str, str] = {
     "submitting:new": "processing (new)...",
     "submitting:changed": "processing (changed)...",
     "submitting:retry": "processing (retry)...",
+    "editing:llm": "editing (LLM cleanup)...",
     "done:no_llm": "done (LLM stage skipped, --no-llm)",
     "done:llm_success": "done (LLM cleanup succeeded)",
     "done:llm_fallback": "done (LLM cleanup fell back to raw output)",

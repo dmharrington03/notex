@@ -2633,6 +2633,13 @@ def test_run_wires_custom_reporter_for_new_file(client, tmp_path, monkeypatch):
     assert "submitting:new" in stage_tokens
     assert "done:llm_success" in stage_tokens
 
+    # Follow-up to #49: "editing:llm" fires between the Mathpix ("submitting:*")
+    # and LLM-outcome ("done:*") stages, right before cleanup_pdf() is called
+    # -- gives a live-updating reporter a waiting -> processing -> editing ->
+    # done progression instead of jumping straight to "done".
+    assert stage_tokens.index("submitting:new") < stage_tokens.index("editing:llm")
+    assert stage_tokens.index("editing:llm") < stage_tokens.index("done:llm_success")
+
     # process_pdf()'s on_status hook is now wired to on_detail() -- at
     # least one polling detail should have been recorded for this file.
     assert any(path == source_path for path, _ in reporter.details)
@@ -2666,6 +2673,7 @@ def test_run_default_reporter_still_prints_to_stdout(client, tmp_path, monkeypat
     assert summary.processed == 1
     out = capsys.readouterr().out
     assert "[class_1] lecture_01.pdf: processing (new)..." in out
+    assert "[class_1] lecture_01.pdf: editing (LLM cleanup)..." in out
     assert "[class_1] lecture_01.pdf: done (LLM cleanup succeeded)" in out
 
 
