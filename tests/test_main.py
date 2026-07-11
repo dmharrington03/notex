@@ -295,7 +295,9 @@ def _install_fake_cleanup_pdf(
 
     calls: list[dict] = []
 
-    def _fake_cleanup_pdf(mathpix_markdown_path, dest_dir, lecture_stem, llm_config, client=None):
+    def _fake_cleanup_pdf(
+        mathpix_markdown_path, dest_dir, lecture_stem, llm_config, client=None, on_status=None
+    ):
         calls.append(
             {
                 "mathpix_markdown_path": Path(mathpix_markdown_path),
@@ -2413,3 +2415,148 @@ def test_main_returns_zero_and_prints_summary_even_with_errors(monkeypatch, tmp_
     assert "Output tokens:       987" in out
     assert "Est. cost:           $0.0041" in out
     assert "Errors:              1" in out
+
+
+class _RecordingReporter:
+    """
+    Issue #47 -- a fake Reporter that records every call it receives,
+    instead of printing anything. Used to assert on run()'s actual wiring
+    (which source_path/stage/message/status values reach the Reporter)
+    without depending on any particular rendering of them.
+    """
+
+    def __init__(self):
+        self.stages: list[tuple[str, str]] = []
+        self.details: list[tuple[str, str]] = []
+        self.done: list[tuple[str, str]] = []
+
+    def on_stage(self, source_path, stage):
+        self.stages.append((source_path, stage))
+
+    def on_detail(self, source_path, message):
+        self.details.append((source_path, message))
+
+    def on_done(self, source_path, status):
+        self.done.append((source_path, status))
+
+
+@respx.mock
+def test_run_wires_custom_reporter_for_new_file(client, tmp_path, monkeypatch):
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    reporter = _RecordingReporter()
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        reporter=reporter,
+    )
+
+    assert summary.processed == 1
+    source_path = str(pdf_path.resolve())
+
+    # A custom reporter fully replaces the default PlainReporter -- nothing
+    # is ever printed to stdout when one is injected.
+    stage_tokens = [stage for path, stage in reporter.stages if path == source_path]
+    assert "submitting:new" in stage_tokens
+    assert "done:llm_success" in stage_tokens
+
+    # process_pdf()'s on_status hook is now wired to on_detail() -- at
+    # least one polling detail should have been recorded for this file.
+    assert any(path == source_path for path, _ in reporter.details)
+
+
+@respx.mock
+def test_run_default_reporter_still_prints_to_stdout(client, tmp_path, monkeypatch, capsys):
+    """
+    Confirms the default (reporter=None) path is unaffected by the
+    refactor -- PlainReporter is constructed internally and today's exact
+    output still reaches stdout, with no injected reporter.
+    """
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    _write_pdf(course_dir / "lecture_01.pdf")
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
+
+    assert summary.processed == 1
+    out = capsys.readouterr().out
+    assert "[class_1] lecture_01.pdf: processing (new)..." in out
+    assert "[class_1] lecture_01.pdf: done (LLM cleanup succeeded)" in out
+
+
+@respx.mock
+def test_run_reporter_receives_vault_write_failure(client, tmp_path, monkeypatch):
+    """
+    _write_to_vault()'s failure path is also wired through reporter --
+    exercised here via a source filename that doesn't match
+    parse_lecture_filename()'s pattern (mirrors
+    test_run_unparseable_filename_records_vault_failure_only's setup).
+    """
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "not_a_lecture_name.pdf")
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    reporter = _RecordingReporter()
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        reporter=reporter,
+    )
+
+    assert summary.errors == 1
+    source_path = str(pdf_path.resolve())
+    messages = [stage for path, stage in reporter.stages if path == source_path]
+    assert any("vault write FAILED" in message for message in messages)
+
+
+@respx.mock
+def test_run_ungrouped_skip_wired_through_reporter(client, tmp_path):
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    stray_pdf = _write_pdf(paths_config.input_root / "stray.pdf")
+
+    reporter = _RecordingReporter()
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        reporter=reporter,
+    )
+
+    assert summary.ungrouped == 1
+    assert (str(stray_pdf.resolve()), "ungrouped_skip") in reporter.stages

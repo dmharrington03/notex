@@ -351,6 +351,7 @@ def cleanup_pdf(
     lecture_stem: str,
     llm_config: LLMConfig,
     client: LLMClient | None = None,
+    on_status: Callable[[str], None] | None = None,
 ) -> LLMResult:
     """
     Orchestrate the LLM cleanup stage for a single already-cached Mathpix
@@ -375,6 +376,17 @@ def cleanup_pdf(
             constructs its own LLMClient(model=llm_config.model). Unlike
             MathpixClient, LLMClient owns no closable resources, so there's
             no ownership/close() bookkeeping here.
+        on_status: optional observability hook (issue #47), mirroring
+            src/mathpix.py's OnStatusCallback in spirit but much simpler --
+            LLMClient.complete() is a single synchronous call with no
+            intermediate polling, so there's only one meaningful hook
+            point. Called at most once, immediately after a *successful*
+            client.complete() call (never on an LLMError, and never a
+            setup-time FileNotFoundError/LLMError raised earlier in this
+            function), with a human-readable message describing the
+            completion's token usage/cost estimate. Never affects control
+            flow -- purely for a Reporter's on_detail() (verbose-only,
+            issue #48) to surface, same as src/mathpix.py's on_status.
 
     Returns:
         An LLMResult on both success and failure -- see LLMResult's
@@ -419,6 +431,15 @@ def cleanup_pdf(
             llm_validation_result=None,
             output_path=mathpix_markdown_path,
             processed_at=datetime.now(timezone.utc),
+        )
+
+    if on_status is not None:
+        cost = completion_result.cost
+        cost_text = f"${cost:.4f}" if cost is not None else "unknown"
+        on_status(
+            f"llm completion: {completion_result.input_tokens} input / "
+            f"{completion_result.output_tokens} output tokens "
+            f"(est. cost {cost_text})"
         )
 
     cleaned_markdown = completion_result.content

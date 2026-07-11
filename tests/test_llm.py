@@ -422,6 +422,87 @@ def test_cleanup_pdf_success_writes_llm_md_and_returns_success_result(tmp_path, 
     assert result.llm_cost_estimate == 0.0123
 
 
+def test_cleanup_pdf_on_status_called_once_on_success(tmp_path, monkeypatch):
+    """
+    Issue #47: cleanup_pdf()'s new on_status hook fires exactly once, right
+    after a successful client.complete() (before validation), with a
+    message describing token usage/cost -- mirrors src/mathpix.py's
+    OnStatusCallback in spirit, but there's only one meaningful hook point
+    since there's no polling loop here.
+    """
+    mathpix_path = tmp_path / "lecture_01.mathpix.md"
+    mathpix_path.write_text("some raw mathpix text", encoding="utf-8")
+    dest_dir = tmp_path / "out"
+
+    def fake_completion_fn(**kwargs):
+        return _fake_response("cleaned text", prompt_tokens=200, completion_tokens=80)
+
+    monkeypatch.setattr("src.llm.litellm.completion_cost", lambda **kwargs: 0.0123)
+
+    client = LLMClient(model="fake-model", completion_fn=fake_completion_fn)
+    llm_config = _llm_config()
+
+    messages: list[str] = []
+    result = cleanup_pdf(
+        mathpix_path,
+        dest_dir,
+        "lecture_01",
+        llm_config,
+        client=client,
+        on_status=messages.append,
+    )
+
+    assert result.llm_status == "success"
+    assert len(messages) == 1
+    assert "200 input" in messages[0]
+    assert "80 output" in messages[0]
+    assert "0.0123" in messages[0]
+
+
+def test_cleanup_pdf_on_status_not_called_on_llm_error(tmp_path):
+    mathpix_path = tmp_path / "lecture_01.mathpix.md"
+    mathpix_path.write_text("some raw mathpix text", encoding="utf-8")
+    dest_dir = tmp_path / "out"
+
+    def failing_completion_fn(**kwargs):
+        raise RuntimeError("boom")
+
+    client = LLMClient(model="fake-model", completion_fn=failing_completion_fn)
+    llm_config = _llm_config()
+
+    messages: list[str] = []
+    result = cleanup_pdf(
+        mathpix_path,
+        dest_dir,
+        "lecture_01",
+        llm_config,
+        client=client,
+        on_status=messages.append,
+    )
+
+    assert result.llm_status == "failed"
+    assert messages == []
+
+
+def test_cleanup_pdf_defaults_on_status_to_none(tmp_path, monkeypatch):
+    """Omitting on_status entirely (the default) must not raise."""
+    mathpix_path = tmp_path / "lecture_01.mathpix.md"
+    mathpix_path.write_text("some raw mathpix text", encoding="utf-8")
+    dest_dir = tmp_path / "out"
+
+    def fake_completion_fn(**kwargs):
+        return _fake_response("cleaned text", prompt_tokens=10, completion_tokens=5)
+
+    monkeypatch.setattr("src.llm.litellm.completion_cost", lambda **kwargs: 0.001)
+
+    client = LLMClient(model="fake-model", completion_fn=fake_completion_fn)
+    llm_config = _llm_config()
+
+    result = cleanup_pdf(mathpix_path, dest_dir, "lecture_01", llm_config, client=client)
+
+    assert result.llm_status == "success"
+
+
 def test_cleanup_pdf_falls_back_on_llm_error(tmp_path):
     mathpix_path = tmp_path / "lecture_01.mathpix.md"
     mathpix_path.write_text("some raw mathpix text", encoding="utf-8")

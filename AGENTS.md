@@ -606,7 +606,70 @@ narrative and real-data-validation findings.
   (`llm_status=None`/`force_llm=True`) is skipped with zero `cleanup_pdf()`
   calls; `tests/test_cli.py` parsing/defaults for `--no-llm`; a
   `main()`-level flag-forwarding test mirroring `--force`'s precedent.
-- Remaining issues (#47-#51) filed, not started yet. See "Phase 7 Plan"
+- **#47 (done)** — new `src/reporting.py`: a `Reporter` `typing.Protocol`
+  (`on_stage`/`on_detail`/`on_done`, all keyed by `source_path`) +
+  `PlainReporter`, the only implementation built by this issue.
+  `PlainReporter.on_stage` reproduces every one of `src/main.py`'s ~19
+  existing per-file `print()` sites byte-for-byte: each call site passes
+  either a short canonical token from a closed, enumerable vocabulary
+  (e.g. `"submitting:new"`, `"done:llm_success"` — see `_STAGE_TEXT` in
+  `src/reporting.py` for the full mapping) which `PlainReporter` renders as
+  today's exact text, or — for the handful of sites whose content is
+  inherently free-form (an exception's `str()`, a delimiter-balance
+  warning) — the literal final message text itself, printed verbatim when
+  it isn't a recognized token. The `"[{course}] {filename}: "` prefix is
+  derived directly from `source_path` (`Path(source_path).parent.name`/
+  `.name`), matching every real per-course call site exactly (course_label
+  there is always literally the source path's parent directory name) —
+  except the `"ungrouped_skip"` token, special-cased to the fixed
+  `"ungrouped"` label (deriving from path there would show `input_root`'s
+  own directory name, not the intended synthetic marker). One deliberate,
+  approved cosmetic deviation: the rare, untested `--file`-targeted-
+  ungrouped-stray-PDF path (the `_UNGROUPED_CACHE_SUBDIR` sentinel) now
+  shows the real parent directory name in its bracket instead of the old
+  synthetic `"_ungrouped"` placeholder — no test locks this in, and it's
+  purely cosmetic. `on_detail`/`on_done` are pure no-ops in `PlainReporter`
+  — reserved for `--verbose` (#48) and a future `RichReporter` (#49)
+  respectively, so today's output is completely unchanged (confirmed by
+  running the full pre-existing test suite unmodified — all 244 tests
+  passed with zero changes needed beyond one test-fake signature update,
+  see below). `run()`/`_process_file()`/`_write_to_vault()` gained a
+  `reporter: Reporter | None = None` param (required/non-optional on the
+  latter two, since `run()` always resolves `None` to a fresh
+  `PlainReporter()` before ever calling them) — no CLI flag surfaces this
+  yet, it's an internal/test-injection-only param until #48/#49.
+  `_write_to_vault()`'s now-unused `course_label`/`filename` display-only
+  params were removed entirely (Reporter derives them from `source_path`).
+  `src/mathpix.py` needed no changes (`process_pdf()`'s `on_status` hook
+  already existed) — `_process_file()` now builds an adapter closure
+  wiring it to `reporter.on_detail(...)`, a brand-new call (this hook was
+  never wired to anything before). `src/llm.py`'s `cleanup_pdf()` gained a
+  matching new `on_status: Callable[[str], None] | None = None` param,
+  called at most once immediately after a successful `client.complete()`
+  (before validation) with a token/cost message — never on an `LLMError`
+  or an earlier setup-time raise; `_process_file()` wires it to
+  `reporter.on_detail(...)` too, at both of its two `cleanup_pdf()` call
+  sites. Both new hooks are exercised only through `on_detail`, which
+  `PlainReporter` no-ops, so they're fully wired but invisible until #48.
+  The one pre-existing test needing an update:
+  `tests/test_main.py::_install_fake_cleanup_pdf`'s fake `cleanup_pdf`
+  stand-in gained a matching `on_status=None` parameter (since
+  `_process_file()` now always passes `on_status=` as a keyword arg to
+  every real `cleanup_pdf()` call). New tests: `tests/test_reporting.py`
+  covers every canonical token's exact rendered text, the free-form-
+  fallback case, the `ungrouped_skip` special case, and confirms
+  `on_detail`/`on_done` are no-ops; `tests/test_llm.py` covers
+  `cleanup_pdf(on_status=...)` firing once on success with the right
+  token/cost content, never firing on an `LLMError`, and being safely
+  omittable; `tests/test_main.py` gained a `_RecordingReporter` test
+  double and four new `run(reporter=...)` tests confirming real end-to-end
+  wiring (a NEW file's `submitting:new`/`done:llm_success` stages plus at
+  least one Mathpix polling `on_detail` call; the default `reporter=None`
+  path still prints exactly the same text to stdout as before this
+  refactor; `_write_to_vault()`'s failure path routes through the injected
+  reporter too; the ungrouped-skip loop's `"ungrouped_skip"` token reaches
+  the injected reporter with the correct `source_path`).
+- Remaining issues (#48-#51) filed, not started yet. See "Phase 7 Plan"
   under "Remaining Work — Phases 4-7 Plan" above for the full
   issue-by-issue breakdown and implementation order.
 

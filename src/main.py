@@ -14,15 +14,18 @@ lecture_prefix params. Phase 7 (issue #41) adds real argparse scaffolding
 target_source_path params below -- no new pipeline logic); issue #45 adds
 --force-vault-overwrite (issue #40's escape hatch for clearing a detected
 vault_status="conflict"); issue #46 adds --no-llm (skip the LLM cleanup
-stage entirely for the run). The remaining flag (--verbose) is a later
-Phase 7 issue per docs/spec.md's roadmap.
+stage entirely for the run). Issue #47 adds the Reporter abstraction
+(src/reporting.py) every per-file print() now goes through -- an internal
+run()/reporter= param only, with no CLI-facing flag yet. The remaining
+flags (--verbose, RichReporter) are later Phase 7 issues (#48/#49) per
+docs/spec.md's roadmap.
 
 Two entry points:
     - run(paths_config, conn, client=None, llm_config=None,
           output_config=None, naming_config=None, force_llm=False,
           target_source_path=None, course=None, dry_run=False,
           force=False, force_vault_overwrite=False,
-          no_llm=False) -> RunSummary
+          no_llm=False, reporter=None) -> RunSummary
         The core, directly testable orchestration logic. Takes an already-
         loaded PathsConfig and an already-open state.db connection so tests
         can supply a tmp_path input_root tree, a real temp state.db, and an
@@ -235,6 +238,7 @@ from src.discovery import (
 from src.llm import LLMClient, cleanup_pdf, needs_llm_reprocessing
 from src.mathpix import MathpixClient, MathpixError, process_pdf
 from src.postprocess import PostprocessError, resolve_tags
+from src.reporting import PlainReporter, Reporter
 from src.state import StateEntry, get_entry, init_db, upsert_entry
 from src.vault import write_lecture_note
 
@@ -349,13 +353,12 @@ def _write_to_vault(
     vault_course_dir: Path,
     source_mtime: float,
     processed_at: datetime,
-    course_label: str,
-    filename: str,
     dark_mode: bool,
     tags: tuple[str, ...],
     date_format: str,
     lecture_prefix: str,
     force_overwrite: bool,
+    reporter: Reporter,
 ) -> tuple[int, int]:
     """
     Write this file's final vault Markdown note (src/vault.py's
@@ -379,9 +382,6 @@ def _write_to_vault(
             and, on success, recorded verbatim as state.db's
             vault_written_at -- reuses the same timestamp as this file's
             llm_processed_at rather than taking a fresh one.
-        course_label: display-only label for progress print lines.
-        filename: display-only source PDF filename for progress print
-            lines.
         dark_mode: forwarded to write_lecture_note()'s dark_mode param --
             the caller (_process_file()) resolves this from
             OutputConfig.figures_dark_mode_flag (issue #37).
@@ -401,6 +401,11 @@ def _write_to_vault(
             from run()'s force_vault_overwrite param. When True, bypasses
             the previous_content_hash conflict check below entirely, so
             this call can never return a (0, 1) conflict tuple.
+        reporter: issue #47 -- every print() this function used to call
+            directly now goes through reporter.on_stage(source_path, ...)
+            instead, passing the exact same final message text (never
+            None; the caller always supplies a concrete Reporter, defaulting
+            to PlainReporter() at run()'s top level).
 
     Returns:
         A (errors, conflicts) tuple -- each 1 or 0, never both 1 at once.
@@ -453,23 +458,24 @@ def _write_to_vault(
             force_overwrite=force_overwrite,
         )
     except (PostprocessError, OSError) as exc:
-        print(f"[{course_label}] {filename}: vault write FAILED: {exc}")
+        reporter.on_stage(source_path, f"vault write FAILED: {exc}")
         upsert_entry(conn, source_path, vault_status="failed")
         return 1, 0
 
     if not result.written:
-        print(
-            f"[{course_label}] {filename}: WARNING: vault note "
+        reporter.on_stage(
+            source_path,
+            f"WARNING: vault note "
             f"{result.output_path} was manually edited since the last "
             f"pipeline write -- skipping overwrite. Diff it against the "
             f"reprocessed content at {content_source_path} to merge "
-            f"manually."
+            f"manually.",
         )
         upsert_entry(conn, source_path, vault_status="conflict")
         return 0, 1
 
     for warning in result.delimiter_warnings:
-        print(f"[{course_label}] {filename}: WARNING: {warning}")
+        reporter.on_stage(source_path, f"WARNING: {warning}")
 
     upsert_entry(
         conn,
@@ -497,6 +503,7 @@ def _process_file(
     force_vault_overwrite: bool,
     no_llm: bool,
     course_label: str,
+    reporter: Reporter,
 ) -> _FileOutcome:
     """
     Shared per-file processing body: Mathpix-stage handling, LLM-stage
@@ -579,18 +586,22 @@ def _process_file(
         course_label: display-only label for progress print lines (a real
             course name, or "_ungrouped") -- doubles as resolve_tags()'s
             course_name lookup key (issue #37).
+        reporter: issue #47 -- every print() this function used to call
+            directly now goes through reporter.on_stage(source_path, ...)
+            instead (never None; run() always supplies a concrete Reporter,
+            defaulting to PlainReporter()). process_pdf()'s on_status hook
+            and cleanup_pdf()'s new equivalent are both wired here to call
+            reporter.on_detail(source_path, ...) -- verbose-only, a no-op
+            in PlainReporter today.
 
     Returns:
         A _FileOutcome with the increments this file contributes to the
         run's overall RunSummary.
     """
-    filename = Path(result.source_path).name
-
     if dry_run:
         if result.classification in _ACTIONABLE_CLASSIFICATIONS:
-            print(
-                f"[{course_label}] {filename}: would process "
-                f"({result.classification.value})"
+            reporter.on_stage(
+                result.source_path, f"would_process:{result.classification.value}"
             )
             return _FileOutcome(processed=1)
 
@@ -599,29 +610,39 @@ def _process_file(
             return _FileOutcome(skipped=1)
 
         if not no_llm and (force_llm or needs_llm_reprocessing(entry)):
-            print(f"[{course_label}] {filename}: would reprocess LLM stage only")
+            reporter.on_stage(result.source_path, "would_reprocess_llm")
             return _FileOutcome(llm_reprocessed=1)
 
         if _needs_vault_conflict_retry(entry, force_vault_overwrite):
-            print(
-                f"[{course_label}] {filename}: would retry vault write "
-                f"(force_vault_overwrite)"
-            )
+            reporter.on_stage(result.source_path, "would_retry_vault")
             return _FileOutcome(skipped=1)
 
         return _FileOutcome(skipped=1)
 
     tags = resolve_tags(course_label, output_config)
 
-    if result.classification in _ACTIONABLE_CLASSIFICATIONS:
-        print(
-            f"[{course_label}] {filename}: processing "
-            f"({result.classification.value})..."
+    def _mathpix_on_status(
+        stage: str, attempt: int, max_attempts: int, status: str | None, payload: dict
+    ) -> None:
+        reporter.on_detail(
+            result.source_path,
+            f"mathpix {stage}: poll {attempt}/{max_attempts} status={status}",
         )
+
+    def _llm_on_status(message: str) -> None:
+        reporter.on_detail(result.source_path, message)
+
+    if result.classification in _ACTIONABLE_CLASSIFICATIONS:
+        reporter.on_stage(result.source_path, f"submitting:{result.classification.value}")
         try:
-            process_result = process_pdf(result.source_path, cache_dir, client=mathpix_client)
+            process_result = process_pdf(
+                result.source_path,
+                cache_dir,
+                client=mathpix_client,
+                on_status=_mathpix_on_status,
+            )
         except _PROCESS_PDF_FAILURE_EXCEPTIONS as exc:
-            print(f"[{course_label}] {filename}: FAILED: {exc}")
+            reporter.on_stage(result.source_path, f"FAILED: {exc}")
             upsert_entry(
                 conn,
                 result.source_path,
@@ -655,7 +676,7 @@ def _process_file(
             # equivalent to a freshly-discovered file's in every case,
             # restoring needs_llm_reprocessing()'s correct "pick this up
             # on the next normal (non-no_llm) run" behavior uniformly.
-            print(f"[{course_label}] {filename}: done (LLM stage skipped, --no-llm)")
+            reporter.on_stage(result.source_path, "done:no_llm")
             upsert_entry(
                 conn,
                 result.source_path,
@@ -688,13 +709,12 @@ def _process_file(
                 vault_course_dir,
                 result.source_mtime,
                 process_result.processed_at,
-                course_label,
-                filename,
                 output_config.figures_dark_mode_flag,
                 tags,
                 output_config.date_format,
                 naming_config.lecture_prefix,
                 force_vault_overwrite,
+                reporter,
             )
             return _FileOutcome(
                 processed=1,
@@ -710,12 +730,13 @@ def _process_file(
             lecture_stem,
             llm_config,
             client=llm_client,
+            on_status=_llm_on_status,
         )
 
         if llm_result.llm_status == "success":
-            print(f"[{course_label}] {filename}: done (LLM cleanup succeeded)")
+            reporter.on_stage(result.source_path, "done:llm_success")
         else:
-            print(f"[{course_label}] {filename}: done (LLM cleanup fell back to raw output)")
+            reporter.on_stage(result.source_path, "done:llm_fallback")
 
         upsert_entry(
             conn,
@@ -747,13 +768,12 @@ def _process_file(
             vault_course_dir,
             result.source_mtime,
             llm_result.processed_at,
-            course_label,
-            filename,
             output_config.figures_dark_mode_flag,
             tags,
             output_config.date_format,
             naming_config.lecture_prefix,
             force_vault_overwrite,
+            reporter,
         )
         errors += vault_errors
         return _FileOutcome(
@@ -784,10 +804,7 @@ def _process_file(
             # last vault-write attempt was recorded as a conflict -- retry
             # just the vault write, reusing the already-cached LLM output
             # (entry.output_path) rather than calling cleanup_pdf() again.
-            print(
-                f"[{course_label}] {filename}: retrying vault write "
-                f"(force_vault_overwrite)..."
-            )
+            reporter.on_stage(result.source_path, "retrying_vault_write")
             vault_errors, vault_conflicts = _write_to_vault(
                 conn,
                 result.source_path,
@@ -796,13 +813,12 @@ def _process_file(
                 vault_course_dir,
                 result.source_mtime,
                 entry.llm_processed_at,
-                course_label,
-                filename,
                 output_config.figures_dark_mode_flag,
                 tags,
                 output_config.date_format,
                 naming_config.lecture_prefix,
                 force_vault_overwrite,
+                reporter,
             )
             return _FileOutcome(
                 skipped=1,
@@ -814,7 +830,7 @@ def _process_file(
     lecture_stem = Path(result.source_path).stem
     mathpix_markdown_path = cache_dir / f"{lecture_stem}.mathpix.md"
 
-    print(f"[{course_label}] {filename}: reprocessing LLM stage only...")
+    reporter.on_stage(result.source_path, "reprocessing_llm")
     try:
         llm_result = cleanup_pdf(
             mathpix_markdown_path,
@@ -822,12 +838,13 @@ def _process_file(
             lecture_stem,
             llm_config,
             client=llm_client,
+            on_status=_llm_on_status,
         )
     except FileNotFoundError as exc:
         # Cached .mathpix.md unexpectedly missing -- a per-file filesystem
         # hiccup (e.g. _cache manually cleared), not a global config error.
         # Record it and continue rather than aborting the whole run.
-        print(f"[{course_label}] {filename}: LLM stage FAILED: {exc}")
+        reporter.on_stage(result.source_path, f"LLM stage FAILED: {exc}")
         return _FileOutcome(errors=1)
     # LLMError from a missing prompts/{prompt_version}.txt is deliberately
     # NOT caught here -- a missing configured prompt file affects every
@@ -835,9 +852,9 @@ def _process_file(
     # rather than silently degrading N files in a row (see AGENTS.md).
 
     if llm_result.llm_status == "success":
-        print(f"[{course_label}] {filename}: LLM cleanup succeeded")
+        reporter.on_stage(result.source_path, "llm_only:llm_success")
     else:
-        print(f"[{course_label}] {filename}: LLM cleanup fell back to raw output")
+        reporter.on_stage(result.source_path, "llm_only:llm_fallback")
 
     upsert_entry(
         conn,
@@ -861,13 +878,12 @@ def _process_file(
         vault_course_dir,
         result.source_mtime,
         llm_result.processed_at,
-        course_label,
-        filename,
         output_config.figures_dark_mode_flag,
         tags,
         output_config.date_format,
         naming_config.lecture_prefix,
         force_vault_overwrite,
+        reporter,
     )
     errors += vault_errors
     return _FileOutcome(
@@ -894,6 +910,7 @@ def run(
     force: bool = False,
     force_vault_overwrite: bool = False,
     no_llm: bool = False,
+    reporter: Reporter | None = None,
 ) -> RunSummary:
     """
     Discover new/changed/failed-retry PDFs under paths_config.input_root (or,
@@ -1020,6 +1037,15 @@ def run(
             tallied as skipped (still composing with
             force_vault_overwrite's own conflict-retry check on that same
             path).
+        reporter: issue #47 -- the Reporter every per-file progress/outcome
+            line is routed through, instead of calling print() directly.
+            When omitted (the default, and every real caller today), a
+            fresh PlainReporter() is constructed internally -- reporter is
+            never None past this point, so _process_file()/
+            _write_to_vault() never need a null check. See src/reporting.py
+            for PlainReporter's exact-output-preserving design; no CLI flag
+            surfaces this yet (--verbose/RichReporter are separate,
+            not-yet-implemented follow-up issues, #48/#49).
 
     Raises:
         ValueError: if both course and target_source_path are given.
@@ -1036,6 +1062,9 @@ def run(
             "course and target_source_path are mutually exclusive -- restrict "
             "the run to one course, or one exact file, not both"
         )
+
+    if reporter is None:
+        reporter = PlainReporter()
 
     owns_client = client is None
     if client is None and not dry_run:
@@ -1095,6 +1124,7 @@ def run(
                 force_vault_overwrite,
                 no_llm,
                 course_label,
+                reporter,
             )
             processed += outcome.processed
             skipped += outcome.skipped
@@ -1121,11 +1151,7 @@ def run(
             for course_name, results in results_by_course.items():
                 if course_name == UNGROUPED_COURSE_KEY:
                     for result in results:
-                        print(
-                            f"[ungrouped] {Path(result.source_path).name}: "
-                            "skipping -- no course subfolder to group it under "
-                            "(not written to state.db)"
-                        )
+                        reporter.on_stage(result.source_path, "ungrouped_skip")
                         ungrouped += 1
                     continue
 
@@ -1149,6 +1175,7 @@ def run(
                         force_vault_overwrite,
                         no_llm,
                         course_name,
+                        reporter,
                     )
                     processed += outcome.processed
                     skipped += outcome.skipped
