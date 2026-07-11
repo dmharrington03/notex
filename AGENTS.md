@@ -389,7 +389,32 @@ narrative and real-data-validation findings.
   (`test_main_returns_zero_and_prints_summary_even_with_errors`) needed
   its fake `run()` stand-in's signature updated to accept `dry_run=False`,
   since `main()` now always forwards that kwarg.
-- Remaining issues (#43-#51) filed, not started yet. See "Phase 7 Plan"
+- **#43 (done)** — `src/cli.py` gained `--force` (`action="store_true"`,
+  default `False`). `run()` gained a `force: bool = False` param.
+  Deviates from the issue's literal wording (which offered two options):
+  implemented via a new `_apply_force(result, force)` helper that
+  reclassifies an `UNCHANGED` `ClassificationResult` to `Classification.RETRY`
+  (via `dataclasses.replace()`) immediately before dispatch to
+  `_process_file()`, in both the `target_source_path` branch and the
+  per-course loop — `_process_file()` itself is completely untouched, no
+  new param needed there. `force=True` deliberately does **not** also set
+  `force_llm=True` — confirmed as a no-op anyway, since
+  `_process_file()`'s actionable `NEW`/`CHANGED`/`RETRY` branch already
+  calls `cleanup_pdf()` unconditionally regardless of `force_llm` (which
+  only ever gates the separate UNCHANGED-only LLM-rerun path that a
+  reclassified-to-RETRY result bypasses entirely). This composes for free
+  with `course`/`target_source_path` (reclassification happens after any
+  course filtering) and with `dry_run` (a forced UNCHANGED file reports
+  "would process" rather than "would reprocess LLM stage only", since
+  dry-run's short-circuit branches off the same already-reclassified
+  result) — neither needed any code changes. `main()` forwards
+  `force=args.force` into `run()`. Tests added: an UNCHANGED-and-current
+  fixture is fully reprocessed (real `process_pdf()`/`cleanup_pdf()` calls)
+  under `force=True` with `force_llm` left at its default, confirming
+  force alone is sufficient; `force=True` on a NEW file produces an
+  identical `RunSummary` to a plain run (no regression); `--force`
+  CLI-parsing and `main()`-wiring tests mirroring `--dry-run`'s precedent.
+- Remaining issues (#44-#51) filed, not started yet. See "Phase 7 Plan"
   under "Remaining Work — Phases 4-7 Plan" above for the full
   issue-by-issue breakdown and implementation order.
 

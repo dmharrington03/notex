@@ -93,6 +93,19 @@ Covered here (issue #42 — --dry-run):
       all in dry-run mode.
     - main(): a --dry-run argv flag is parsed and forwarded into run() as
       its dry_run= kwarg.
+
+Covered here (issue #43 — --force):
+    - run(): an UNCHANGED-and-fully-current file (normally a full skip) is
+      fully reprocessed under force=True -- process_pdf()/cleanup_pdf() are
+      both actually called, and it's tallied as processed rather than
+      skipped.
+    - run(): force=True implies a fresh LLM pass even with force_llm left
+      at its default (False) -- no need to pass both together.
+    - run(): force=True on an already-actionable NEW file is a pure no-op
+      change (identical RunSummary to a plain, non-forced run) -- no
+      regression to the existing actionable path.
+    - main(): a --force argv flag is parsed and forwarded into run() as its
+      force= kwarg.
 """
 
 from __future__ import annotations
@@ -502,6 +515,102 @@ def test_run_force_llm_reprocesses_up_to_date_entry(client, tmp_path, monkeypatc
         total_cost_estimate=0.001,
     )
     assert len(llm_calls) == 1
+
+
+@respx.mock
+def test_run_force_fully_reprocesses_unchanged_and_current_file(client, tmp_path, monkeypatch):
+    """Issue #43: force=True reclassifies an otherwise-UNCHANGED-and-fully-
+    current file (which would normally be a full skip, per
+    test_run_skips_unchanged_and_current_file_entirely) as RETRY, so both
+    process_pdf() and cleanup_pdf() actually run and the file is tallied as
+    processed. force_llm is deliberately left at its default (False) here --
+    force alone is sufficient to trigger a fresh LLM pass too, since the
+    actionable branch always calls cleanup_pdf() unconditionally."""
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    # llm_status="success" -> fully up to date, not just Mathpix-unchanged.
+    _upsert_unchanged_entry(conn, pdf_path, mathpix_status="success", llm_status="success")
+
+    submit_route = _mock_happy_path()
+    llm_calls = _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        force=True,
+    )
+
+    assert summary == RunSummary(
+        processed=1,
+        skipped=0,
+        errors=0,
+        ungrouped=0,
+        llm_reprocessed=0,
+        total_input_tokens=100,
+        total_output_tokens=50,
+        total_cost_estimate=0.001,
+        total_pages_processed=2,
+    )
+    assert submit_route.called
+    assert len(llm_calls) == 1
+
+    entry = get_entry(conn, str(pdf_path.resolve()))
+    assert entry is not None
+    assert entry.mathpix_status == "success"
+    assert entry.mathpix_pdf_id == "abc123"
+    assert entry.llm_status == "success"
+
+
+@respx.mock
+def test_run_force_on_new_file_matches_plain_run(client, tmp_path, monkeypatch):
+    """Issue #43: force=True on an already-actionable NEW file changes
+    nothing -- confirms no regression to the existing non-forced actionable
+    path (mirrors test_run_processes_new_file_and_records_success's plain-
+    run expectations exactly, just with force=True passed)."""
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    _mock_happy_path()
+    llm_calls = _install_fake_cleanup_pdf(monkeypatch, status="success")
+
+    summary = run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        force=True,
+    )
+
+    assert summary == RunSummary(
+        processed=1,
+        skipped=0,
+        errors=0,
+        ungrouped=0,
+        llm_reprocessed=0,
+        total_input_tokens=100,
+        total_output_tokens=50,
+        total_cost_estimate=0.001,
+        total_pages_processed=2,
+    )
+    assert len(llm_calls) == 1
+
+    entry = get_entry(conn, str(pdf_path.resolve()))
+    assert entry is not None
+    assert entry.mathpix_status == "success"
+    assert entry.llm_status == "success"
 
 
 @respx.mock
@@ -1192,6 +1301,26 @@ def test_main_parses_dry_run_flag_and_forwards_it_to_run(monkeypatch, tmp_path):
     assert received_kwargs["dry_run"] is True
 
 
+def test_main_parses_force_flag_and_forwards_it_to_run(monkeypatch, tmp_path):
+    import src.main as main_module
+
+    paths_config = _make_paths_config(tmp_path)
+    monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
+
+    received_kwargs: dict = {}
+
+    def _fake_run(paths_config, conn, **kwargs):
+        received_kwargs.update(kwargs)
+        return RunSummary(processed=0, skipped=0, errors=0, ungrouped=0)
+
+    monkeypatch.setattr(main_module, "run", _fake_run)
+
+    exit_code = main(["--force"])
+
+    assert exit_code == 0
+    assert received_kwargs["force"] is True
+
+
 @respx.mock
 def test_run_wires_real_output_and_naming_config_end_to_end(client, tmp_path, monkeypatch):
     """
@@ -1287,7 +1416,7 @@ def test_main_returns_zero_and_prints_summary_even_with_errors(monkeypatch, tmp_
     monkeypatch.setattr(
         main_module,
         "run",
-        lambda paths_config, conn, client=None, course=None, dry_run=False: RunSummary(
+        lambda paths_config, conn, client=None, course=None, dry_run=False, force=False: RunSummary(
             processed=1,
             skipped=2,
             errors=1,

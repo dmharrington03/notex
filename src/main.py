@@ -9,14 +9,15 @@ over paths.input_root, with Phase 6's OutputConfig/NamingConfig (issue #37)
 threaded through into write_lecture_note()'s dark_mode/tags/date_format/
 lecture_prefix params. Phase 7 (issue #41) adds real argparse scaffolding
 (src/cli.py's build_arg_parser()) and the first flag, --course NAME; issue
-#42 adds --dry-run. The remaining flags (--force / --verbose, and the
-eventual --refresh-llm-prompt / --file / --force-vault-overwrite /
+#42 adds --dry-run; issue #43 adds --force. The remaining flags (--verbose,
+and the eventual --refresh-llm-prompt / --file / --force-vault-overwrite /
 --no-llm) are later Phase 7 issues per docs/spec.md's roadmap.
 
 Two entry points:
     - run(paths_config, conn, client=None, llm_config=None,
           output_config=None, naming_config=None, force_llm=False,
-          target_source_path=None, course=None, dry_run=False) -> RunSummary
+          target_source_path=None, course=None, dry_run=False,
+          force=False) -> RunSummary
         The core, directly testable orchestration logic. Takes an already-
         loaded PathsConfig and an already-open state.db connection so tests
         can supply a tmp_path input_root tree, a real temp state.db, and an
@@ -106,6 +107,23 @@ Per-file flow (see AGENTS.md issue #11/#18 notes):
       llm_reprocessed counts reflect what *would* happen; errors/
       vault_conflicts/token/cost/page fields stay at 0 since no real work
       is attempted.
+    - force=True (issue #43, wired to --force): reprocess every discovered
+      file's Mathpix + LLM stages regardless of state.db's classification
+      -- an UNCHANGED (or UNCHANGED-and-stale) result is reclassified to
+      Classification.RETRY (via dataclasses.replace(), see
+      _apply_force()) immediately before dispatch to _process_file(), so
+      it's routed through the same actionable NEW/CHANGED/RETRY branch as
+      any other reprocessed file, with zero changes needed to
+      _process_file()'s existing branch structure. force=True implies a
+      fresh LLM pass too (no separate force_llm=True needed): the
+      actionable branch calls cleanup_pdf() unconditionally regardless of
+      force_llm, which only ever gates the *separate* UNCHANGED-only LLM-
+      rerun path that force=True bypasses entirely by reclassifying to
+      RETRY first. Composes freely with course (filtering happens before
+      reclassification) and with dry_run (an UNCHANGED file forced this
+      way is reported as "would process" rather than "would reprocess LLM
+      stage only", since the short-circuit in _process_file() also
+      branches off the already-reclassified result).
 
 A single MathpixClient and a single LLMClient are each constructed once per
 run() call (when not injected/configured) and reused across every file in
@@ -137,7 +155,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -188,6 +206,21 @@ _ACTIONABLE_CLASSIFICATIONS = (
 # process_pdf() docstring) that should be caught, recorded as
 # mathpix_status="failed", and not abort the run.
 _PROCESS_PDF_FAILURE_EXCEPTIONS = (MathpixError, httpx.HTTPStatusError, FileNotFoundError)
+
+
+def _apply_force(result: ClassificationResult, force: bool) -> ClassificationResult:
+    """
+    Issue #43: when force=True, reclassify an UNCHANGED result as RETRY so
+    it's routed through _process_file()'s actionable NEW/CHANGED/RETRY
+    branch instead of being skipped or considered for LLM-only
+    reprocessing -- see run()'s docstring for the full rationale (this is
+    deliberately the only change needed; _process_file() itself is
+    untouched). NEW/CHANGED/RETRY results are already actionable and are
+    returned unchanged regardless of force.
+    """
+    if force and result.classification == Classification.UNCHANGED:
+        return replace(result, classification=Classification.RETRY)
+    return result
 
 
 @dataclass(frozen=True)
@@ -610,6 +643,7 @@ def run(
     target_source_path: str | Path | None = None,
     course: str | None = None,
     dry_run: bool = False,
+    force: bool = False,
 ) -> RunSummary:
     """
     Discover new/changed/failed-retry PDFs under paths_config.input_root (or,
@@ -664,6 +698,25 @@ def run(
             cleanup_pdf()/_write_to_vault()/upsert_entry() for every file.
             Classification (discover_pdfs()/classify_pdf()) still runs
             normally, so the reported would-be counts are accurate.
+        force: when True (issue #43, wired to --force), reprocess every
+            discovered file's Mathpix + LLM stages regardless of
+            state.db's classification -- an otherwise-UNCHANGED (including
+            UNCHANGED-and-stale) result is reclassified to
+            Classification.RETRY via _apply_force() immediately before
+            being dispatched to _process_file(), so it's routed through
+            the same actionable branch as any other reprocessed file with
+            no change to _process_file() itself. This deliberately implies
+            a fresh LLM pass too, without needing force_llm=True passed
+            alongside it: the actionable branch always calls cleanup_pdf()
+            unconditionally, regardless of force_llm (which only gates the
+            separate UNCHANGED-only LLM-rerun path that force=True
+            bypasses entirely). Composes freely with course/
+            target_source_path (reclassification happens per-result,
+            after any course filtering) and with dry_run (a forced
+            UNCHANGED file is reported as "would process" rather than
+            "would reprocess LLM stage only", since dry_run's
+            short-circuit in _process_file() branches off the
+            already-reclassified result too).
 
     Raises:
         ValueError: if both course and target_source_path are given.
@@ -713,7 +766,7 @@ def run(
             relative_parts = resolved_target.relative_to(input_root).parts
             course = relative_parts[0] if len(relative_parts) > 1 else UNGROUPED_COURSE_KEY
 
-            result = classify_pdf(resolved_target, conn)
+            result = _apply_force(classify_pdf(resolved_target, conn), force)
 
             if course == UNGROUPED_COURSE_KEY:
                 cache_dir = paths_config.cache_dir / _UNGROUPED_CACHE_SUBDIR
@@ -775,6 +828,7 @@ def run(
                 vault_course_dir = paths_config.vault_root / course_name
 
                 for result in results:
+                    result = _apply_force(result, force)
                     outcome = _process_file(
                         result,
                         cache_dir,
@@ -839,13 +893,15 @@ def main(argv: list[str] | None = None) -> int:
     load config.yaml's paths:, open/init state.db, run the discover -> process
     -> record pipeline once, print a summary.
 
-    --course (issue #41) and --dry-run (issue #42) are wired up so far --
-    --force/--verbose, and the eventual --refresh-llm-prompt/--file/
-    --force-vault-overwrite/--no-llm, are later Phase 7 issues.
-    force_llm/target_source_path stay at their defaults (False/None). Hits
-    the real, paid Mathpix and LLM APIs -- same caution as
-    scripts/smoke_test_mathpix.py / scripts/smoke_test_llm.py (unless
-    --dry-run is given, which makes no API calls at all).
+    --course (issue #41), --dry-run (issue #42), and --force (issue #43)
+    are wired up so far -- --verbose, and the eventual
+    --refresh-llm-prompt/--file/--force-vault-overwrite/--no-llm, are later
+    Phase 7 issues. force_llm/target_source_path stay at their defaults
+    (False/None) -- --force does not set force_llm=True itself, since
+    forcing full reprocessing already implies a fresh LLM pass regardless
+    (see run()'s docstring). Hits the real, paid Mathpix and LLM APIs --
+    same caution as scripts/smoke_test_mathpix.py / scripts/smoke_test_llm.py
+    (unless --dry-run is given, which makes no API calls at all).
     """
     args = build_arg_parser().parse_args(argv)
 
@@ -856,7 +912,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     conn = init_db(paths_config.state_db)
-    summary = run(paths_config, conn, course=args.course, dry_run=args.dry_run)
+    summary = run(
+        paths_config,
+        conn,
+        course=args.course,
+        dry_run=args.dry_run,
+        force=args.force,
+    )
     _print_summary(summary, dry_run=args.dry_run)
     return 0
 
