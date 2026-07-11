@@ -8,6 +8,13 @@ up the extracted text with an LLM, and writes organized Markdown into an
 Obsidian vault. It is run manually by the user, is fully idempotent, and never
 modifies its input.
 
+**Status:** the original planned scope (docs/spec.md's roadmap, plus CLI
+polish and reporting features added along the way) is complete and validated
+against real data. There is no active phase or in-progress work right now —
+new work starts as fresh, self-contained GitHub issues as it's identified.
+This file describes the codebase's current, steady-state shape; it is not a
+running implementation log.
+
 ## Delegating Work to Subagents
 
 Prefer delegating exploration and multi-step work to subagents/the Task tool
@@ -33,29 +40,15 @@ context small and reduces token usage. Concretely:
 
 ## Documentation Conventions
 
-Keep issue-by-issue progress notes in this file **minimal** — a short status
-line per issue (done/pending + one-line summary, plus any deviation from plan
-that future work needs to know about) is enough. Full implementation
-narrative, exact test counts, and detailed real-data-validation findings
-belong as **comments on the corresponding GitHub issue**, not in AGENTS.md.
-This file should stay focused on durable information a new agent needs: the
-codebase's current state, established conventions, and forward-looking plans.
-
-## Critical Invariants
-
-- **`notes_raw/` is a permanent, read-only archive.** The pipeline must never
-  write to, move, delete, or otherwise modify any file inside it, under any
-  circumstances.
-- **`notes_raw/` and `vault/` live outside this repository.** They are sibling
-  directories to the repo root, not subdirectories of it. Never assume or
-  create `notes_raw/`/`vault/` paths relative to the repo. The actual
-  absolute paths for this machine are in `config.yaml` (gitignored, machine-
-  specific — see `config.example.yaml` for the template). Read `config.yaml`
-  directly from disk when you need the real paths; it's present in the
-  working tree even though it isn't tracked in git.
-- **The pipeline must be idempotent.** Re-running on unchanged input must be a
-  no-op. State tracking is the sole mechanism for deciding what's already
-  processed.
+Keep this file **minimal and durable**: architecture, conventions, config
+schema, invariants, and accepted long-term limitations that a new agent
+needs before touching the code. It is not a changelog. Detailed
+implementation narrative, exact test counts, and real-data-validation
+findings for a specific piece of work belong as **comments on the
+corresponding GitHub issue**, not here. When a change alters something this
+file describes (a config field, an invariant, a CLI flag, a known
+limitation), update the relevant section in place rather than appending a
+dated note.
 
 ## Environment
 
@@ -85,1055 +78,209 @@ pip to work around a missing package.
 Dependencies are tracked in `environment.yml` (reproduce with
 `conda env create -f environment.yml`), not `requirements.txt`.
 
-## Current Phase
+## Critical Invariants
 
-**Phases 1-7 are all VALIDATED — complete** (see "Phase Progress" below for
-each phase's confirmed design/findings). Issues #41-#51 (Phase 7's full
-scope) are all done, including #51's two-part real-data validation pass
-(pre- and post-#47-#50). See "Remaining Work — Phases 4-7 Plan" below for
-Phase 7's full scope and the "Phase 7 Plan" subsection immediately below
-that for the issue-by-issue breakdown and implementation order. See
-`docs/spec.md` for the full original roadmap (note: follow this file,
-AGENTS.md, not spec.md, where they disagree). No further phases are
-currently planned — future work would start a new phase/issue set as it's
-identified.
+- **`notes_raw/` is a permanent, read-only archive.** The pipeline must never
+  write to, move, delete, or otherwise modify any file inside it, under any
+  circumstances.
+- **`notes_raw/` and `vault/` live outside this repository.** They are sibling
+  directories to the repo root, not subdirectories of it. Never assume or
+  create `notes_raw/`/`vault/` paths relative to the repo. The actual
+  absolute paths for this machine are in `config.yaml` (gitignored, machine-
+  specific — see `config.example.yaml` for the template). Read `config.yaml`
+  directly from disk when you need the real paths; it's present in the
+  working tree even though it isn't tracked in git.
+- **The pipeline must be idempotent.** Re-running on unchanged input must be a
+  no-op. State tracking (`state.db`) is the sole mechanism for deciding
+  what's already processed.
 
-**#39 (closed, won't-fix)**: `src/vault.py`'s `write_lecture_note()` derives
-its output filename from the current `lecture_prefix`, but never removes a
-previously-written vault file with a *different* name for the same source
-PDF — changing `naming.lecture_prefix` after a vault already has content
-leaves the old-named file behind as a permanent orphan. Found live during
-#38's validation. **Explicit user decision: this is acceptable behavior,
-not a bug to fix** — orphaned stale-named vault files are an acceptable
-side effect of changing `naming.lecture_prefix`; no cleanup logic will be
-built for this, at any point in this project. See #40's note below for one
-concrete interaction this decision has with #40's conflict detection.
+## Pipeline Architecture
 
-**#40 (done, untriaged, no phase label)** — manual-vault-edit conflict
-detection: `state.db` gained a nullable `vault_content_hash` column
-(SHA-256 of the content last successfully written to a vault note).
-`src/vault.py`'s `write_lecture_note()` gained a `previous_content_hash`
-param — when given and the target vault file already exists with
-different on-disk content, the write is skipped entirely (no figure copy,
-no content read/rewrite) and `VaultWriteResult.written` is `False`;
-`None` (no baseline recorded) always overwrites unconditionally, matching
-pre-#40 behavior. `src/main.py`'s `_write_to_vault()` fetches the prior
-`vault_content_hash` via `get_entry()`, now returns `(errors, conflicts)`
-instead of a bare error count; on a detected conflict it prints a warning
-naming both the vault file and its `_cache/` counterpart and records only
-`vault_status="conflict"`, leaving `vault_path`/`vault_written_at`/
-`vault_content_hash` untouched. `RunSummary`/`_FileOutcome` gained a
-`vault_conflicts` counter, aggregated separately from `errors` (expected,
-handled behavior, not a failure). No CLI override to bypass a detected
-conflict yet — deferred to Phase 7 per the issue's own scope note.
-Real-data validated against `notes_raw/class_1`: manually edited both
-freshly-written vault notes, then reran with `force_llm=True` (no CLI flag
-for this yet) — both correctly skipped with `vault_status="conflict"`,
-manual edits preserved byte-for-byte, `vault_path`/`vault_content_hash`/
-`vault_written_at` unchanged, reprocessed content landed in `_cache/` as
-expected. The escape hatch this note originally deferred is now
-implemented — see issue #45's entry below (`--force-vault-overwrite`).
+Data flows through the following stages, each backed by its own module:
 
-**Known interaction between #39 (won't-fix) and #40's conflict
-detection**: `state.db` only tracks a single `vault_path`/
-`vault_content_hash` per source PDF (the most recent write). If
-`naming.lecture_prefix` is changed and later *reverted* to a value used
-before, the pipeline recomputes an `output_path` that points at the
-old, still-orphaned file from before the first change — but the baseline
-hash it compares against now describes the *intervening* (different-
-prefix) file, not that orphan. The hash mismatch is real, so this
-correctly-but-unhelpfully surfaces as `vault_status="conflict"` on the
-revert, even though nobody manually touched the orphaned file. Accepted
-as a narrow, foreseeable edge case of combining "leave orphans" (#39)
-with hash-baseline conflict detection (#40) — not planned to be
-specifically handled; `--force-vault-overwrite` (issue #45) is the
-general escape hatch for this too, same as any other recorded conflict.
+1. **Discovery** (`src/discovery.py`) — recursively walks `paths.input_root`,
+   grouping PDFs by course subdirectory. Each file is classified as `NEW`,
+   `UNCHANGED`, `CHANGED`, or `RETRY` via a two-tier check (mtime+size fast
+   path, SHA-256 fallback) against `state.db`. PDFs directly under
+   `input_root` (no course subdirectory) are grouped under the sentinel
+   `UNGROUPED_COURSE_KEY` and are skipped outright — no course name exists to
+   mirror into a cache/vault subdirectory.
+2. **Mathpix OCR** (`src/mathpix.py`) — `MathpixClient` submits a PDF, polls
+   until complete, then fetches and extracts the `md.zip` bundle (Markdown +
+   `.jpg` figures) into the cache directory.
+3. **LLM cleanup** (`src/llm.py`) — `cleanup_pdf()` sends the raw Mathpix
+   Markdown to an LLM (via `litellm`) using a versioned prompt
+   (`prompts/cleanup_v1.txt`), validates the result (length ratio, `$`/
+   `\left`/`\right` balance, relaxed heading-count check), and falls back to
+   the raw Mathpix Markdown on any failure — cleanup never raises, it just
+   records `llm_status="failed"` and leaves `llm_model`/`llm_prompt_version`
+   `None`. `needs_llm_reprocessing()` decides whether an `UNCHANGED` file
+   still needs an LLM pass (ignores prompt version — only genuine content
+   change or an explicit rerun flag triggers reprocessing).
+4. **Figures + postprocessing** (`src/figures.py`, `src/postprocess.py`) —
+   copies cached figures into the vault, rewrites each Markdown image
+   reference's alt text to a numbered caption (`Figure N`, optionally with an
+   `@darkmode` suffix — image paths themselves are left untouched, no
+   wikilink conversion), parses `lecture_NN...` filenames, and builds YAML
+   frontmatter.
+5. **Vault write** (`src/vault.py`) — `write_lecture_note()` assembles the
+   final `vault/{course}/Lecture NN.md` and writes it, normally
+   unconditionally overwriting. It also implements **manual-edit conflict
+   detection**: `state.db` stores a SHA-256 `vault_content_hash` of the last
+   content the pipeline itself wrote; if the on-disk vault file differs from
+   that hash (i.e. a human edited it) the write is skipped and
+   `vault_status="conflict"` is recorded instead of clobbering the edit.
+   `--force-vault-overwrite` bypasses this check unconditionally.
+6. **Orchestration** (`src/main.py`) — `run()` (the testable core) ties
+   discovery + `state.db` + every stage above into one pass;
+   `main()`/`src/cli.py` provide the CLI wrapper. One `MathpixClient`/
+   `LLMClient` pair is constructed per run.
+7. **Reporting** (`src/reporting.py`) — a `Reporter` protocol
+   (`on_discover`/`on_stage`/`on_detail`/`on_done`) decouples progress output
+   from pipeline logic. `PlainReporter` prints line-based progress (gains
+   detail lines under `--verbose`); `RichReporter` renders a live-updating
+   table with a spinner, auto-selected when stdout is an interactive TTY and
+   `rich` is importable, otherwise falling back to `PlainReporter`.
+8. **Manual mode** (`scripts/manual_convert.py`) — a separate, stateless
+   script (not a `main.py` flag) that runs the full pipeline (Mathpix → LLM
+   → figures → frontmatter → vault write) for one explicit source PDF →
+   destination `.md` pair, never touching `state.db` or `discovery.py`. Used
+   for one-off conversions outside the normal indexed corpus.
 
-**#52 (done, untriaged, no phase label)** — found live during #51's real-
-data validation: `--no-llm`'s actionable-path upsert in `_process_file()`
-used to only *omit* `llm_*`/`output_path` columns rather than explicitly
-clearing them, which is a no-op for a genuinely fresh file (those columns
-are already `NULL`) but left a *stale* prior `llm_status="success"` (and
-`llm_model`/`output_path`/token counts/etc.) untouched when the same
-branch was reached for a file that already had a genuine earlier LLM
-success — reachable via a real second edit to the source PDF, or via
-`--force` reclassifying an `UNCHANGED` file to `RETRY`. Consequence: the
-vault note was correctly overwritten with fresh raw (uncleaned) OCR text
-per `--no-llm`'s design, but `state.db` kept falsely claiming
-`llm_status="success"`, permanently blocking `needs_llm_reprocessing()`
-from ever auto-picking the file up for a real LLM pass again. Fixed by
-explicitly resetting every `llm_*`/`output_path` column to `None` in that
-upsert (a no-op for the fresh-file case, matching #46's original intent
-uniformly for both cases now). Real-data re-validated against the exact
-`class_2/lecture_01.pdf` repro from #51's finding: `llm_status`/
-`output_path` now correctly reset to `None` after a real `--force --no-llm`
-run, `--dry-run` correctly reports "would reprocess LLM stage only", and a
-following plain run correctly auto-picks it up for a real LLM pass,
-restoring proper cleaned vault content. Broader flag-combination sanity
-re-checked against real data too (plain `--no-llm` on a fresh file,
-`--force` alone, batch `--rerun-llm`, `--force-vault-overwrite`, and a
-final full-tree idempotency run) — no regressions. See #52's own GitHub
-comments for the full real-data validation detail.
+`state.db` (`src/state.py`) is a single `pdf_state` table keyed on
+`source_path`, updated via a **partial upsert** (`upsert_entry()` only
+writes the columns it's given, so one stage's update never clobbers
+another's). Tracked per file: source hash/mtime/size; Mathpix status/pdf id/
+figure & page counts; LLM model/prompt version/status/validation result/
+token counts/cost estimate; the resolved vault output path, vault status,
+vault content hash, and per-stage timestamps.
 
-**Scope correction — `output.base_tags` (a global/default tag list) is
-dropped entirely, not deferred.** docs/spec.md's `output:` schema included
-a `base_tags` global default tag list, with `course_tags` merging/
-overriding it per course. Per explicit user direction, **there is no
-global/default tag list at all** — a course only gets tags if it has an
-explicit `output.course_tags` entry for its raw folder name; a course with
-no entry produces untagged notes (empty `tags` list). This is a deliberate
-divergence from docs/spec.md, not a rewording — ignore spec.md's
-`base_tags` key going forward; it's retained in that file purely as
-historical/superseded reference. `src/config.py`'s `OutputConfig`/
-`load_output_config()` (issue #33) and `src/postprocess.py`'s
-`resolve_tags()` (issue #35) implement this no-default rule for real.
+## Configuration
 
-**Scope correction — course index generation is permanently dropped.**
-docs/spec.md's Stage 6 (`_index.md` per course, a regenerated Markdown
-table of lectures) is cancelled entirely per explicit user direction — no
-`_index.md` file, wikilink table, or per-course index regeneration will be
-built at any point in this project, in any future phase. Ignore spec.md's
-Stage 6 section going forward; it's retained purely as historical/
-superseded reference.
+`config.yaml` (gitignored, machine-specific — copy `config.example.yaml` to
+create it) has these sections, each loaded by its own `load_*_config()` in
+`src/config.py` with graceful fallback to documented defaults when a section/
+key is missing:
 
-## Remaining Work — Phases 4-7 Plan
+- `paths` — `input_root`, `vault_root` (both required, no default).
+- `mathpix` — `poll_interval_seconds`, `max_poll_attempts`.
+- `llm` — `model`, `prompt_version`, and a `validation:` block
+  (`min_length_ratio`/`max_length_ratio`).
+- `output` — `date_format`; `course_tags`, a per-course tag list keyed by the
+  raw course folder name (**there is no global/default tag list** — a course
+  with no entry here produces untagged notes, a deliberate divergence from
+  docs/spec.md's original `base_tags` concept); `figures_dark_mode_flag`, a
+  single global toggle (no per-course override) appending `@darkmode` to
+  every figure's alt text.
+- `naming` — `lecture_prefix`, a single global prefix (no per-course
+  override) used for both the vault filename (`Lecture 01.md`) and the
+  frontmatter title.
+- `cli` — `print_summary` (default `false`): whether `main()` prints the
+  full processed/skipped/errors/tokens/cost breakdown at the end of a run,
+  on top of the always-on `Reporter`/`on_done()` progress output.
 
-Living, forward-looking plan for the rest of the pipeline. Phase 5 is
-VALIDATED — complete; Phase 6 is current (see "Current Phase" above for the
-confirmed design). Phases 6-7 below are still unimplemented forward-looking
-plan only. Phase numbers match docs/spec.md's original roadmap.
+Mathpix/LLM credentials live in `.env` (gitignored — see `.env.example`),
+loaded by `load_mathpix_credentials()`.
 
-**Follow-up carried forward from Phase 5's real-data validation (#32):**
-once Phase 6 wires up `output.figures_dark_mode_flag` for real, re-do the
-manual Obsidian visual check against a lecture with a figure (re-run with
-the flag on, confirm the `@darkmode`-suffixed alt text actually renders/
-behaves as intended in the configured renderer) — #32 only visually
-confirmed the flag-off default path.
+**Course index generation is permanently out of scope.** docs/spec.md's
+original Stage 6 (`_index.md` per course, a regenerated Markdown table of
+lectures) is cancelled per explicit user direction — do not build this at
+any point; docs/spec.md is retained purely as historical/superseded
+reference where it disagrees with this file.
 
-### Phase 4 — Figure handling (vault-facing)
+## CLI Flags
 
-Scope: copy each processed file's cached figures
-(`_cache/{course}/figures/*.jpg`) into `vault/{course}/figures/`, and rewrite
-the LLM-cleaned (or raw-fallback) Markdown's cache-relative
-`![](figures/...)` image references to inject a numbered placeholder
-caption (and, optionally, a dark-mode marker) into the alt-text slot.
+`src/cli.py`'s `build_arg_parser()` is the source of truth; summary:
 
-**Note:** this section originally called for rewriting `![](figures/...)`
-into Obsidian's `![[filename.jpg]]` wikilink form. That was overridden per
-explicit user direction during implementation (issue #24) — the actual,
-implemented behavior keeps standard Markdown `![alt](path)` syntax
-throughout; only the alt-text slot is rewritten, and the image path itself
-is left untouched.
+- `--course NAME` — restrict the run to one course subdirectory (mutually
+  exclusive with `--file`). Unknown course name is a clean no-op.
+- `--file PATH` — restrict the run to exactly one PDF (must exist, end in
+  `.pdf`, live under `paths.input_root`).
+- `--dry-run` — report what would happen; no API calls, no
+  `state.db`/cache/vault writes.
+- `--force` — reprocess Mathpix + LLM regardless of `state.db`'s
+  classification.
+- `--rerun-llm` — reprocess the LLM stage for every eligible file
+  regardless of stored status (reuses cached Mathpix output when
+  available). Often combined with `--file`.
+- `--force-vault-overwrite` — bypass manual-edit conflict detection for
+  the whole run (a blunt, whole-run instrument — no per-file targeting).
+- `--no-llm` — skip the LLM stage entirely; vault note is written from raw
+  Mathpix Markdown, and `llm_status` stays unset so a later normal run
+  picks the file up automatically.
+- `--verbose`/`-v` — print additional per-stage detail (Mathpix poll
+  counts, LLM token/cost, figure-copy actions, vault-write confirmations).
 
-- `src/figures.py` — figure-copy function and Markdown image-reference
-  rewriter.
-- **Dark-mode figure alt text.** `output.figures_dark_mode_flag: true|false`
-  in `config.yaml` is a **single global toggle** (no per-course override).
-  When enabled, `@darkmode` is appended to every figure's alt text so the
-  user's Obsidian renderer handles dark-mode display — purely a Markdown
-  text transform, no image processing.
+## Known Limitations / Accepted Behavior
 
-### Phase 5 — Post-processing (vault-facing)
+These are deliberate design decisions or accepted edge cases, not open bugs:
 
-VALIDATED — complete. See "Current Phase" above for the full confirmed
-design.
-
-### Phase 6 — Full config wiring + end-to-end validation
-
-Scope: wire up the remaining `config.yaml` sections nothing reads yet
-(`output.course_tags`, `naming.lecture_prefix`, the new
-`output.figures_dark_mode_flag`), and validate the complete pipeline
-end-to-end on a real course. See "Current Phase" above for the full
-confirmed design and tracked issue numbers.
-
-**Course index generation is explicitly out of scope, permanently — not a
-Phase 6 deferral.** docs/spec.md's Stage 6 (`_index.md` per course) is
-cancelled per explicit user direction; see the "Current Phase" section
-above for the full correction note. Nothing in the codebase implements or
-plans for this, and no future phase revives it.
-
-- Real-data validation pass, same shape as prior phases' precedent: run for
-  real against `notes_raw/class_1`, confirming idempotency extends
-  correctly to the newly-wired config values.
-
-### Phase 7 — CLI polish + new feature requests
-
-Absorbs docs/spec.md's original CLI scope, the already-built-but-unwired
-`force_llm`/`target_source_path` infrastructure (this is where `main()`
-finally parses real flags for them), and new features requested during
-planning.
-
-**Existing planned flags (docs/spec.md, still unimplemented):**
-- `--dry-run` — report what would be processed, no API calls.
-- `--force` — reprocess regardless of state.db.
-- `--course NAME` — restrict a run to one course.
-- `--refresh-llm-prompt` — CLI surface for `run()`'s existing `force_llm` param.
-- A single-file rerun flag (name TBD, e.g. `--file PATH`) — CLI surface for
-  `run()`'s existing `target_source_path` param.
-
-**New features, with design decisions already confirmed:**
-
-1. **`--no-llm` flag** — bypasses the LLM cleanup stage entirely for the run.
-   `run()`/`_process_file()` gain a `no_llm: bool` param, same shape as
-   `force_llm`. When set, only `mathpix_*` fields are upserted; no new
-   `"skipped"` status value — a freshly-processed file just keeps
-   `llm_status` NULL, so it's automatically picked up for a real LLM pass on
-   the next normal run via the existing `needs_llm_reprocessing()` check.
-   Vault-writing needs a content source when `llm_status` is NULL — reuse
-   the existing LLM-failure fallback-to-raw-`.mathpix.md` code path.
-
-2. **Manual mode — exact source/destination file, no scanning.** A
-   **separate script**, not a `main.py` flag: `scripts/manual_convert.py`,
-   following the `scripts/smoke_test_*.py` convention (hits real APIs, not
-   under `pytest`) but covering the **full pipeline through vault writing**
-   (mathpix → llm → figures → frontmatter → final `.md`). Takes an explicit
-   source PDF path and destination `.md` path as CLI args. Never touches
-   `state.db`, never calls `discovery.py` — entirely stateless, for one-off
-   conversions outside the normal indexed corpus. Built after Phase 4/5,
-   since it reuses their figure-copy/frontmatter functions as a library.
-   Open details left for implementation time: where figures land relative
-   to an arbitrary destination path; how frontmatter fields normally
-   derived from course-folder structure get supplied when there's no course
-   folder.
-
-3. **`--verbose`/`-v` flag** — finer-grained per-stage progress detail
-   (Mathpix poll counts via the existing `on_status` hook, LLM token/cost
-   per file, per-figure copy actions, frontmatter/vault-write confirmation
-   lines). Not a separate output mode — controls detail level within
-   whichever renderer (plain or Rich) is active.
-
-4. **Rich Live CLI output.** A shared reporting abstraction threaded through
-   the pipeline, not print statements scattered across modules.
-   - New module `src/reporting.py`: a small `Reporter` interface/protocol
-     (e.g. `on_stage(file, stage)`, `on_detail(file, message)`,
-     `on_done(file, status)`) with two implementations:
-     - `PlainReporter` — today's `print()`-based behavior, gains
-       `--verbose`-gated extra detail lines.
-     - `RichReporter` — a `rich.live.Live` + `rich.table.Table`
-       pre-populated with every file `discover_pdfs()` identified, updating
-       each row's status cell in place through stages (waiting →
-       submitting → polling → downloading → cleaning → writing vault →
-       done/error).
-   - **Activation:** auto-detected, not an explicit flag — `RichReporter`
-     when stdout is an interactive TTY and `rich` is importable; falls back
-     to `PlainReporter` otherwise.
-   - `run()`/`_process_file()` gain an optional `reporter` param (defaulting
-     to a no-op/plain instance), threaded down into `process_pdf()`'s
-     `on_status` callback and new equivalent hooks in `cleanup_pdf()` and
-     Phase 4/5's figure-copy/vault-write functions.
-   - `rich` needs adding to `environment.yml` (conda-forge), not yet
-     installed.
-   - Testing convention: tests inject a fake/no-op `Reporter` — no test
-     asserts on actual Rich terminal rendering.
-
-5. **`--force-vault-overwrite` flag.** Not in docs/spec.md's original CLI
-   list — the escape hatch deferred by #40's "Known interaction"/"Still
-   open" notes above for clearing a recorded `vault_status="conflict"`
-   once a manually-edited vault note has been detected. `write_lecture_note()`
-   gains a `force_overwrite: bool` param that bypasses the
-   `previous_content_hash` comparison entirely (write unconditionally,
-   same as the no-baseline-recorded case); `_write_to_vault()`/`run()`/
-   `_process_file()` thread a matching param down from a new
-   `--force-vault-overwrite` flag. Deliberately a blunt, whole-run
-   instrument for this phase — no per-file conflict targeting.
-
-### Phase 7 Plan — issue breakdown and order
-
-Confirmed with the user (2026-07-08) before filing: fine-grained,
-one-thing-per-issue (matching Phases 3/5/6's precedent), implemented in the
-order below (simple CLI flags first, then reporting infra, then manual
-mode, validation last). `rich` is added to `environment.yml` inside the
-`RichReporter` issue itself, not as separate prep work. `--force-vault-overwrite`
-(see item 5 above) is in scope for this phase, not deferred further.
-
-1. **#41** — argparse scaffolding + `--course NAME` (establishes the
-   parser pattern every later flag issue extends).
-2. **#42** — `--dry-run`.
-3. **#43** — `--force` (full reprocess regardless of state.db; distinct
-   from the existing `force_llm` param).
-4. **#44** — `--refresh-llm-prompt` + `--file PATH` (thin CLI surfaces for
-   the already-built `force_llm`/`target_source_path` params — grouped
-   since neither needs new pipeline logic).
-5. **#45** — `--force-vault-overwrite` (item 5 above).
-6. **#46** — `--no-llm` (item 1 above).
-7. **#47** — `src/reporting.py` core: `Reporter` protocol + `PlainReporter`
-   (refactors existing `print()` call sites, no behavior change).
-8. **#48** — `--verbose`/`-v` (depends on #47).
-9. **#49** — `RichReporter` + TTY auto-detection, adds the `rich`
-   dependency (depends on #47).
-10. **#50** — `scripts/manual_convert.py` manual mode (item 2 above).
-11. **#51** — Real-data validation against `notes_raw/class_1`, same
-    closing-issue shape as #12/#20/#25/#32/#38 (depends on all of the
-    above).
-
-## Phase Progress
-
-Brief status only — see each issue's GitHub comments for implementation
-narrative and real-data-validation findings.
-
-### Phase 7 (VALIDATED — complete, issues #41-#51)
-
-- **#41 (done)** — `src/cli.py`: new module holding `build_arg_parser()`
-  (argparse scaffolding) + the first flag, `--course NAME`. Deviates from
-  the issue's literal "Add an `argparse.ArgumentParser` in `main()`"
-  wording — confirmed with the user to split it into its own module
-  instead, since the full Phase 7 scope adds seven more flags across
-  follow-up issues, several with their own cross-flag validation; this
-  mirrors the project's existing one-module-per-concern convention and
-  lets `tests/test_cli.py` test parsing in complete isolation. `src/main.py`'s
-  `main()` calls `build_arg_parser().parse_args(argv)` and forwards
-  `course=args.course` into `run()`. `run()` gained a `course: str | None`
-  param — restricts the (still fully recursive) `discover_pdfs()` scan's
-  outer loop to one course key; an unknown course name prints a warning
-  and returns an all-zero `RunSummary` rather than raising. `course` and
-  `target_source_path` together raise `ValueError` — the actual CLI-level
-  `--course`/`--file` rejection with exit code 1 is deferred to #44, since
-  `--file` doesn't exist in the parser yet.
-- **#42 (done)** — `src/cli.py` gained `--dry-run` (`action="store_true"`,
-  default `False`). `run()` gained a `dry_run: bool = False` param;
-  `_process_file()` gained a matching `dry_run` param and short-circuits
-  at the top of the function — before `resolve_tags()`/`process_pdf()`/
-  `cleanup_pdf()`/`_write_to_vault()`/`upsert_entry()` — mirroring the real
-  classification branching purely off `result.classification` and the
-  existing `state.db` entry: actionable (NEW/CHANGED/RETRY) prints
-  `"would process (...)"` and counts as `processed`; UNCHANGED-and-stale
-  (or `force_llm`) prints `"would reprocess LLM stage only"` and counts as
-  `llm_reprocessed`; everything else counts as `skipped`. `errors`/
-  `vault_conflicts`/token/cost/page fields always stay `0` in dry-run — no
-  attempt is made to predict failures or vault conflicts (confirmed with
-  the user, out of scope for this issue). No new `RunSummary` field was
-  added (kept the dataclass and all its existing equality-check tests
-  untouched) — the dry-run banner is a separate `dry_run` param on
-  `_print_summary()` instead. When `dry_run=True` and no `client=` is
-  injected, `run()` skips constructing both `MathpixClient` (so
-  `load_mathpix_credentials()` is never called — a dry run needs no
-  Mathpix/LLM credentials at all) and `LLMClient`, passing `None` for both
-  down into `_process_file()` (which never touches them on the dry-run
-  path); `mathpix_client`/`llm_client` param types widened to `... | None`
-  accordingly, and the `finally: client.close()` guard extended to handle
-  a `None` client. `main()` forwards `dry_run=args.dry_run` into both
-  `run()` and `_print_summary()`. One pre-existing test
-  (`test_main_returns_zero_and_prints_summary_even_with_errors`) needed
-  its fake `run()` stand-in's signature updated to accept `dry_run=False`,
-  since `main()` now always forwards that kwarg.
-- **#43 (done)** — `src/cli.py` gained `--force` (`action="store_true"`,
-  default `False`). `run()` gained a `force: bool = False` param.
-  Deviates from the issue's literal wording (which offered two options):
-  implemented via a new `_apply_force(result, force)` helper that
-  reclassifies an `UNCHANGED` `ClassificationResult` to `Classification.RETRY`
-  (via `dataclasses.replace()`) immediately before dispatch to
-  `_process_file()`, in both the `target_source_path` branch and the
-  per-course loop — `_process_file()` itself is completely untouched, no
-  new param needed there. `force=True` deliberately does **not** also set
-  `force_llm=True` — confirmed as a no-op anyway, since
-  `_process_file()`'s actionable `NEW`/`CHANGED`/`RETRY` branch already
-  calls `cleanup_pdf()` unconditionally regardless of `force_llm` (which
-  only ever gates the separate UNCHANGED-only LLM-rerun path that a
-  reclassified-to-RETRY result bypasses entirely). This composes for free
-  with `course`/`target_source_path` (reclassification happens after any
-  course filtering) and with `dry_run` (a forced UNCHANGED file reports
-  "would process" rather than "would reprocess LLM stage only", since
-  dry-run's short-circuit branches off the same already-reclassified
-  result) — neither needed any code changes. `main()` forwards
-  `force=args.force` into `run()`. Tests added: an UNCHANGED-and-current
-  fixture is fully reprocessed (real `process_pdf()`/`cleanup_pdf()` calls)
-  under `force=True` with `force_llm` left at its default, confirming
-  force alone is sufficient; `force=True` on a NEW file produces an
-  identical `RunSummary` to a plain run (no regression); `--force`
-  CLI-parsing and `main()`-wiring tests mirroring `--dry-run`'s precedent.
-- **#44 (done)** — `src/cli.py`/`src/main.py` gained `--rerun-llm` +
-  `--file PATH`, both thin CLI surfaces for `run()`'s already-existing
-  `force_llm`/`target_source_path` params — no new pipeline logic, per the
-  issue's own scope. Deviates from the issue's literal wording: the flag
-  is named `--rerun-llm`, not `--refresh-llm-prompt` (explicit user
-  direction before implementation). `--course`/`--file` are mutually
-  exclusive via a real `argparse.add_mutually_exclusive_group()` in
-  `build_arg_parser()` — `run()`'s own `course`/`target_source_path`
-  `ValueError` guard (issue #41) is now unreachable from the real CLI and
-  remains only as a direct-call-level guard. `main()` validates `--file`
-  itself, before ever calling `run()`: the path must exist, end in `.pdf`
-  (case-insensitive — confirmed with the user), and resolve to somewhere
-  under `paths.input_root` (also confirmed with the user — an explicit
-  scope addition beyond the issue's literal "validate the path exists and
-  is a `.pdf`" wording, since `paths_config` is already loaded by that
-  point in `main()`); any violation prints a clear error to stderr and
-  returns exit code 1 without touching `state.db`/`init_db()`/any API.
-  Confirmed with the user and validated by test: `--rerun-llm` combined
-  with `--file` pointing at an UNCHANGED file hits only the LLM API (no
-  Mathpix call, reusing the cached `.mathpix.md`); pointed at a
-  NEW/CHANGED/RETRY file it runs both stages regardless of the flag,
-  since there's no cached Mathpix output yet to reuse — this was already
-  true of the pre-existing `force_llm`/actionable-branch behavior itself
-  (issue #18), so no code changes were needed to get it, only the CLI
-  wiring. Tests added: `tests/test_cli.py` parsing/defaults for both flags
-  plus the `--course`/`--file` mutual-exclusion `SystemExit`;
-  `tests/test_main.py` `main()`-level tests for both flags forwarding into
-  `run()`'s kwargs, the nonexistent-path/non-`.pdf`/outside-`input_root`
-  rejection cases (each asserting `run()` is never called), a
-  case-insensitive `.PDF` acceptance test, and a combined
-  `--file X --rerun-llm` end-to-end workflow test through `main(argv)`
-  itself (not just `run()` directly) confirming the LLM-only-hit behavior
-  and that a sibling file's state.db row is untouched.
-- **#45 (done)** — `src/vault.py`'s `write_lecture_note()` gained a
-  `force_overwrite: bool = False` param — when `True`, bypasses issue
-  #40's `previous_content_hash` conflict check entirely (the condition
-  became `if not force_overwrite and previous_content_hash is not None
-  and output_path.exists():`), behaving exactly like the no-baseline
-  (`previous_content_hash=None`) case: unconditional write,
-  `written=True` always. `src/main.py`'s `_write_to_vault()` gained a
-  matching `force_overwrite` param forwarded straight through — no other
-  logic changes needed there, since the existing success-path
-  `upsert_entry(vault_status="success", ...)` already runs whenever
-  `written=True`, so a forced write naturally clears a stale
-  `vault_status="conflict"` for free. `_process_file()`/`run()` gained a
-  `force_vault_overwrite: bool = False` param, threaded to both
-  `_write_to_vault()` call sites (actionable NEW/CHANGED/RETRY path and
-  the UNCHANGED LLM-only-rerun path — a conflict can be detected on
-  either). `src/cli.py` gained `--force-vault-overwrite`
-  (`action="store_true"`, default `False`); `main()` forwards it into
-  `run()`. Confirmed with the user: a force-overwritten file never counts
-  toward `RunSummary.vault_conflicts` (falls out for free from
-  `written=True` skipping the `(0, 1)`-conflict return branch entirely —
-  not a new decision, just how the existing branching already works).
-  Confirmed with the user this is deliberately a blunt, whole-run
-  instrument — no per-file conflict targeting, documented as an accepted
-  Phase 7 scope limit and a possible future refinement, not a gap.
-  Drive-by fix while touching these docstrings: two stale
-  "no CLI flag yet" mentions of `target_source_path`/`force_llm` in
-  `run()`'s module docstring (predating issue #44's actual `--file`/
-  `--rerun-llm` wiring) were corrected to reference issue #44. Tests
-  added: `tests/test_vault.py`'s `force_overwrite=True` bypasses a
-  reconstructed conflict scenario (mirroring #40's existing conflict
-  test) — `written=True`, manual edit overwritten, figures still copied
-  normally; `tests/test_cli.py` parsing/defaults for
-  `--force-vault-overwrite`; `tests/test_main.py`'s
-  `run(force_vault_overwrite=True)` clears a previously-recorded
-  `vault_status="conflict"` (reusing #40's existing conflict-reproduction
-  setup as a third run) with a fresh `vault_content_hash`/`vault_path`/
-  `vault_written_at` and `vault_conflicts == 0`; a non-conflicting file's
-  write is unaffected by `force_vault_overwrite=True` (identical to the
-  default-False behavior); `main()`-level flag-forwarding test mirroring
-  `--force`'s precedent.
-  **Follow-up fix (found via real-behavior testing, same issue/commit):**
-  the initial implementation above only threaded `force_vault_overwrite`
-  into `_write_to_vault()` calls that were already going to happen —
-  it missed that a file which is `UNCHANGED` with `mathpix_status`/
-  `llm_status` both already `"success"` (e.g. a file a *prior* run fully
-  reprocessed, whose vault write was then recorded as a conflict) is
-  fully skipped by `_process_file()` *before* ever reaching
-  `_write_to_vault()` again, since `needs_llm_reprocessing()` correctly
-  returns `False` once `llm_status="success"` is recorded. Concretely:
-  run once cleanly, manually edit the vault note, edit the source
-  `.md`/PDF, rerun (correctly reprocesses and records the conflict as
-  designed), then rerun a third time with *only* `--force-vault-overwrite`
-  (no `--rerun-llm`) — the file was silently skipped with no vault
-  retry at all, since nothing routed it back through a code path that
-  calls `_write_to_vault()`. Fixed with a new `_needs_vault_conflict_retry
-  (entry, force_vault_overwrite)` helper, consulted at the exact point
-  `_process_file()`'s `UNCHANGED` branch would otherwise return
-  `skipped=1`: when `force_vault_overwrite=True` and `entry.vault_status
-  == "conflict"` (deliberately not `"failed"` — an unrelated failure like
-  a bad filename isn't something this flag can fix — or `"success"` —
-  nothing to retry), the vault write alone is retried, reusing
-  `entry.output_path`/`entry.llm_processed_at` as `_write_to_vault()`'s
-  content source/timestamp with **no `cleanup_pdf()` call** (the LLM
-  stage itself doesn't need to rerun, only the write does) — tallied as
-  `skipped` (not `llm_reprocessed`, since no LLM call happened). The same
-  check is threaded into `dry_run=True`'s short-circuit branch too, so a
-  `--dry-run --force-vault-overwrite` report stays accurate for this case
-  (also tallied as `skipped`, printing "would retry vault write" instead).
-  Combining `force_vault_overwrite` with `force_llm`/`--rerun-llm` is
-  unaffected — that still reruns `cleanup_pdf()` as before, this new path
-  only applies when neither would otherwise trigger any work. Tests
-  added: a full regression test in `tests/test_main.py` reproducing the
-  exact reported scenario end-to-end (clean run → manual edit + source
-  change → conflict recorded → third run with `force_vault_overwrite`
-  alone), asserting no additional Mathpix/LLM API calls happened and the
-  vault note is correctly overwritten; a matching `dry_run=True` companion
-  test confirming the would-be retry is reported without touching
-  anything.
-- **#46 (done)** — `src/main.py`'s `_process_file()`/`run()` gained a
-  `no_llm: bool = False` param. On the actionable NEW/CHANGED/RETRY path,
-  `no_llm=True` skips `cleanup_pdf()` entirely right after `process_pdf()`
-  succeeds: only `mathpix_status`/`mathpix_pdf_id`/`figure_count`/
-  `page_count`/`mathpix_processed_at` are upserted — every `llm_*` field
-  plus `output_path` are left untouched/`NULL`, deliberately not just
-  `llm_status` (confirmed with the user: `output_path` stays `NULL` too,
-  matching the issue's literal "only mathpix_* fields" wording, even
-  though nothing downstream currently reads `entry.output_path` while
-  `llm_status is None`). No new `"skipped"` status value — since
-  `needs_llm_reprocessing()` already treats `llm_status is None` as
-  needing reprocessing (no change needed there), a later normal
-  (non-`no_llm`) run automatically picks the file up for a real LLM pass.
-  The vault note is still written this run — `_write_to_vault()` is
-  called with `process_result.markdown_path` (the raw `.mathpix.md`) as
-  its content source and `process_result.processed_at` as its timestamp,
-  the same raw-fallback content `cleanup_pdf()` itself would use on an
-  LLM failure — tallied as `processed=1` with **no error** contribution
-  from skipping the LLM stage by request (confirmed with the user: this
-  is deliberately different from the existing "LLM fell back to raw →
-  `errors+=1`" rule, since skipping by explicit flag isn't a failure). On
-  the UNCHANGED path, the LLM-only-rerun trigger condition changed from
-  `force_llm or needs_llm_reprocessing(entry)` to `no_llm or not
-  (force_llm or needs_llm_reprocessing(entry))` — i.e. `no_llm=True`
-  unconditionally routes to the existing skip/vault-conflict-retry branch
-  regardless of `force_llm`/staleness, confirmed as the intended
-  interaction (there's nothing for `--no-llm` to do to a file whose
-  Mathpix stage is already cached and whose LLM stage isn't running this
-  pass anyway). Same gating applied to the `dry_run=True` short-circuit
-  branch. `src/cli.py` gained `--no-llm` (`action="store_true"`, default
-  `False`); `main()` forwards it into `run()`. `src/llm.py` needed no
-  changes at all — `needs_llm_reprocessing()`'s existing `llm_status is
-  None` check already provides the "picked up automatically" behavior the
-  issue asked for. Known narrow interaction (not fixed, not tested):
-  because `output_path` stays `NULL` on a `no_llm`-only-processed row,
-  `_needs_vault_conflict_retry()`'s `entry.output_path is not None`
-  requirement means `--force-vault-overwrite` alone can't retry a vault
-  conflict recorded against a file that was *only* ever processed with
-  `--no-llm` (no real LLM pass yet) — combining `--no-llm` with a
-  vault-conflict-clearing retry needs a real LLM pass first (or
-  `--rerun-llm`/`--force` alongside `--force-vault-overwrite`). Not
-  expected to come up in practice and not in this issue's scope to fix.
-  Tests added: `tests/test_main.py` — a `no_llm=True` run over a NEW file
-  records `mathpix_status="success"`/`llm_status=None` (and every other
-  `llm_*`/`output_path` field `None`), never calls the fake `cleanup_pdf`,
-  and writes a vault note containing the raw Mathpix content (not any
-  LLM-cleaned text); a second, plain (`no_llm=False`) run over that same
-  now-`UNCHANGED` file actually calls `cleanup_pdf()` via
-  `needs_llm_reprocessing()` with no further Mathpix API call, ending with
-  `llm_status="success"` and the vault note rewritten with the cleaned
-  content — exercised end-to-end per the issue's explicit ask, not just
-  asserted by inspection; `no_llm=True` combined with an UNCHANGED file
-  that's otherwise eligible for LLM-only reprocessing
-  (`llm_status=None`/`force_llm=True`) is skipped with zero `cleanup_pdf()`
-  calls; `tests/test_cli.py` parsing/defaults for `--no-llm`; a
-  `main()`-level flag-forwarding test mirroring `--force`'s precedent.
-- **#47 (done)** — new `src/reporting.py`: a `Reporter` `typing.Protocol`
-  (`on_stage`/`on_detail`/`on_done`, all keyed by `source_path`) +
-  `PlainReporter`, the only implementation built by this issue.
-  `PlainReporter.on_stage` reproduces every one of `src/main.py`'s ~19
-  existing per-file `print()` sites byte-for-byte: each call site passes
-  either a short canonical token from a closed, enumerable vocabulary
-  (e.g. `"submitting:new"`, `"done:llm_success"` — see `_STAGE_TEXT` in
-  `src/reporting.py` for the full mapping) which `PlainReporter` renders as
-  today's exact text, or — for the handful of sites whose content is
-  inherently free-form (an exception's `str()`, a delimiter-balance
-  warning) — the literal final message text itself, printed verbatim when
-  it isn't a recognized token. The `"[{course}] {filename}: "` prefix is
-  derived directly from `source_path` (`Path(source_path).parent.name`/
-  `.name`), matching every real per-course call site exactly (course_label
-  there is always literally the source path's parent directory name) —
-  except the `"ungrouped_skip"` token, special-cased to the fixed
-  `"ungrouped"` label (deriving from path there would show `input_root`'s
-  own directory name, not the intended synthetic marker). One deliberate,
-  approved cosmetic deviation: the rare, untested `--file`-targeted-
-  ungrouped-stray-PDF path (the `_UNGROUPED_CACHE_SUBDIR` sentinel) now
-  shows the real parent directory name in its bracket instead of the old
-  synthetic `"_ungrouped"` placeholder — no test locks this in, and it's
-  purely cosmetic. `on_detail`/`on_done` are pure no-ops in `PlainReporter`
-  — reserved for `--verbose` (#48) and a future `RichReporter` (#49)
-  respectively, so today's output is completely unchanged (confirmed by
-  running the full pre-existing test suite unmodified — all 244 tests
-  passed with zero changes needed beyond one test-fake signature update,
-  see below). `run()`/`_process_file()`/`_write_to_vault()` gained a
-  `reporter: Reporter | None = None` param (required/non-optional on the
-  latter two, since `run()` always resolves `None` to a fresh
-  `PlainReporter()` before ever calling them) — no CLI flag surfaces this
-  yet, it's an internal/test-injection-only param until #48/#49.
-  `_write_to_vault()`'s now-unused `course_label`/`filename` display-only
-  params were removed entirely (Reporter derives them from `source_path`).
-  `src/mathpix.py` needed no changes (`process_pdf()`'s `on_status` hook
-  already existed) — `_process_file()` now builds an adapter closure
-  wiring it to `reporter.on_detail(...)`, a brand-new call (this hook was
-  never wired to anything before). `src/llm.py`'s `cleanup_pdf()` gained a
-  matching new `on_status: Callable[[str], None] | None = None` param,
-  called at most once immediately after a successful `client.complete()`
-  (before validation) with a token/cost message — never on an `LLMError`
-  or an earlier setup-time raise; `_process_file()` wires it to
-  `reporter.on_detail(...)` too, at both of its two `cleanup_pdf()` call
-  sites. Both new hooks are exercised only through `on_detail`, which
-  `PlainReporter` no-ops, so they're fully wired but invisible until #48.
-  The one pre-existing test needing an update:
-  `tests/test_main.py::_install_fake_cleanup_pdf`'s fake `cleanup_pdf`
-  stand-in gained a matching `on_status=None` parameter (since
-  `_process_file()` now always passes `on_status=` as a keyword arg to
-  every real `cleanup_pdf()` call). New tests: `tests/test_reporting.py`
-  covers every canonical token's exact rendered text, the free-form-
-  fallback case, the `ungrouped_skip` special case, and confirms
-  `on_detail`/`on_done` are no-ops; `tests/test_llm.py` covers
-  `cleanup_pdf(on_status=...)` firing once on success with the right
-  token/cost content, never firing on an `LLMError`, and being safely
-  omittable; `tests/test_main.py` gained a `_RecordingReporter` test
-  double and four new `run(reporter=...)` tests confirming real end-to-end
-  wiring (a NEW file's `submitting:new`/`done:llm_success` stages plus at
-  least one Mathpix polling `on_detail` call; the default `reporter=None`
-  path still prints exactly the same text to stdout as before this
-  refactor; `_write_to_vault()`'s failure path routes through the injected
-  reporter too; the ungrouped-skip loop's `"ungrouped_skip"` token reaches
-  the injected reporter with the correct `source_path`).
-- **#48 (done)** — `--verbose`/`-v`, gating `PlainReporter.on_detail()`;
-  new `on_copy`/`on_figure_copy` hooks added to `copy_figures_to_vault()`/
-  `write_lecture_note()`. See the issue's GitHub comments for full detail.
-- **#49 (done)** — `src/reporting.py`: `RichReporter` (a `rich.live.Live` +
-  `rich.table.Table` progress display: `Course | File | Status` columns,
-  one row per discovered file) + TTY auto-detection. `rich` added to
-  `environment.yml` (conda-forge, unpinned). Two deviations beyond the
-  issue's literal text, both confirmed with the user before implementing:
-  (1) the `Reporter` protocol gained a new `on_discover(items: Sequence[
-  tuple[str, str]])` hook — called exactly once by `run()`, right after
-  discovery/force-reclassification completes and before any per-file
-  processing, with `(source_path, classification.value)` for every
-  discovered file (including ungrouped ones). This was necessary because
-  most already-up-to-date `UNCHANGED` files receive *zero* further
-  `on_stage`/`on_detail` calls all run (`_process_file()` silently returns
-  `skipped=1`) — without a classification-aware seed, those rows would sit
-  at a perpetual "waiting" with no way to know they're actually fine.
-  `RichReporter` seeds NEW/CHANGED/RETRY as "waiting", UNCHANGED as an
-  already-settled "up to date". `PlainReporter.on_discover` is a no-op (no
-  output change). Required a small `run()` restructuring: the per-course
-  loop now applies `_apply_force()` and flattens into one ordered
-  `(course_name, result)` list *before* calling `on_discover()` once, then
-  iterates that same list for real processing (avoids computing
-  `_apply_force()` twice per file); the `target_source_path` branch gained
-  one `on_discover()` call with its single classified result.
-  `tests/test_main.py`'s `_RecordingReporter` test double updated with a
-  matching `on_discover` (append-only, same pattern as its siblings).
-  (2) `Reporter`/`PlainReporter`/`RichReporter` all gained trivial
-  `__enter__`/`__exit__` — `main()` now wraps the `run()` call in `with
-  reporter:` instead of just passing it in, so `RichReporter`'s `Live`
-  display starts/stops cleanly (including on an exception mid-run).
-  Deliberately `main()`-only: `run()` itself never enters/exits a reporter
-  as a context manager, so any Reporter passed directly to
-  `run(reporter=...)` (including every existing test double) never needed
-  updating for this part. `on_done()` stays intentionally unwired — no new
-  call sites added to `src/main.py` this issue (confirmed with the user);
-  `on_discover`'s seeding plus the last `on_stage` call `RichReporter`
-  observes are sufficient for a sensible resting state per row.
-  `on_detail()` (verbose-only, matching `PlainReporter`'s existing gating)
-  renders as a dim trailing suffix appended to the Status cell rather than
-  a separate column — picked per the issue's explicit "whichever is
-  simpler" allowance. `src/reporting.py` guards its `rich` imports with a
-  module-level `try/except ImportError` (`_RICH_AVAILABLE` flag) so
-  `Reporter`/`PlainReporter` stay importable with zero hard dependency on
-  `rich` even if it's missing; `RichReporter.__init__` raises `ImportError`
-  itself (lazily, at construction, not at module-import time) when
-  `_RICH_AVAILABLE` is `False`. `src/main.py` gained a `_select_reporter
-  (verbose: bool) -> Reporter` helper (in `main.py`, not `run()`, per the
-  issue's explicit instruction) choosing `RichReporter` when
-  `sys.stdout.isatty()` and construction succeeds, else `PlainReporter`.
-  Per AGENTS.md's testing conventions, no test asserts on actual rendered
-  Rich output — `tests/test_reporting.py`'s `RichReporter` tests check its
-  internal `_rows` state dict (seeding, `on_stage`/`on_detail` transitions,
-  style heuristics, `__enter__`/`__exit__` starting/stopping the real
-  `Live` object) and protocol conformance only; `tests/test_main.py` adds
-  `on_discover`-wiring tests (both the multi-file and `--file` branches)
-  and `_select_reporter`/`main()`-level TTY-detection tests (monkeypatching
-  `sys.stdout.isatty`). Manually verified end-to-end in a real TTY (via
-  `script -q /dev/null python -m src.main --dry-run[, --verbose]` against
-  the real `notes_raw` tree) — table renders correctly with real course/
-  file data, both already-processed real lectures correctly show "up to
-  date", Live starts/stops cleanly, and the plain-text summary still
-  prints afterward.
-  **Follow-up (same issue, user-requested after initial implementation):**
-  the actionable NEW/CHANGED/RETRY path had no transitional signal between
-  the Mathpix stage and the final LLM outcome — a live-updating reporter's
-  row would sit on `"processing (new)..."` for the entire LLM call, then
-  jump straight to `"done (LLM cleanup succeeded)"`. Added one new
-  `on_stage(source_path, "editing:llm")` call in `_process_file()`,
-  immediately before `cleanup_pdf()` is invoked (actionable path only —
-  `--no-llm` skips `cleanup_pdf()` entirely, and the separate UNCHANGED
-  LLM-only-rerun path already had its own pre-existing `"reprocessing_llm"`
-  stage announcing the same moment, left untouched). New `_STAGE_TEXT`
-  entry: `"editing:llm"` → `"editing (LLM cleanup)..."`. Gives every
-  reporter (`PlainReporter` prints a new line; `RichReporter`'s table shows
-  it) a `waiting → processing (Mathpix) → editing (LLM) → done` per-file
-  progression instead of `waiting → processing → done`. Tests added:
-  `tests/test_reporting.py` covers the new canonical token's exact text
-  plus a `RichReporter` full-lifecycle test asserting the row's status
-  string at each of the four stages in order; `tests/test_main.py` asserts
-  `"editing:llm"` is recorded between `"submitting:new"` and
-  `"done:llm_success"` in `_RecordingReporter`'s stage list, and that the
-  default (`PlainReporter`) path prints the new line to stdout.
-  **Second follow-up (user-made `RichReporter` formatting changes,
-  reviewed/fixed and extended with a spinner):** the user hand-edited
-  `src/reporting.py`/`src/main.py` to wrap the table in a centered,
-  titled (`"NoTeX"`) `Panel`, shorten `"editing:llm"`'s text to
-  `"Editing..."` and `"done:llm_success"`'s to a `"✓ Done"` checkmark, and
-  turn `on_done()` into a once-per-run (not per-file) completion signal
-  taking `runtime_secs`, timed by `main()` and called once after `run()`
-  returns (still inside `with reporter:`). Reviewing that diff surfaced
-  four real bugs, fixed rather than just papered over with matching
-  tests: (1) the `"✓ Done"` text had raw Rich markup (`"[green]..."`)
-  embedded directly in the shared `_STAGE_TEXT` dict, which
-  `PlainReporter` prints verbatim with `print()` — it would have literally
-  shown `[green]✓ Done` in a non-TTY terminal; fixed by stripping the
-  markup from the shared dict (`RichReporter` still colors it green via
-  its existing `_CANONICAL_STYLE` mechanism, no markup needs to be
-  embedded in the text itself). (2) the table's title was hardcoded to
-  `"2 documents found"` (matching the user's local 2-file test setup) —
-  now computed from `len(self._rows)`. (3) `on_discover`'s row-creation
-  used `Path(source_path).stem` (dropping `.pdf`) but `on_stage`/
-  `on_detail`'s defensive fallback row-creation still used `.name` —
-  made all three consistent. (4) `main()`'s `_print_summary(...)` call was
-  commented out, silently dropping the processed/skipped/errors/tokens/
-  cost breakdown for every run regardless of reporter — restored it
-  (confirmed as accidental, not a decision to replace it with `on_done`'s
-  duration-only message; the two are complementary). Also added a spinner:
-  `submitting:new/changed/retry`, `editing:llm`,
-  `reprocessing_llm`, and `retrying_vault_write` (all four in-progress,
-  not-yet-terminal stages) now render as an animated `rich.spinner.Spinner`
-  (`"dots"`, cyan for the three non-LLM stages, yellow for the two
-  LLM-stage ones) instead of static text, via a new `_SPINNER_STAGES`
-  token→color dict consulted by `RichReporter.on_stage()`/`_render()`;
-  cleared back to plain text the moment a row reaches any stage not in
-  that dict (every terminal `"done:*"`/`"llm_only:*"` outcome). Confirmed
-  by experiment before implementing: a fresh `Spinner` object constructed
-  on every `_render()` call still animates correctly between explicit
-  `on_stage()`/`on_detail()`-triggered `Live.update()` calls, because
-  `Live`'s own background auto-refresh thread (`refresh_per_second=8`)
-  keeps re-rendering whatever `Table`/`Spinner` object was last pushed,
-  and `Spinner` computes its current frame from real elapsed wall-clock
-  time rather than a counter tied to explicit render calls — no need to
-  persist `Spinner` instances across hook calls in `self._rows`. Verified
-  manually end-to-end (real TTY via `script`) that the spinner text
-  actually cycles through multiple frames during a stage, not just a
-  single static frame. Tests added/updated throughout
-  `tests/test_reporting.py` (dynamic title, subtitle-from-`on_done`,
-  `on_done`'s new signature, spinner presence/color per stage, spinner
-  clearing on terminal stages, `_render()`'s actual `Spinner` vs. plain-
-  string cell type, verbose detail suffix rendering inside an active
-  spinner's text) and `tests/test_main.py` (`_RecordingReporter.on_done`'s
-   signature updated to match, a new end-to-end test confirming `main()`
-  prints the `"Finished in X.XX s"` line *and* the full summary).
-- **`cli.print_summary` config flag (done, untriaged, no GitHub issue
-  filed, no phase label)** — `src/config.py` gained `CLIConfig`
-  (`print_summary: bool`) + `load_cli_config()`, the same fully-optional
-  fallback pattern as every other `load_*_config()` here;
-  `DEFAULT_PRINT_SUMMARY = False`. `src/main.py`'s `main()` calls
-  `load_cli_config()` directly (unconditional, same as `load_paths_config()`
-  — not threaded through `run()`, since `_print_summary()` is a `main()`-
-  only concern) and now only calls `_print_summary(...)` when
-  `cli_config.print_summary` is `True`; `on_done()`'s `"Finished in X.XX s"`
-  line is unaffected either way (not gated by this flag). Off by default,
-  per explicit user direction — the live reporter plus `on_done()`'s
-  duration message already cover most runs' needs, so the full processed/
-  skipped/errors/tokens/cost breakdown is now opt-in via `config.yaml`'s
-  new `cli: print_summary: true`. Added to both `config.example.yaml` and
-  the local `config.yaml` (both defaulting `false`). Since `main()` calls
-  `load_cli_config()` unconditionally just like `load_paths_config()`, any
-  test invoking `main()` without mocking it falls back to reading the
-  real on-disk `config.yaml` — harmless (matches the `False` default
-  regardless) for the ~15 existing flag-parsing tests that don't assert on
-  summary text; only the two tests that do assert on it
-  (`test_main_returns_zero_and_prints_summary_even_with_errors`,
-  `_setup_main_end_to_end`'s dependents) needed an explicit
-  `load_cli_config` mock (`CLIConfig(print_summary=True)`) to keep passing,
-  a deliberate, minimal-blast-radius choice over updating every unrelated
-  test. New tests: `tests/test_config.py` covers `load_cli_config()`'s
-  full fallback matrix (missing file/section/key, explicit `true`/`false`);
-  `tests/test_main.py` adds a default-omits-summary test (mocked `run()`,
-  no `CLIConfig` override), an explicit-`False` test, and a real-on-disk-
-  `config.yaml` end-to-end test (`monkeypatch.chdir`, no `load_cli_config`
-  override) mirroring the existing `output_config`/`naming_config`
-  real-file-fallback precedent. Manually verified end-to-end against the
-  real `config.yaml` (`--dry-run`, toggling `print_summary` true/false)
-  before restoring it to `false`.
-  **Third follow-up to #49 (capitalization + user-made color tweaks):**
-  capitalized the first word of every `_STAGE_TEXT` value (`"would
-  process..."` → `"Would process..."`, `"processing..."` →
-  `"Processing..."`, `"done..."` → `"Done..."`, `"retrying vault
-  write..."` → `"Retrying vault write..."`, `"reprocessing LLM stage
-  only..."` → `"Reprocessing LLM stage only..."`; `"Editing..."`,
-  `"✓ Done"`, and the two `"LLM cleanup..."` entries were already
-  capitalized). `_UNGROUPED_STAGE_TEXT` deliberately left as-is — a
-  separate constant, not part of `_STAGE_TEXT`. Also reviewed and kept
-  two user-made `RichReporter` color changes: `_style_for()`'s default
-  fallback style (dry-run `"Would process/reprocess/retry"` rows and any
-  other uncategorized stage) changed from cyan to white; the
-  `submitting:new/changed/retry` spinner color changed from cyan to
-  white to match (`editing:llm`/`reprocessing_llm` stay yellow,
-  `retrying_vault_write` stays cyan) — fixed one stale comment that still
-  described the old cyan/yellow spinner-color split. Also kept the
-  user-made table title format change, `"{N} documents found"` →
-  `"({N}) documents found"`. Tests updated throughout
-  `tests/test_reporting.py` (exact-text/spinner-color/title assertions)
-  and `tests/test_main.py` (`PlainReporter` output text, unaffected by
-  the color changes since it has no color).
-- **#50 (done)** — new `scripts/manual_convert.py`: stateless manual
-  conversion (source PDF + exact destination `.md` path as CLI args),
-  never touching `state.db`/`discovery.py`. Deviates from the issue's
-  literal wording: does not call `src/vault.py`'s `write_lecture_note()` or
-  `src/postprocess.py`'s `parse_lecture_filename()`/`build_frontmatter()`
-  directly (both assume a course-folder/`lecture_NN...`-named source,
-  which an arbitrary manual conversion may not have) — instead calls the
-  lower building blocks (`process_pdf()` → `cleanup_pdf()` →
-  `copy_figures_to_vault()` → `rewrite_image_references()` →
-  `scan_delimiter_issues()`) plus a new local `_build_manual_frontmatter()`
-  that only renders `title`/`course`/`lecture_number`/`tags` when the
-  corresponding optional `--course`/`--lecture-number`/`--tags` CLI flag
-  is given (`output.course_tags` is never consulted). Figures land in
-  `dest_path.parent / "figures"`. Mathpix/LLM cache is a fresh
-  `tempfile.mkdtemp()`, deleted after the run (`--keep-cache` to retain
-  for debugging). `previous_content_hash` is always `None` (unconditional
-  overwrite) — manual mode is exempt from #40's conflict detection since
-  the user named this exact destination file explicitly. Lightweight
-  argparse-only tests added in `tests/test_manual_convert.py` (no real API
-  calls), per the issue's own testing-scope note. See #50's GitHub
-  comments for full implementation detail.
-- **#51 (done)** — real-data validation, run in two parts since it
-  depended on every other Phase 7 issue landing first. Part 1 (pre-
-  `--verbose`/`RichReporter`/manual mode): 38 real invocations against
-  `--course`/`--dry-run`/`--force`/`--rerun-llm`/`--file`/
-  `--force-vault-overwrite`/`--no-llm`, individually and combined — all
-  behaved as designed; found and fixed #52 (`--force --no-llm` leaving a
-  stale `llm_status="success"`) and documented one still-open, narrow,
-  accepted UX gap (`--force-vault-overwrite` combined *again* with
-  `--no-llm` on a no-llm-only conflicted file silently no-ops with no
-  message). Part 2 (post-#47-#50): 5 real invocations covering the
-  remaining scope — `--verbose`'s detail lines (Mathpix poll counts,
-  LLM token/cost, figure-copy, vault-write confirmation) all correct;
-  `RichReporter`'s TTY auto-detection and fallback-when-piped both
-  confirmed (dry-run, free), plus one real end-to-end TTY run showing
-  the animated spinner genuinely cycling frames and the verbose detail
-  suffix rendering correctly; `scripts/manual_convert.py` validated
-  fully stateless (`state.db` checksum unchanged across two real runs)
-  with every optional flag (`--course`/`--lecture-number`/`--tags`/
-  `--dark-mode`/`--no-dark-mode`/`--keep-cache`/`--prompt-version`)
-  behaving correctly, alone and combined. No bugs found in part 2; no
-  code changes needed. All test fixtures/copies were cleaned up
-  afterward and `notes_raw`'s real files confirmed byte-identical
-  throughout both parts. Full detail in both parts' GitHub comments.
-
-### Phase 6 (VALIDATED — complete, issues #33-#38)
-
-- **#33 (done)** — `src/config.py`: `OutputConfig` (`course_tags`/
-  `date_format`/`figures_dark_mode_flag`) + `load_output_config()`, same
-  fully-optional pattern as `load_llm_config()`. Deviates from the issue's
-  original description: no `base_tags`/global-default tag field at all —
-  see the "Scope correction" note under "Current Phase" above. Also fixed
-  #35's stale `base_tags`-fallback description to match.
-- **#34 (done)** — `src/config.py`: `NamingConfig` (`lecture_prefix`) +
-  `load_naming_config()`, same fully-optional pattern as
-  `load_llm_config()`/`load_output_config()`. `DEFAULT_LECTURE_PREFIX` is
-  duplicated in `config.py` (matches `postprocess.py`'s existing constant),
-  same no-cross-module-import precedent as `DEFAULT_DATE_FORMAT`. Added
-  `naming:` section to `config.example.yaml`. No deviations from the
-  issue's plan.
-- **#35 (done)** — `src/postprocess.py`: `build_frontmatter()` gained a
-  `date_format` param (default `DATE_FORMAT`, applied to both `date`/
-  `processed`); new `resolve_tags(course_name, output_config)` helper
-  resolves a course's tags from `OutputConfig.course_tags` with no
-  fallback (`()` if absent). Deviates from the issue's original
-  description: `DEFAULT_TAGS` was removed entirely (not left as a
-  fallback) and `build_frontmatter()`'s `tags` param now defaults to `()`
-  — keeping a hardcoded `("lecture-notes",)` default would have silently
-  reintroduced a global default tag for any caller that omits `tags`,
-  contradicting the no-base_tags design; `src/vault.py`'s
-  `write_lecture_note()` (still Phase 5, issue #29) updated to match, its
-  own tags default now also `()` instead of `DEFAULT_TAGS`. `src/main.py`
-  wiring `resolve_tags()`'s output through is still #37's job.
-- **#36 (done)** — `src/postprocess.py`: `build_frontmatter()` gained a
-  `lecture_prefix` param (default `DEFAULT_LECTURE_PREFIX`), used to build
-  the `title` field. `src/vault.py`'s `write_lecture_note()` gained the
-  same-named param, used for both the output filename and forwarded
-  verbatim to `build_frontmatter()`, so the two can never disagree. No
-  deviations from the issue's plan. `src/main.py` wiring
-  `NamingConfig.lecture_prefix` through is still #37's job.
-- **#37 (done)** — `src/main.py`: `run()` gained optional
-  `output_config`/`naming_config` params (loaded via
-  `load_output_config()`/`load_naming_config()` internally when `None`,
-  same pattern as `llm_config`), threaded through `_process_file()` into
-  both `_write_to_vault()` call sites (actionable NEW/CHANGED/RETRY path
-  and the UNCHANGED LLM-only-rerun path). Tags are resolved per call via
-  `resolve_tags(course_label, output_config)` — `course_label` is already
-  the raw course folder name (or the `_ungrouped` sentinel, which
-  naturally resolves to no tags) in both call paths, so no extra param
-  was needed for that lookup. Found and fixed a pre-existing gap while
-  implementing this: `src/vault.py`'s `write_lecture_note()` never
-  actually gained a `date_format` param — `build_frontmatter()` got one in
-  #35, but threading it through `write_lecture_note()` was missed by both
-  #35 and #36 and only surfaced once #37 tried to wire it from
-  `output_config.date_format`; added it here (default `DATE_FORMAT`,
-  forwarded verbatim to `build_frontmatter()`). All ~13 existing
-  `tests/test_main.py::run()` call sites updated to pass explicit
-  `output_config=_make_output_config()`/`naming_config=_make_naming_config()`
-  (mirroring the existing `llm_config` precedent, keeping tests hermetic/
-  independent of the real machine's `config.yaml`); one new test drives
-  `run()` through a real on-disk `config.yaml` (via `monkeypatch.chdir`) to
-  exercise the internal load-if-`None` fallback end-to-end, confirming
-  `output.course_tags`/`date_format`/`figures_dark_mode_flag` and
-  `naming.lecture_prefix` all reach the written vault note. Also fixed
-  #37's own stale GitHub issue-body wording (a leftover "base_tags
-  fallback" mention that predates the no-base_tags design), matching the
-  #33/#35 precedent of correcting stale issue text.
-- **#38 (done)** — real-data validation against `notes_raw/class_1`: cold
-  run, idempotent rerun, and a config-change-without-input-change rerun all
-  confirmed working as designed; no code changes needed for Phase 6 itself.
-  Found and filed (not fixed) #39 — `write_lecture_note()` orphans the
-  previously-named vault file when `naming.lecture_prefix` changes.
-  Confirmed the config-change scenario requires calling `run(...,
-  force_llm=True)` directly — `needs_llm_reprocessing()` never retriggers
-  an already-`llm_status="success"` file, and `main()` hardcodes
-  `force_llm=False` with no CLI flag yet (Phase 7) — so today, editing
-  `output:`/`naming:` values and rerunning the plain CLI has no effect on
-  already-processed files. Manual Obsidian check confirmed the
-  `@darkmode`-suffixed alt text renders as intended. Full findings in the
-  issue's GitHub comments. Phase 6 is now marked **VALIDATED — complete**.
-
-### Phase 5 (VALIDATED — complete, issues #26-#32)
-
-- **#26 (done)** — `vault_root` added to `PathsConfig` (required, no
-  default).
-- **#27 (done)** — `src/postprocess.py`: `parse_lecture_filename()` +
-  `build_frontmatter()`. Unexpected: `date`/`processed` fields use **local
-  time, not UTC** (deliberate — human-facing calendar fields, unlike the
-  rest of the codebase's UTC convention).
-- **#28 (done)** — `src/postprocess.py`: `scan_delimiter_issues()`
-  (warn-only `$`/`\left`/`\right`-balance + literal `\(...\)`/`\[...\]`
-  diagnostic scan).
-- **#29 (done)** — `src/vault.py`: `write_lecture_note()` +
-  `VaultWriteResult`. Orchestrates `parse_lecture_filename()` ->
-  `copy_figures_to_vault()` -> read content -> `rewrite_image_references()`
-  -> `scan_delimiter_issues()` (on the rewritten body) ->
-  `build_frontmatter()` -> write `vault/{course}/Lecture NN.md`
-  unconditionally overwriting. `vault_course_dir` is always explicitly
-  `mkdir(parents=True, exist_ok=True)`'d (needed for the zero-figure case,
-  since `copy_figures_to_vault()` only creates the `figures/` subdir when
-  there are actual figures — that sub-behavior is untouched).
-- **#30 (done)** — `state.py`: `vault_status`/`vault_path` nullable
-  columns added (`_VALUE_COLUMNS`, `_CREATE_TABLE_SQL`, `StateEntry`),
-  placed right after `output_path`. No schema-migration logic, same
-  precedent as #21/#22.
-- **#31 (done)** — `src/main.py`: wired `write_lecture_note()` into
-  `_process_file()` via a new `_write_to_vault()` helper, called after the
-  LLM stage on both the actionable NEW/CHANGED/RETRY path and the
-  UNCHANGED-file LLM-only-rerun path. `run()` computes `vault_course_dir`
-  (`paths_config.vault_root / course`, or the `_ungrouped` sentinel)
-  alongside each existing `cache_dir` computation. `PostprocessError`/
-  `OSError` from `write_lecture_note()` are caught, recording
-  `vault_status="failed"` only (mathpix/llm fields untouched); success
-  records `vault_status`/`vault_path`/`vault_written_at` (reusing
-  `llm_result.processed_at`, no fresh timestamp). No new `RunSummary`
-  field — folds into the existing `errors` count, matching #18's
-  precedent. Found and fixed a pre-existing test gap:
-  `test_run_target_source_path_force_processes_ungrouped_file`'s
-  `stray.pdf` fixture doesn't match `parse_lecture_filename()`'s pattern,
-  so real vault-writing now correctly surfaces that as an error
-  (`vault_status="failed"`) — updated the test's expectations rather than
-  masking it.
-- **#32 (done)** — real-data validation against `notes_raw/class_1`: cold
-  run, idempotent rerun, and the malformed-filename path all confirmed
-  working as designed (no code changes needed); full findings in the
-  issue's GitHub comments. Phase 5 is now marked VALIDATED — complete.
-
-### Phase 4 (VALIDATED — complete, issues #23-#25)
-
-- **#23** — `src/figures.py`: `copy_figures_to_vault()`. Zero-figure input
-  is a no-op (no vault figures dir created); copies via `shutil.copy2`,
-  overwriting for idempotent reruns.
-- **#24** — `rewrite_image_references()`. Unexpected/deviates from original
-  plan: only rewrites the alt-text slot (`Figure N` caption + optional
-  `@darkmode`), not a wikilink conversion — image paths untouched (see
-  Phase 4 plan note above for why).
-- **#25** — Real-data validation against `_cache/class_1`: correct and
-  idempotent, no code changes needed.
-
-### Phase 3 (VALIDATED — complete, issues #13-#21)
-
-- Heading-count validation is **relaxed, not exact-match** (fails only on
-  *new* headings) — Mathpix sometimes emits a stray heading from a
+- **Orphaned vault files on renaming `naming.lecture_prefix`.**
+  `write_lecture_note()` derives its output filename from the *current*
+  `lecture_prefix` but never removes a previously-written file under a
+  different name for the same source PDF. Explicit user decision: this is
+  acceptable, permanent behavior — no cleanup logic will be built for it.
+  One narrow interaction: if `lecture_prefix` is changed and later reverted
+  to a prior value, the recomputed path points at the old orphaned file, but
+  the recorded `vault_content_hash` describes the intervening (different-
+  prefix) file — this correctly-but-unhelpfully surfaces as
+  `vault_status="conflict"` even though nobody manually edited the orphan.
+  `--force-vault-overwrite` is the general escape hatch for this, same as
+  any other recorded conflict.
+- **No per-file conflict targeting.** `--force-vault-overwrite` is a blunt,
+  whole-run instrument; there's no flag to clear one specific file's
+  recorded conflict while leaving others alone.
+- **`--no-llm` + vault-conflict retry interaction.** A file processed only
+  ever with `--no-llm` has `output_path` left `None`, so
+  `--force-vault-overwrite` alone can't retry a vault conflict recorded
+  against it — combine with `--rerun-llm`/`--force` to get a real LLM pass
+  (and a non-null `output_path`) first.
+- **LLM cleanup can confidently substitute a wrong but plausible term** for
+  garbled proper-noun OCR text (observed: garbled "Mann's rule" rewritten to
+  "Wigner's rule" instead of the intended "Laporte's rule"). Undetectable by
+  any current automated check — a real, unresolved accuracy risk for future
+  prompt work.
+- **`validate_cleanup()`'s delimiter-balance check is count-only,** not
+  delimiter-type pairing (e.g. it won't catch `\left(` closed by
+  `\right\rangle`) — a known, accepted limitation.
+- **Heading-count validation is relaxed, not exact-match** — it only fails
+  on *new* headings, since Mathpix sometimes emits a stray heading from a
   handwritten date/title line that the cleanup prompt is expected to drop.
-- `needs_llm_reprocessing()` deliberately **ignores `llm_prompt_version`** —
-  only `force_llm=True` or a real content change triggers reprocessing, not
-  editing the prompt file or bumping `prompt_version`. Corrects
-  docs/spec.md's reprocessing table.
-- Chunking for long documents is deferred (not implemented) — real PDFs
-  seen so far are 1-2 pages.
-- Default model: **Claude Haiku 4.5** via `litellm` (`ANTHROPIC_API_KEY`),
-  configurable via `config.yaml`'s `llm.model`.
-- `validate_cleanup()` checks `length_ratio`, `dollar_balance`,
-  `left_right_balance` (count-only, not delimiter-type pairing — known
-  limitation), and `heading_count`.
-- `cleanup_pdf()` never raises on LLM failure/validation failure — falls
-  back to the raw `.mathpix.md`, with `llm_status="failed"` and
-  `llm_model`/`llm_prompt_version` left `None`.
-- Token/cost tracking (`llm_input_tokens`/`llm_output_tokens`/
-  `llm_cost_estimate` in `state.db`, matching `RunSummary` totals) added in
-  issue #21.
-- **Known limitation, real-data validation:** the LLM can confidently
-  substitute a wrong but plausible specific term for garbled proper-noun
-  OCR text (observed: garbled "Mann's rule" rewritten to "Wigner's rule"
-  instead of the intended "Laporte's rule") — undetectable by any current
-  check, a real unresolved accuracy risk for future prompt work.
+- **No chunking for long documents** — not implemented; real PDFs processed
+  so far are 1-2 pages.
+- **No global/default tag list** (`output.course_tags` has no fallback) and
+  **no course index generation** — see "Configuration" above.
 
-### Phase 2 (VALIDATED — complete, issues #7-#12)
+## Mathpix API Notes
 
-- `src/state.py`: single `pdf_state` table keyed on `source_path`.
-  `upsert_entry()` is a **partial** upsert — only passed columns are
-  written, so one stage's update never nulls another's.
-- `src/discovery.py`: `classify_pdf()` is a two-tier change-detector
-  (mtime+size fast path, SHA-256 fallback). `Classification` enum: `NEW`,
-  `UNCHANGED`, `CHANGED`, `RETRY`. `discover_pdfs()` recursively walks
-  `input_root`, grouping by course subdirectory; ungrouped PDFs (directly
-  under `input_root`) use sentinel key `UNGROUPED_COURSE_KEY` and are
-  **skipped outright, not written to `state.db`** (no course name to
-  mirror into `cache_dir`).
-- `src/main.py`: `run()` (testable core) / `main()` (CLI wrapper) with one
-  `MathpixClient` per run. `main()` returns `0` even with per-file errors
-  recorded in `RunSummary` — only `1` if the run can't start at all.
-- Real-data validation confirmed idempotent reruns against
-  `notes_raw/class_1`.
-
-### Phase 1 (VALIDATED — complete, issues #1-#6, #22)
-
-- `src/mathpix.py`: `MathpixClient` (context manager, injectable
-  `http_client=`/`sleep_fn=`). `submit()` → `poll_until_complete()` →
-  `fetch_and_extract()`, orchestrated by `process_pdf()`. Exceptions:
-  `MathpixError` base, `MathpixProcessingError`, `MathpixTimeoutError`.
-  429s during polling are retried honoring `Retry-After` and don't count
-  against `max_poll_attempts`.
-- Unexpected API quirk: `fetch_and_extract()` also polls
-  `GET /v3/converter/{pdf_id}`'s `conversion_status`, which lags behind the
-  main `status` field — not in the original spec.
-- Optional `on_status(...)` callback on every real status poll, for
-  observability only (never affects control flow).
-- `page_count` (issue #22 followup): best-effort, read from the already-
-  fetched payload, no extra API call; nullable `state.db` column +
-  `RunSummary.total_pages_processed`.
-- Real-API smoke testing confirmed both zero-figure and one-figure paths
-  end-to-end; findings that shaped later phases are in "Smoke test
-  findings" below.
-
-## Mathpix API notes
-
-These correct assumptions in the original planning spec, verified against
-current docs.mathpix.com. Follow these, not the original spec's Mathpix
-section, when working on `src/mathpix.py`:
+Corrections to keep in mind, verified against current docs.mathpix.com:
 
 - **Status values:** `received → loaded → split → completed` (or `error`).
-  Not `loading → processing → completed`.
 - **Upload:** multipart form-data with a `file` field plus an `options_json`
   field (a JSON-encoded string of options) — not a raw PDF binary body.
 - **Figures:** request `conversion_formats: {"md.zip": true}` and extract the
   bundle locally. Do not rely on `GET /v3/pdf/{pdf_id}` returning a figure
   asset list (it only returns status/progress fields), and do not rely on
   `cdn.mathpix.com` image URLs staying valid long-term (30-day retention).
-- **Figure format:** images inside the zip are `.jpg`. Decision: keep as
-  `.jpg` in the vault, no PNG conversion.
-- **Math delimiters — CONFIRMED:** the `md.zip` bundle's Markdown uses
-  `$...$` for inline math and a `$$` fence on its own line before/after the
-  expression for display math, never `\(...\)`/`\[...\]`. This already
-  matches the target vault convention, so Phase 5's "delimiter pass" is a
-  pure validation/lint step (checking balance), not a conversion step.
+  `fetch_and_extract()` also polls `GET /v3/converter/{pdf_id}`'s
+  `conversion_status`, which lags behind the main `status` field.
+- **Figure format:** images inside the zip are `.jpg`, kept as-is (no PNG
+  conversion).
+- **Math delimiters:** the `md.zip` bundle's Markdown uses `$...$` for
+  inline math and a `$$` fence on its own line before/after the expression
+  for display math, never `\(...\)`/`\[...\]` — already matches the target
+  vault convention, so the delimiter pass is validation/lint only, not a
+  conversion step.
+- 429s during polling are retried honoring `Retry-After` and don't count
+  against `max_poll_attempts`.
 
-## Smoke test findings
+## Smoke Test Findings
 
-Observations from real Mathpix runs against handwritten lecture PDFs that
-shaped the Phase 3 LLM cleanup prompt and Phase 3/5 validation checks:
+Observations from real Mathpix/LLM runs against handwritten lecture PDFs
+that shaped the cleanup prompt and validation checks:
 
 - Mathpix sometimes emits a stray Markdown heading from a handwritten
-  date/title line (not real structure) — why heading-count validation is
-  relaxed, and the cleanup prompt is allowed to drop it.
+  date/title line (not real structure).
 - Cursive handwriting produces frequent word-level OCR errors, including
   systematic (not random) domain-vocabulary misreads of the same word every
   occurrence — the cleanup prompt targets the *pattern*, not one hardcoded
@@ -1143,13 +290,11 @@ shaped the Phase 3 LLM cleanup prompt and Phase 3/5 validation checks:
   literal command `\ln`) — passes every automated check; only a
   content-aware LLM pass has any chance of catching it.
 - `\left`/`\right` delimiter-type mismatches occur in the raw OCR (e.g.
-  `\left(` closed by `\right\rangle`) — `validate_cleanup()`'s balance check
-  is count-only by design (type-pairing isn't statically checkable), a
-  known accepted limitation.
+  `\left(` closed by `\right\rangle`).
 - Handwritten bra-ket notation uses raw `\langle`/`\rangle`/`|` rather than
   semantic macros; the cleanup prompt normalizes to `\braket{x|y}` form —
   requires the vault's Obsidian renderer to define these macros (not
-  standard LaTeX primitives), worth confirming if not already done.
+  standard LaTeX primitives).
 
 ## Testing Conventions
 
@@ -1161,55 +306,49 @@ shaped the Phase 3 LLM cleanup prompt and Phase 3/5 validation checks:
   `pytest` suite and are run manually when validating actual output quality
   (OCR correctness on handwriting, or LLM cleanup/prompt quality, can't be
   asserted automatically).
+- `RichReporter` tests never assert on actual rendered terminal output —
+  they check internal state (row data, style/spinner selection,
+  `__enter__`/`__exit__` lifecycle) and protocol conformance only.
 
 ## Directory Structure
 
 ```
 notex/                      ← repo root
 ├── .env                    ← secrets (gitignored), see .env.example
+├── config.yaml             ← machine-specific paths/settings (gitignored), see config.example.yaml
 ├── environment.yml         ← conda env spec (reproduce with `conda env create -f environment.yml`)
 ├── docs/
-│   └── spec.md             ← original full spec (historical reference, see note at top of file)
+│   └── spec.md             ← original full spec (historical reference — this file wins where they disagree)
 ├── prompts/
 │   └── cleanup_v1.txt      ← versioned LLM system prompt (loaded by prompt_version, see src/llm.py)
 ├── src/
-│   ├── config.py           ← env/config loading (load_mathpix_credentials, load_mathpix_polling_config, load_paths_config, load_llm_config)
-│   ├── mathpix.py          ← Mathpix API client
+│   ├── config.py           ← env/config loading (credentials, paths, mathpix polling, llm, output, naming, cli)
+│   ├── mathpix.py          ← Mathpix API client (MathpixClient, process_pdf)
 │   ├── state.py            ← state.db schema + CRUD (StateEntry, init_db, get_entry, upsert_entry)
-│   ├── discovery.py        ← per-file two-tier change classification + recursive multi-course walk (Classification, ClassificationResult, classify_pdf, compute_sha256, discover_pdfs, UNGROUPED_COURSE_KEY)
-│   ├── llm.py              ← LLM cleanup client + prompt loading + orchestration (LLMClient, LLMError, load_prompt_text, validate_cleanup, cleanup_pdf, needs_llm_reprocessing)
-│   ├── main.py             ← CLI orchestration entry point (RunSummary, run, main) — wires discovery + state.db + process_pdf() into a runnable pass over input_root
-│   ├── figures.py          ← figure copy-to-vault + Markdown image-reference caption rewriter (copy_figures_to_vault, rewrite_image_references)
-│   ├── postprocess.py      ← filename parsing + YAML frontmatter builder (parse_lecture_filename, build_frontmatter); delimiter-balance warning scan (scan_delimiter_issues)
-│   ├── vault.py            ← assembles + writes final per-lecture vault .md (write_lecture_note)
-│   ├── cli.py              ← argparse scaffolding for main.py (build_arg_parser) — split into its own module per-issue #41, not built inline in main()
-│   └── reporting.py        ← [Phase 7, not yet implemented] Reporter interface (PlainReporter/RichReporter) for progress UI
+│   ├── discovery.py        ← per-file two-tier change classification + recursive multi-course walk
+│   ├── llm.py              ← LLM cleanup client + prompt loading + orchestration (cleanup_pdf, needs_llm_reprocessing)
+│   ├── figures.py          ← figure copy-to-vault + Markdown image-reference caption rewriter
+│   ├── postprocess.py      ← filename parsing + YAML frontmatter builder + delimiter-balance warning scan
+│   ├── vault.py            ← assembles + writes final per-lecture vault .md, incl. manual-edit conflict detection
+│   ├── reporting.py        ← Reporter protocol: PlainReporter + RichReporter progress UI
+│   ├── cli.py              ← argparse scaffolding (build_arg_parser)
+│   └── main.py             ← CLI orchestration entry point (RunSummary, run, main)
 ├── scripts/
 │   ├── smoke_test_mathpix.py   ← manual, real-API Mathpix validation
 │   ├── smoke_test_llm.py       ← manual, real-API LLM prompt-iteration script
-│   └── manual_convert.py       ← manual mode: exact source PDF -> exact destination .md, full pipeline, stateless (no state.db/discovery.py)
+│   └── manual_convert.py       ← manual mode: exact source PDF -> exact destination .md, full pipeline, stateless
 ├── tests/
 │   ├── fixtures/           ← fixture data for mocked tests
-│   ├── test_mathpix.py
-│   ├── test_state.py
-│   ├── test_discovery.py
-│   ├── test_config.py
-│   ├── test_llm.py
-│   ├── test_main.py
-│   ├── test_cli.py
-│   └── test_figures.py
+│   └── test_*.py           ← one test module per src/ module, plus test_main.py/test_cli.py/test_manual_convert.py
 ├── state.db                ← SQLite state log, gitignored, created at runtime
 └── _cache/                 ← gitignored, created at runtime
 ```
 
 ## Git / Issue Tracking
 
-Issues are tracked on GitHub. Code was developed locally and held back from
-the `origin` remote until Phase 1 was validated against real Mathpix output;
-Phase 1 is now validated, so local commits are pushed to `origin` going
-forward. Record detailed per-issue implementation notes and real-data
-validation results as comments on the relevant GitHub issue — see
-"Documentation Conventions" above.
+Issues are tracked on GitHub. Record detailed per-issue implementation notes
+and real-data validation results as comments on the relevant GitHub issue —
+see "Documentation Conventions" above.
 
 **Commits and pushes require explicit review — never automatic.** An agent
 must not run `git commit` or `git push` on its own initiative. Only do so
