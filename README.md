@@ -104,7 +104,7 @@ Before running, set up configuration files from the examples here:
 
 ```
 conda activate notex
-python -m src/main.py
+python -m src.main
 ```
 
 This recursively scans `input_root/` for course subdirectories of PDFs,
@@ -112,7 +112,7 @@ classifies each file (new/unchanged/changed/retry) against `state.db`, and
 for anything needing work: OCRs it via Mathpix, cleans up the text with the
 LLM, copies figures, and writes/updates `vault/{course}/{lecture_prefix} NN.md`.
 
-Common flags (see `python -m src/main.py --help` for the full list):
+Common flags (see `python -m src.main --help` for the full list):
 
 ```
 --course NAME             Restrict the run to one course subdirectory
@@ -129,13 +129,13 @@ Examples:
 
 ```
 # Preview what a full run would do
-python -m src/main.py --dry-run
+python -m src.main --dry-run
 
 # Process one course only
-python -m src/main.py --course "18.06 Linear Algebra"
+python -m src.main --course "18.06 Linear Algebra"
 
 # Re-run the LLM cleanup on one file after editing the prompt
-python -m src/main.py --file /path/to/notes_raw/18.06/lecture_03.pdf --rerun-llm
+python -m src.main --file /path/to/notes_raw/18.06/lecture_03.pdf --rerun-llm
 ```
 
 ### Manual conversion mode
