@@ -152,3 +152,9 @@ in `config.yaml` is not applied.
 python scripts/manual_convert.py path/to/some_notes.pdf "vault/Misc/Some Notes.md" \
     --course "18.06 Linear Algebra" --lecture-number 3 --tags lecture-notes,math
 ```
+## Example
+
+See `example/` for an example on a handwritten note. The file 
+`lecture_02.mathpix.md` is the raw output from the Mathpix API, which is quite
+jumbled. The `Lecture 02.md` is the final LLM processed note, which is nearly 
+identical to the handwritten one. 
