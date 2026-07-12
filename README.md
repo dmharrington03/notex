@@ -32,7 +32,7 @@ only runs the digitization process and saves the output to a file.
 
 ## Dependencies
 
-NoTeX runs inside conda virtual environment. Package dependencies are in
+NoTeX runs inside a conda virtual environment. Package dependencies are in
 `environment.yml` and can be installed via 
 
 ```
@@ -42,7 +42,7 @@ conda activate notex
 
 You'll also need:
 
-- A Mathpix API account (App ID + App Key) for OCR
+- A [Mathpix API account](https://console.mathpix.com/) (App ID + App Key) for OCR
 - An API key for whichever LLM provider you configure via `litellm`
   (e.g. `ANTHROPIC_API_KEY` for Claude models)
 
