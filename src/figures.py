@@ -31,6 +31,18 @@ slot is rewritten (to the numbered placeholder caption, plus the darkmode
 marker when requested); the path itself is left completely untouched, since
 it already correctly points at vault/{course}/figures/... relative to where
 Phase 5 will write the note file.
+
+Note on issue #54: standard Markdown ![alt](path) syntax doesn't render in
+Obsidian when path contains whitespace (CommonMark requires percent-encoding
+or <...> wrapping, neither of which this codebase previously did), while
+figure filenames routinely do contain whitespace (derived from the source
+PDF's stem, e.g. "Lecture 02.pdf" -> figures/Lecture 02_fig_001.jpg). Three
+fixes: _FIGURE_REF_PATTERN was tightened to actually match paths containing
+whitespace (previously it silently failed to match past the first space);
+markdown-mode output now percent-encodes spaces in path as "%20"; and
+rewrite_image_references() gained an image_link_syntax param so callers can
+instead opt into Obsidian's ![[path]] wikilink form, which has no whitespace
+restriction at all, via output.image_link_syntax in config.yaml.
 """
 
 from __future__ import annotations
@@ -119,10 +131,17 @@ def copy_figures_to_vault(
 # parsing (src/mathpix.py, issue #3), but scoped to the figures/ prefix so
 # that only recognized figure references are touched -- everything else in
 # the Markdown (prose, math, non-figures/ image references) is left as-is.
-_FIGURE_REF_PATTERN = re.compile(r"!\[[^\]]*\]\((figures/[^)\s]+)\)")
+# The captured path group allows whitespace (issue #54) -- it only excludes
+# the literal ")" that closes the Markdown link, since figure filenames are
+# derived from source PDF stems and routinely contain spaces.
+_FIGURE_REF_PATTERN = re.compile(r"!\[[^\]]*\]\((figures/[^)]+)\)")
 
 
-def rewrite_image_references(markdown_text: str, dark_mode: bool = False) -> str:
+def rewrite_image_references(
+    markdown_text: str,
+    dark_mode: bool = False,
+    image_link_syntax: str = "markdown",
+) -> str:
     """
     Rewrite every ![alt](figures/...) reference in markdown_text to carry a
     numbered placeholder caption in its alt-text slot, e.g.:
@@ -137,23 +156,43 @@ def rewrite_image_references(markdown_text: str, dark_mode: bool = False) -> str
     once, each occurrence still gets its own, incrementing number, rather
     than sharing one).
 
-    The image path itself is left completely untouched -- this stays
-    standard Markdown syntax (![alt](path)), not Obsidian's ![[...]]
-    wikilink form, since the figures/... relative path already correctly
-    points at vault/{course}/figures/... relative to where Phase 5 will
-    write the note file.
+    When image_link_syntax is "markdown" (the default), output stays
+    standard Markdown syntax (![alt](path)); the figures/... relative path
+    already correctly points at vault/{course}/figures/... relative to
+    where Phase 5 will write the note file. Any space in path is
+    percent-encoded to "%20" (issue #54) -- CommonMark doesn't render an
+    unescaped space in a Markdown link destination, and figure filenames
+    routinely contain spaces since they're derived from the source PDF's
+    stem. No other characters are encoded.
+
+    When image_link_syntax is "obsidian" instead (issue #54), each
+    reference is rewritten to Obsidian's ![[path]] wikilink form. This
+    syntax has no restriction on whitespace in path, unlike standard
+    Markdown's ![alt](path) form (CommonMark requires percent-encoding or
+    <...> wrapping for a path containing spaces, which this codebase does
+    not do) -- figure filenames routinely contain whitespace since they're
+    derived from the source PDF's stem. The numbered caption is still
+    computed the same way but has nowhere to go in bare ![[path]] syntax,
+    so it's placed on its own line immediately after the embed instead of
+    in an alt-text slot.
 
     When dark_mode is True, " @darkmode" is appended to every caption (e.g.
     "Figure 1 @darkmode"), so the vault's Obsidian renderer/CSS can key off
-    that marker for dark-mode display. dark_mode is a plain parameter here,
-    not read from config.yaml -- wiring the real output.figures_dark_mode_flag
-    config value through to an actual call site is Phase 6's job.
+    that marker for dark-mode display. dark_mode and image_link_syntax are
+    plain parameters here, not read from config.yaml directly -- wiring the
+    real output.figures_dark_mode_flag/output.image_link_syntax config
+    values through to an actual call site is src/main.py's job.
 
     Only ![alt](figures/...) references are recognized and rewritten;
     anything else in markdown_text (prose, math, headings, non-figures/
     image references such as an external URL) is left byte-for-byte
     untouched.
     """
+    if image_link_syntax not in ("markdown", "obsidian"):
+        raise ValueError(
+            f"image_link_syntax must be 'markdown' or 'obsidian', got {image_link_syntax!r}"
+        )
+
     counter = count(1)
 
     def _replace(match: re.Match[str]) -> str:
@@ -161,6 +200,8 @@ def rewrite_image_references(markdown_text: str, dark_mode: bool = False) -> str
         caption = f"Figure {next(counter)}"
         if dark_mode:
             caption += " @darkmode"
-        return f"![{caption}]({path})"
+        if image_link_syntax == "obsidian":
+            return f"![[{path}]]\n{caption}"
+        return f"![{caption}]({path.replace(' ', '%20')})"
 
     return _FIGURE_REF_PATTERN.sub(_replace, markdown_text)

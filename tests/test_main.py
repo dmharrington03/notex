@@ -232,6 +232,7 @@ def _make_output_config(**overrides) -> OutputConfig:
         course_tags={},
         date_format="%Y-%m-%d",
         figures_dark_mode_flag=False,
+        image_link_syntax="markdown",
     )
     defaults.update(overrides)
     return OutputConfig(**defaults)
@@ -2443,6 +2444,46 @@ def test_run_wires_real_output_and_naming_config_end_to_end(client, tmp_path, mo
     # output.figures_dark_mode_flag=true appended "@darkmode" to the
     # figure's rewritten alt text.
     assert "![Figure 1 @darkmode](figures/lecture_01_fig_001.jpg)" in written
+
+
+@respx.mock
+def test_run_wires_image_link_syntax_config_end_to_end(client, tmp_path, monkeypatch):
+    """
+    Issue #54: output.image_link_syntax="obsidian" should cause run()'s
+    end-to-end vault write to emit Obsidian wikilink figure embeds instead
+    of standard Markdown syntax -- exercising the same real internal-load
+    path as test_run_wires_real_output_and_naming_config_end_to_end above.
+    """
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        "output:\n  image_link_syntax: obsidian\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(
+        monkeypatch,
+        status="success",
+        content="Some notes.\n\n![](figures/lecture_01_fig_001.jpg)\n",
+    )
+
+    summary = run(paths_config, conn, client=client, llm_config=_make_llm_config())
+
+    assert summary.errors == 0
+    assert summary.processed == 1
+
+    entry = get_entry(conn, str(pdf_path.resolve()))
+    vault_path = Path(entry.vault_path)
+    written = vault_path.read_text(encoding="utf-8")
+
+    assert "![[figures/lecture_01_fig_001.jpg]]\nFigure 1" in written
 
 
 def test_main_returns_error_code_on_config_error(monkeypatch, tmp_path, capsys):

@@ -186,6 +186,7 @@ def test_resolve_tags_returns_configured_course_tags():
         course_tags={"class_1": ("quantum-mechanics", "core")},
         date_format="%Y-%m-%d",
         figures_dark_mode_flag=False,
+        image_link_syntax="markdown",
     )
 
     assert resolve_tags("class_1", output_config) == ("quantum-mechanics", "core")
@@ -196,6 +197,7 @@ def test_resolve_tags_returns_empty_tuple_when_course_absent():
         course_tags={"class_1": ("quantum-mechanics",)},
         date_format="%Y-%m-%d",
         figures_dark_mode_flag=False,
+        image_link_syntax="markdown",
     )
 
     assert resolve_tags("class_2", output_config) == ()
@@ -206,6 +208,7 @@ def test_resolve_tags_empty_course_tags_dict_returns_empty_tuple():
         course_tags={},
         date_format="%Y-%m-%d",
         figures_dark_mode_flag=False,
+        image_link_syntax="markdown",
     )
 
     assert resolve_tags("class_1", output_config) == ()

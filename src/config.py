@@ -60,6 +60,13 @@ DEFAULT_MAX_LENGTH_RATIO: float = 1.30
 DEFAULT_DATE_FORMAT = "%Y-%m-%d"
 DEFAULT_FIGURES_DARK_MODE_FLAG = False
 
+# Issue #54 — lets figure embeds use Obsidian's ![[path]] wikilink form
+# instead of standard Markdown ![alt](path), since wikilinks tolerate
+# whitespace in the path (figure filenames are derived from source PDF
+# stems and routinely contain spaces) where CommonMark does not.
+DEFAULT_IMAGE_LINK_SYNTAX = "markdown"
+VALID_IMAGE_LINK_SYNTAXES = ("markdown", "obsidian")
+
 # Phase 6 — naming: section default. Matches postprocess.py's
 # DEFAULT_LECTURE_PREFIX (a Phase 5 stand-in pending this real config
 # wiring; the constant is intentionally duplicated here rather than
@@ -120,6 +127,7 @@ class OutputConfig:
     course_tags: dict[str, tuple[str, ...]]
     date_format: str
     figures_dark_mode_flag: bool
+    image_link_syntax: str
 
 
 @dataclass(frozen=True)
@@ -307,8 +315,8 @@ def load_llm_config(config_path: str | Path | None = None) -> LLMConfig:
 
 def load_output_config(config_path: str | Path | None = None) -> OutputConfig:
     """
-    Load the output: course_tags / date_format / figures_dark_mode_flag
-    settings from config.yaml.
+    Load the output: course_tags / date_format / figures_dark_mode_flag /
+    image_link_syntax settings from config.yaml.
 
     Args:
         config_path: optional explicit path to config.yaml. If not given,
@@ -320,8 +328,10 @@ def load_output_config(config_path: str | Path | None = None) -> OutputConfig:
     here, same fallback pattern as load_llm_config(): if the file doesn't
     exist, the output: section is absent, or individual keys are missing,
     the corresponding hardcoded default ({} / DEFAULT_DATE_FORMAT /
-    DEFAULT_FIGURES_DARK_MODE_FLAG) is used instead. Never raises
-    ConfigError.
+    DEFAULT_FIGURES_DARK_MODE_FLAG / DEFAULT_IMAGE_LINK_SYNTAX) is used
+    instead. Never raises ConfigError -- an unrecognized image_link_syntax
+    value (anything other than "markdown"/"obsidian") silently falls back
+    to DEFAULT_IMAGE_LINK_SYNTAX rather than raising.
 
     course_tags is keyed by the **raw course folder name** (underscores,
     not converted to spaces — matches discovery.py's course-subdirectory
@@ -342,6 +352,7 @@ def load_output_config(config_path: str | Path | None = None) -> OutputConfig:
     course_tags: dict[str, tuple[str, ...]] = {}
     date_format: str = DEFAULT_DATE_FORMAT
     figures_dark_mode_flag: bool = DEFAULT_FIGURES_DARK_MODE_FLAG
+    image_link_syntax: str = DEFAULT_IMAGE_LINK_SYNTAX
 
     if path.is_file():
         with path.open("r") as fh:
@@ -357,11 +368,17 @@ def load_output_config(config_path: str | Path | None = None) -> OutputConfig:
         figures_dark_mode_flag = output_section.get(
             "figures_dark_mode_flag", figures_dark_mode_flag
         )
+        image_link_syntax = output_section.get(
+            "image_link_syntax", image_link_syntax
+        )
+        if image_link_syntax not in VALID_IMAGE_LINK_SYNTAXES:
+            image_link_syntax = DEFAULT_IMAGE_LINK_SYNTAX
 
     return OutputConfig(
         course_tags=course_tags,
         date_format=date_format,
         figures_dark_mode_flag=figures_dark_mode_flag,
+        image_link_syntax=image_link_syntax,
     )
 
 

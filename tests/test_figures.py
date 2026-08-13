@@ -22,6 +22,8 @@ Also covered (issue #24 — Markdown image-reference caption rewriter):
 All tmp_path-backed, no mocking, no network.
 """
 
+import pytest
+
 from src.figures import copy_figures_to_vault, rewrite_image_references
 
 
@@ -240,3 +242,56 @@ def test_rewrite_no_figure_references_is_noop():
     result = rewrite_image_references(markdown)
 
     assert result == markdown
+
+
+def test_rewrite_matches_figure_path_containing_whitespace():
+    markdown = "![](figures/Lecture 02_fig_001.jpg)"
+
+    result = rewrite_image_references(markdown)
+
+    assert result == "![Figure 1](figures/Lecture%2002_fig_001.jpg)"
+
+
+def test_rewrite_markdown_syntax_percent_encodes_spaces_in_path():
+    markdown = "![](figures/Lecture 02 fig 001.jpg)"
+
+    result = rewrite_image_references(markdown)
+
+    assert result == "![Figure 1](figures/Lecture%2002%20fig%20001.jpg)"
+
+
+def test_rewrite_obsidian_syntax_produces_wikilink_and_caption_line():
+    markdown = (
+        "![](figures/lecture_02_fig_001.jpg)\n"
+        "![](figures/lecture_02_fig_002.jpg)\n"
+    )
+
+    result = rewrite_image_references(markdown, image_link_syntax="obsidian")
+
+    assert result == (
+        "![[figures/lecture_02_fig_001.jpg]]\nFigure 1\n"
+        "![[figures/lecture_02_fig_002.jpg]]\nFigure 2\n"
+    )
+
+
+def test_rewrite_obsidian_syntax_handles_whitespace_in_path():
+    markdown = "![](figures/Lecture 02_fig_001.jpg)"
+
+    result = rewrite_image_references(markdown, image_link_syntax="obsidian")
+
+    assert result == "![[figures/Lecture 02_fig_001.jpg]]\nFigure 1"
+
+
+def test_rewrite_obsidian_syntax_with_dark_mode_appends_marker():
+    markdown = "![](figures/lecture_02_fig_001.jpg)"
+
+    result = rewrite_image_references(
+        markdown, dark_mode=True, image_link_syntax="obsidian"
+    )
+
+    assert result == "![[figures/lecture_02_fig_001.jpg]]\nFigure 1 @darkmode"
+
+
+def test_rewrite_rejects_unknown_image_link_syntax():
+    with pytest.raises(ValueError):
+        rewrite_image_references("![](figures/x.jpg)", image_link_syntax="bogus")

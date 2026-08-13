@@ -102,6 +102,7 @@ def write_lecture_note(
     previous_content_hash: str | None = None,
     force_overwrite: bool = False,
     on_figure_copy: Callable[[Path], None] | None = None,
+    image_link_syntax: str = "markdown",
 ) -> VaultWriteResult:
     """
     Assemble and write a single lecture's final vault Markdown file.
@@ -182,6 +183,14 @@ def write_lecture_note(
             destination Path. Never called at all when the write is
             skipped due to a detected conflict (figures aren't touched in
             that case either).
+        image_link_syntax: forwarded to figures.rewrite_image_references()
+            (issue #54) -- "markdown" (the default) keeps standard
+            ![alt](path) syntax, "obsidian" rewrites to ![[path]] wikilink
+            form, which tolerates whitespace in path where CommonMark does
+            not. Plain param, not read from config.yaml -- real production
+            callers pass output.image_link_syntax from config.yaml (see
+            src/config.py's load_output_config()), threaded through by
+            src/main.py.
 
     Returns:
         A VaultWriteResult recording the target output_path, the
@@ -228,7 +237,9 @@ def write_lecture_note(
     )
 
     raw_text = content_source_path.read_text(encoding="utf-8")
-    rewritten_body = rewrite_image_references(raw_text, dark_mode=dark_mode)
+    rewritten_body = rewrite_image_references(
+        raw_text, dark_mode=dark_mode, image_link_syntax=image_link_syntax
+    )
 
     delimiter_warnings = scan_delimiter_issues(rewritten_body)
 

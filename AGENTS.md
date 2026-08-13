@@ -171,7 +171,15 @@ key is missing:
   with no entry here produces untagged notes, a deliberate divergence from
   docs/spec.md's original `base_tags` concept); `figures_dark_mode_flag`, a
   single global toggle (no per-course override) appending `@darkmode` to
-  every figure's alt text.
+  every figure's alt text; `image_link_syntax` (`"markdown"` default or
+  `"obsidian"`) — selects whether figure embeds are written as standard
+  Markdown `![alt](path)` or Obsidian `![[path]]` wikilinks. This matters
+  because figure filenames are derived from source PDF stems and routinely
+  contain spaces (issue #54): in `"markdown"` mode, spaces in `path` are
+  percent-encoded to `%20` so the link renders (no other characters are
+  encoded); in `"obsidian"` mode, wikilinks tolerate raw whitespace in
+  `path` natively, so no encoding is applied. An unrecognized value falls
+  back to `"markdown"` rather than raising.
 - `naming` — `lecture_prefix`, a single global prefix (no per-course
   override) used for both the vault filename (`Lecture 01.md`) and the
   frontmatter title.

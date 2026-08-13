@@ -61,6 +61,7 @@ from src.config import (
     DEFAULT_CACHE_DIR,
     DEFAULT_DATE_FORMAT,
     DEFAULT_FIGURES_DARK_MODE_FLAG,
+    DEFAULT_IMAGE_LINK_SYNTAX,
     DEFAULT_LECTURE_PREFIX,
     DEFAULT_LLM_MODEL,
     DEFAULT_MAX_LENGTH_RATIO,
@@ -308,6 +309,7 @@ def test_loads_output_config_from_yaml(tmp_path):
         course_tags={"18.06_Linear_Algebra": ("linear-algebra",)},
         date_format="%d-%m-%Y",
         figures_dark_mode_flag=True,
+        image_link_syntax=DEFAULT_IMAGE_LINK_SYNTAX,
     )
 
 
@@ -320,6 +322,7 @@ def test_output_config_falls_back_to_defaults_when_file_missing(tmp_path):
         course_tags={},
         date_format=DEFAULT_DATE_FORMAT,
         figures_dark_mode_flag=DEFAULT_FIGURES_DARK_MODE_FLAG,
+        image_link_syntax=DEFAULT_IMAGE_LINK_SYNTAX,
     )
 
 
@@ -333,6 +336,7 @@ def test_output_config_falls_back_to_defaults_when_output_section_missing(tmp_pa
         course_tags={},
         date_format=DEFAULT_DATE_FORMAT,
         figures_dark_mode_flag=DEFAULT_FIGURES_DARK_MODE_FLAG,
+        image_link_syntax=DEFAULT_IMAGE_LINK_SYNTAX,
     )
 
 
@@ -346,6 +350,7 @@ def test_output_config_falls_back_to_defaults_when_individual_keys_missing(tmp_p
         course_tags={},
         date_format="%d-%m-%Y",
         figures_dark_mode_flag=DEFAULT_FIGURES_DARK_MODE_FLAG,
+        image_link_syntax=DEFAULT_IMAGE_LINK_SYNTAX,
     )
 
 
@@ -370,6 +375,32 @@ def test_output_config_course_tags_present_for_one_course_only(tmp_path):
     config = load_output_config(config_path)
 
     assert config.course_tags == {"class_1": ("class-1-only",)}
+
+
+def test_output_config_image_link_syntax_defaults_to_markdown(tmp_path):
+    missing_path = tmp_path / "does_not_exist.yaml"
+
+    config = load_output_config(missing_path)
+
+    assert config.image_link_syntax == "markdown" == DEFAULT_IMAGE_LINK_SYNTAX
+
+
+def test_output_config_image_link_syntax_obsidian_from_yaml(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("output:\n  image_link_syntax: obsidian\n")
+
+    config = load_output_config(config_path)
+
+    assert config.image_link_syntax == "obsidian"
+
+
+def test_output_config_image_link_syntax_invalid_value_falls_back_to_default(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("output:\n  image_link_syntax: bogus\n")
+
+    config = load_output_config(config_path)
+
+    assert config.image_link_syntax == DEFAULT_IMAGE_LINK_SYNTAX
 
 
 def test_loads_naming_config_from_yaml(tmp_path):

@@ -27,6 +27,10 @@ output:
       - "linear-algebra"
       - "math"
   figures_dark_mode_flag: false
+  # "markdown" (default) keeps standard ![alt](path) image syntax;
+  # "obsidian" rewrites figure embeds to ![[path]] wikilink form, which
+  # (unlike standard Markdown) tolerates whitespace in the path.
+  image_link_syntax: markdown
 
 naming:
   # Global prefix used for both the vault filename ("Lecture 01.md") and the

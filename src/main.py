@@ -379,6 +379,7 @@ def _write_to_vault(
     lecture_prefix: str,
     force_overwrite: bool,
     reporter: Reporter,
+    image_link_syntax: str = "markdown",
 ) -> tuple[int, int]:
     """
     Write this file's final vault Markdown note (src/vault.py's
@@ -405,6 +406,9 @@ def _write_to_vault(
         dark_mode: forwarded to write_lecture_note()'s dark_mode param --
             the caller (_process_file()) resolves this from
             OutputConfig.figures_dark_mode_flag (issue #37).
+        image_link_syntax: forwarded to write_lecture_note()'s
+            image_link_syntax param (issue #54) -- the caller resolves
+            this from OutputConfig.image_link_syntax.
         tags: forwarded to write_lecture_note()'s tags param -- the caller
             resolves this via src/postprocess.py's resolve_tags(course_label,
             output_config) (issue #37); empty if this course has no
@@ -486,6 +490,7 @@ def _write_to_vault(
             previous_content_hash=previous_content_hash,
             force_overwrite=force_overwrite,
             on_figure_copy=_on_figure_copy,
+            image_link_syntax=image_link_syntax,
         )
     except (PostprocessError, OSError) as exc:
         reporter.on_stage(source_path, f"vault write FAILED: {exc}")
@@ -759,6 +764,7 @@ def _process_file(
                 naming_config.lecture_prefix,
                 force_vault_overwrite,
                 reporter,
+                image_link_syntax=output_config.image_link_syntax,
             )
             return _FileOutcome(
                 processed=1,
@@ -819,6 +825,7 @@ def _process_file(
             naming_config.lecture_prefix,
             force_vault_overwrite,
             reporter,
+            image_link_syntax=output_config.image_link_syntax,
         )
         errors += vault_errors
         return _FileOutcome(
@@ -864,6 +871,7 @@ def _process_file(
                 naming_config.lecture_prefix,
                 force_vault_overwrite,
                 reporter,
+                image_link_syntax=output_config.image_link_syntax,
             )
             return _FileOutcome(
                 skipped=1,
@@ -929,6 +937,7 @@ def _process_file(
         naming_config.lecture_prefix,
         force_vault_overwrite,
         reporter,
+        image_link_syntax=output_config.image_link_syntax,
     )
     errors += vault_errors
     return _FileOutcome(
