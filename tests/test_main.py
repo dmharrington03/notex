@@ -273,6 +273,7 @@ def _install_fake_cleanup_pdf(
     output_tokens: int = 50,
     cost_estimate: float = 0.001,
     content: str = "cleaned markdown",
+    on_status_message: str | None = None,
 ):
     """
     Monkeypatch src.main.cleanup_pdf with a fake that never touches
@@ -291,6 +292,13 @@ def _install_fake_cleanup_pdf(
     but -- per issue #21 -- still reports the given token/cost figures,
     since the completion call still happened and cost real money even
     though validation failed and the output was discarded.
+
+    on_status_message, when given, simulates cleanup_pdf()'s real
+    on_status callback firing (e.g. a heading-count advisory warning) --
+    the fake calls on_status(on_status_message) exactly once if an
+    on_status callback was passed in, regardless of status, mirroring how
+    the real cleanup_pdf() can call on_status on either the success or
+    failed-fallback path.
     """
     import src.main as main_module
 
@@ -307,6 +315,8 @@ def _install_fake_cleanup_pdf(
                 "llm_config": llm_config,
             }
         )
+        if on_status is not None and on_status_message is not None:
+            on_status(on_status_message)
         if status == "success":
             dest_dir_path = Path(dest_dir)
             dest_dir_path.mkdir(parents=True, exist_ok=True)
@@ -2872,6 +2882,63 @@ def test_main_without_verbose_omits_detail_lines(tmp_path, monkeypatch, capsys):
     assert "mathpix pdf: poll" not in out
     assert "copied figure:" not in out
     assert "vault write confirmed:" not in out
+
+
+@respx.mock
+def test_main_verbose_flag_prints_heading_count_warning_without_causing_fallback(
+    tmp_path, monkeypatch, capsys
+):
+    """
+    A heading-count-only validation failure (advisory-only, per explicit
+    design decision) must still surface as a verbose-only detail line, but
+    must NOT flip the run's outcome to a fallback -- the "done:llm_success"
+    stage token (surfaced as "Done", not a fallback indicator) stays the
+    same with or without --verbose.
+    """
+    paths_config, conn, pdf_path = _setup_main_end_to_end(monkeypatch, tmp_path)
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(
+        monkeypatch,
+        status="success",
+        on_status_message=(
+            "llm completion: 200 input / 80 output tokens (est. cost $0.0123) "
+            "-- warning: cleaned output added heading(s) not present in the "
+            "raw input (heading_count check failed, non-blocking)"
+        ),
+    )
+
+    exit_code = main(["--verbose"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+
+    assert "[class_1] lecture_01.pdf: ✓ Done" in out
+    assert "heading_count check failed" in out
+
+
+@respx.mock
+def test_main_without_verbose_omits_heading_count_warning(tmp_path, monkeypatch, capsys):
+    paths_config, conn, pdf_path = _setup_main_end_to_end(monkeypatch, tmp_path)
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(
+        monkeypatch,
+        status="success",
+        on_status_message=(
+            "llm completion: 200 input / 80 output tokens (est. cost $0.0123) "
+            "-- warning: cleaned output added heading(s) not present in the "
+            "raw input (heading_count check failed, non-blocking)"
+        ),
+    )
+
+    exit_code = main([])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+
+    assert "[class_1] lecture_01.pdf: ✓ Done" in out
+    assert "heading_count check failed" not in out
 
 
 @respx.mock

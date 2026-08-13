@@ -111,12 +111,14 @@ Data flows through the following stages, each backed by its own module:
 3. **LLM cleanup** (`src/llm.py`) — `cleanup_pdf()` sends the raw Mathpix
    Markdown to an LLM (via `litellm`) using a versioned prompt
    (`prompts/cleanup_v1.txt`), validates the result (length ratio, `$`/
-   `\left`/`\right` balance, relaxed heading-count check), and falls back to
-   the raw Mathpix Markdown on any failure — cleanup never raises, it just
-   records `llm_status="failed"` and leaves `llm_model`/`llm_prompt_version`
-   `None`. `needs_llm_reprocessing()` decides whether an `UNCHANGED` file
-   still needs an LLM pass (ignores prompt version — only genuine content
-   change or an explicit rerun flag triggers reprocessing).
+   `\left`/`\right` balance, and an advisory-only heading-count check —
+   see "Known Limitations" below), and falls back to the raw Mathpix
+   Markdown only when length ratio, dollar balance, or `\left`/`\right`
+   balance fails — cleanup never raises, it just records
+   `llm_status="failed"` and leaves `llm_model`/`llm_prompt_version` `None`.
+   `needs_llm_reprocessing()` decides whether an `UNCHANGED` file still
+   needs an LLM pass (ignores prompt version — only genuine content change
+   or an explicit rerun flag triggers reprocessing).
 4. **Figures + postprocessing** (`src/figures.py`, `src/postprocess.py`) —
    copies cached figures into the vault, rewrites each Markdown image
    reference's alt text to a numbered caption (`Figure N`, optionally with an
@@ -256,9 +258,19 @@ These are deliberate design decisions or accepted edge cases, not open bugs:
 - **`validate_cleanup()`'s delimiter-balance check is count-only,** not
   delimiter-type pairing (e.g. it won't catch `\left(` closed by
   `\right\rangle`) — a known, accepted limitation.
-- **Heading-count validation is relaxed, not exact-match** — it only fails
-  on *new* headings, since Mathpix sometimes emits a stray heading from a
-  handwritten date/title line that the cleanup prompt is expected to drop.
+- **Heading-count validation is advisory-only — it never triggers a
+  fallback.** It flags `false` when `cleaned` has *more* ATX-style
+  headings than `original` (e.g. the LLM turned a plain-text section
+  label into a real heading while fixing an OCR typo — legitimate
+  copy-editing, not a hallucination, so it must not discard an otherwise-
+  good cleanup). Mathpix also sometimes emits a stray heading from a
+  handwritten date/title line that the cleanup prompt is expected to
+  drop — an equal-or-fewer heading count always passes. When
+  `heading_count` is the *only* failing check, `cleanup_pdf()` still
+  accepts and writes the cleaned output (`llm_status="success"`,
+  `llm_validation_result`'s `heading_count` key `false`) and surfaces a
+  one-line warning through its `on_status` callback — visible only under
+  `--verbose` (`Reporter.on_detail()`).
 - **No chunking for long documents** — not implemented; real PDFs processed
   so far are 1-2 pages.
 - **No global/default tag list** (`output.course_tags` has no fallback) and

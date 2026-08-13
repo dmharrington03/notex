@@ -227,28 +227,37 @@ def validate_cleanup(
     Validate an LLM cleanup pass's output against the raw Mathpix Markdown
     it was derived from.
 
-    Four independent checks (all must pass for ValidationResult.passed to
-    be True):
+    Four checks are computed and all four are reported in `checks`, but
+    only the first three gate `ValidationResult.passed` (and therefore
+    cleanup_pdf()'s fallback-to-raw decision) -- `heading_count` is
+    diagnostic/advisory-only, per explicit user decision: an LLM turning a
+    plain-text section label into a real Markdown heading while fixing an
+    OCR typo is often legitimate copy-editing, not the "hallucinated new
+    heading" failure mode the check was meant to catch, so it must never by
+    itself cause a good cleanup to be discarded.
 
-        - length_ratio: len(cleaned) / len(original) falls within
-          [min_length_ratio, max_length_ratio]. Guards against wholesale
-          truncation or runaway hallucinated expansion.
-        - dollar_balance: `cleaned` has an even number of "$" characters
-          (covers both inline "$...$" and display "$$ ... $$" delimiters,
-          since "$$" is just two adjacent "$" -- an even total count
-          balances both forms simultaneously). Checked on `cleaned` alone,
-          not compared against `original`.
-        - left_right_balance: `cleaned` has an equal count of "\\left" and
-          "\\right" delimiter commands. Count-only, not delimiter-*type*
-          matching -- see AGENTS.md's Smoke test findings: "\\left(...\\right]"
-          is syntactically valid LaTeX regardless of whether the bracket
-          shapes correspond, so there's no static rule to catch a true
-          type mismatch. Checked on `cleaned` alone.
-        - heading_count: relaxed, not exact-match. Fails only if `cleaned`
-          has *more* ATX-style Markdown headings than `original` (a
-          hallucinated new heading); equal or fewer passes, since the
-          cleanup prompt (prompts/cleanup_v1.txt) is explicitly permitted
-          to drop a single stray non-structural heading artifact.
+        - length_ratio (gates passed): len(cleaned) / len(original) falls
+          within [min_length_ratio, max_length_ratio]. Guards against
+          wholesale truncation or runaway hallucinated expansion.
+        - dollar_balance (gates passed): `cleaned` has an even number of
+          "$" characters (covers both inline "$...$" and display
+          "$$ ... $$" delimiters, since "$$" is just two adjacent "$" -- an
+          even total count balances both forms simultaneously). Checked on
+          `cleaned` alone, not compared against `original`.
+        - left_right_balance (gates passed): `cleaned` has an equal count
+          of "\\left" and "\\right" delimiter commands. Count-only, not
+          delimiter-*type* matching -- see AGENTS.md's Smoke test findings:
+          "\\left(...\\right]" is syntactically valid LaTeX regardless of
+          whether the bracket shapes correspond, so there's no static rule
+          to catch a true type mismatch. Checked on `cleaned` alone.
+        - heading_count (advisory-only, does NOT gate passed): relaxed, not
+          exact-match. Flagged False only if `cleaned` has *more*
+          ATX-style Markdown headings than `original`; equal or fewer
+          passes, since the cleanup prompt (prompts/cleanup_v1.txt) is
+          explicitly permitted to drop a single stray non-structural
+          heading artifact. cleanup_pdf() surfaces a False value here via
+          its on_status callback when it's the only failing check, but
+          still accepts and writes the cleaned output.
 
     Args:
         original: the raw Mathpix Markdown before cleanup.
@@ -257,8 +266,9 @@ def validate_cleanup(
         max_length_ratio: upper bound for len(cleaned)/len(original).
 
     Returns:
-        ValidationResult with `passed` set iff every check in `checks`
-        passed.
+        ValidationResult with `passed` set iff length_ratio, dollar_balance,
+        and left_right_balance all passed -- heading_count is reported in
+        `checks` but excluded from `passed`.
     """
     if len(original) == 0:
         # Degenerate case (shouldn't occur in practice -- cached Mathpix
@@ -288,7 +298,11 @@ def validate_cleanup(
         "heading_count": heading_count_ok,
     }
 
-    return ValidationResult(passed=all(checks.values()), checks=checks)
+    # heading_count is advisory-only -- deliberately excluded from `passed`
+    # (see docstring above).
+    passed = length_ratio_ok and dollar_balance_ok and left_right_balance_ok
+
+    return ValidationResult(passed=passed, checks=checks)
 
 
 @dataclass(frozen=True)
@@ -322,8 +336,13 @@ class LLMResult:
           used to produce the output.
         - output_path points at the newly-written
           dest_dir/{lecture_stem}.llm.md.
-        - llm_validation_result is the JSON-serialized (passing) checks
-          dict from ValidationResult.
+        - llm_validation_result is the JSON-serialized checks dict from
+          ValidationResult. Note that a "success" row's heading_count
+          entry may legitimately be `false` -- that check is
+          advisory-only and never gates `passed` (see
+          validate_cleanup()'s docstring); cleanup_pdf()'s on_status
+          callback surfaces a warning for this case, but the output is
+          still accepted and written.
 
     llm_input_tokens / llm_output_tokens / llm_cost_estimate (issue #21):
     populated from the CompletionResult whenever the completion call
@@ -380,13 +399,19 @@ def cleanup_pdf(
             src/mathpix.py's OnStatusCallback in spirit but much simpler --
             LLMClient.complete() is a single synchronous call with no
             intermediate polling, so there's only one meaningful hook
-            point. Called at most once, immediately after a *successful*
-            client.complete() call (never on an LLMError, and never a
-            setup-time FileNotFoundError/LLMError raised earlier in this
-            function), with a human-readable message describing the
-            completion's token usage/cost estimate. Never affects control
-            flow -- purely for a Reporter's on_detail() (verbose-only,
-            issue #48) to surface, same as src/mathpix.py's on_status.
+            point. Called at most once, after a *successful*
+            client.complete() call and validate_cleanup() have both run
+            (never on an LLMError, and never a setup-time
+            FileNotFoundError/LLMError raised earlier in this function),
+            with a human-readable message describing the completion's
+            token usage/cost estimate. When the only failing check is the
+            advisory-only heading_count check (validation otherwise
+            passed), the message gets an appended warning noting the
+            cleaned output added heading(s) not present in the raw input
+            -- this never affects control flow, the output is still
+            accepted either way. Purely for a Reporter's on_detail()
+            (verbose-only, issue #48) to surface, same as src/mathpix.py's
+            on_status.
 
     Returns:
         An LLMResult on both success and failure -- see LLMResult's
@@ -433,15 +458,6 @@ def cleanup_pdf(
             processed_at=datetime.now(timezone.utc),
         )
 
-    if on_status is not None:
-        cost = completion_result.cost
-        cost_text = f"${cost:.4f}" if cost is not None else "unknown"
-        on_status(
-            f"llm completion: {completion_result.input_tokens} input / "
-            f"{completion_result.output_tokens} output tokens "
-            f"(est. cost {cost_text})"
-        )
-
     cleaned_markdown = completion_result.content
 
     validation_result = validate_cleanup(
@@ -450,6 +466,21 @@ def cleanup_pdf(
         llm_config.min_length_ratio,
         llm_config.max_length_ratio,
     )
+
+    if on_status is not None:
+        cost = completion_result.cost
+        cost_text = f"${cost:.4f}" if cost is not None else "unknown"
+        message = (
+            f"llm completion: {completion_result.input_tokens} input / "
+            f"{completion_result.output_tokens} output tokens "
+            f"(est. cost {cost_text})"
+        )
+        if validation_result.passed and not validation_result.checks["heading_count"]:
+            message += (
+                " -- warning: cleaned output added heading(s) not present "
+                "in the raw input (heading_count check failed, non-blocking)"
+            )
+        on_status(message)
 
     if not validation_result.passed:
         return LLMResult(

@@ -335,13 +335,17 @@ def test_validate_cleanup_passes_heading_count_when_cleaned_has_fewer_headings()
     assert result.checks["heading_count"] is True
 
 
-def test_validate_cleanup_fails_heading_count_when_cleaned_has_more_headings():
+def test_validate_cleanup_heading_count_failure_does_not_gate_passed():
+    # heading_count is advisory-only (per explicit design decision): a
+    # cleaned output that adds a heading beyond the raw input still
+    # reports heading_count=False, but must not fail overall `passed` when
+    # the other three checks are fine.
     original = "text with no headings"
     cleaned = "# Hallucinated Heading\n\ntext with no headings"
 
     result = validate_cleanup(original, cleaned, min_length_ratio=0.1, max_length_ratio=5.0)
 
-    assert result.passed is False
+    assert result.passed is True
     assert result.checks["heading_count"] is False
 
 
@@ -559,6 +563,149 @@ def test_cleanup_pdf_falls_back_on_failed_validation(tmp_path, monkeypatch):
     assert result.llm_input_tokens == 50
     assert result.llm_output_tokens == 10
     assert result.llm_cost_estimate == 0.002
+
+
+def test_cleanup_pdf_accepts_output_when_only_heading_count_fails(tmp_path, monkeypatch):
+    # heading_count is advisory-only: a cleaned output that adds a heading
+    # not present in the raw input, but otherwise passes every other
+    # check, must still be written and reported as a success.
+    mathpix_path = tmp_path / "lecture_01.mathpix.md"
+    mathpix_path.write_text("some raw mathpix text, no headings here", encoding="utf-8")
+    dest_dir = tmp_path / "out"
+
+    def fake_completion_fn(**kwargs):
+        return _fake_response(
+            "# New Heading\n\nsome raw mathpix text, no headings here",
+            prompt_tokens=200,
+            completion_tokens=80,
+        )
+
+    monkeypatch.setattr("src.llm.litellm.completion_cost", lambda **kwargs: 0.0123)
+
+    client = LLMClient(model="fake-model", completion_fn=fake_completion_fn)
+    llm_config = _llm_config()
+
+    result = cleanup_pdf(mathpix_path, dest_dir, "lecture_01", llm_config, client=client)
+
+    assert result.llm_status == "success"
+    assert result.llm_model == "fake-model"
+    assert result.llm_prompt_version == "cleanup_v1"
+    assert result.output_path == dest_dir / "lecture_01.llm.md"
+    assert (
+        result.output_path.read_text(encoding="utf-8")
+        == "# New Heading\n\nsome raw mathpix text, no headings here"
+    )
+    checks = json.loads(result.llm_validation_result)
+    assert checks["heading_count"] is False
+    assert checks["length_ratio"] is True
+    assert checks["dollar_balance"] is True
+    assert checks["left_right_balance"] is True
+
+
+def test_cleanup_pdf_on_status_warns_when_only_heading_count_fails(tmp_path, monkeypatch):
+    mathpix_path = tmp_path / "lecture_01.mathpix.md"
+    mathpix_path.write_text("some raw mathpix text, no headings here", encoding="utf-8")
+    dest_dir = tmp_path / "out"
+
+    def fake_completion_fn(**kwargs):
+        return _fake_response(
+            "# New Heading\n\nsome raw mathpix text, no headings here",
+            prompt_tokens=200,
+            completion_tokens=80,
+        )
+
+    monkeypatch.setattr("src.llm.litellm.completion_cost", lambda **kwargs: 0.0123)
+
+    client = LLMClient(model="fake-model", completion_fn=fake_completion_fn)
+    llm_config = _llm_config()
+
+    messages: list[str] = []
+    result = cleanup_pdf(
+        mathpix_path,
+        dest_dir,
+        "lecture_01",
+        llm_config,
+        client=client,
+        on_status=messages.append,
+    )
+
+    assert result.llm_status == "success"
+    assert len(messages) == 1
+    assert "heading" in messages[0].lower()
+    assert "200 input" in messages[0]
+
+
+def test_cleanup_pdf_on_status_has_no_heading_warning_when_heading_count_passes(
+    tmp_path, monkeypatch
+):
+    mathpix_path = tmp_path / "lecture_01.mathpix.md"
+    mathpix_path.write_text("# Lecture 21-4/14\n\nsome raw mathpix text", encoding="utf-8")
+    dest_dir = tmp_path / "out"
+
+    def fake_completion_fn(**kwargs):
+        return _fake_response(
+            "# Lecture 21-4/14\n\nsome cleaned text", prompt_tokens=200, completion_tokens=80
+        )
+
+    monkeypatch.setattr("src.llm.litellm.completion_cost", lambda **kwargs: 0.0123)
+
+    client = LLMClient(model="fake-model", completion_fn=fake_completion_fn)
+    llm_config = _llm_config()
+
+    messages: list[str] = []
+    result = cleanup_pdf(
+        mathpix_path,
+        dest_dir,
+        "lecture_01",
+        llm_config,
+        client=client,
+        on_status=messages.append,
+    )
+
+    assert result.llm_status == "success"
+    assert len(messages) == 1
+    assert "heading" not in messages[0].lower()
+
+
+def test_cleanup_pdf_on_status_has_no_heading_warning_on_fallback_for_other_reason(
+    tmp_path, monkeypatch
+):
+    # Only warn on the accept path (explicit design decision) -- if a
+    # different check fails and the run falls back to raw output, no
+    # heading-specific wording should appear even if heading_count also
+    # happens to fail.
+    mathpix_path = tmp_path / "lecture_01.mathpix.md"
+    mathpix_path.write_text("word " * 100, encoding="utf-8")
+    dest_dir = tmp_path / "out"
+
+    def fake_completion_fn(**kwargs):
+        return _fake_response(
+            "# Hallucinated Heading\n\n" + "word " * 10,
+            prompt_tokens=50,
+            completion_tokens=10,
+        )  # far below min_length_ratio, and adds a heading
+
+    monkeypatch.setattr("src.llm.litellm.completion_cost", lambda **kwargs: 0.002)
+
+    client = LLMClient(model="fake-model", completion_fn=fake_completion_fn)
+    llm_config = _llm_config(min_length_ratio=0.7, max_length_ratio=1.3)
+
+    messages: list[str] = []
+    result = cleanup_pdf(
+        mathpix_path,
+        dest_dir,
+        "lecture_01",
+        llm_config,
+        client=client,
+        on_status=messages.append,
+    )
+
+    assert result.llm_status == "failed"
+    checks = json.loads(result.llm_validation_result)
+    assert checks["length_ratio"] is False
+    assert checks["heading_count"] is False
+    assert len(messages) == 1
+    assert "heading" not in messages[0].lower()
 
 
 def test_cleanup_pdf_raises_file_not_found_for_missing_mathpix_markdown(tmp_path):
