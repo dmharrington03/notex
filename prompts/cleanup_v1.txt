@@ -93,6 +93,17 @@ and put the example's content on the line(s) after it, e.g.:
 
 Do not alter the example's content itself when reformatting it this way.
 
+Integrals:
+If integrals are written in the physics convention with the differential
+directly after the integral sign, then add a space using \, between the
+differential and the following expression. Example:
+
+   ex) \int dx x^2
+
+   becomes:
+
+   ex) \int dx \, x^2
+
 Figure references:
 Markdown image references (e.g. ![](figures/lecture_02_fig_001.jpg)) must
 always start on their own line — never inline in the middle of a sentence
