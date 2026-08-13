@@ -247,6 +247,82 @@ def test_rich_reporter_on_discover_seeds_rows_by_classification():
     assert rows["/notes_raw/class_1/lecture_01.pdf"]["filename"] == "lecture_01"
 
 
+def test_rich_reporter_on_discover_hides_up_to_date_rows_when_flag_set():
+    """
+    Issue #53: with hide_up_to_date=True, an "unchanged" classification is
+    not added as a row at all -- it's tallied in _hidden_count instead.
+    Other classifications are unaffected.
+    """
+    from src.reporting import RichReporter
+
+    reporter = RichReporter(hide_up_to_date=True)
+    reporter.on_discover(
+        [
+            ("/notes_raw/class_1/lecture_01.pdf", "new"),
+            ("/notes_raw/class_1/lecture_02.pdf", "unchanged"),
+            ("/notes_raw/class_1/lecture_03.pdf", "changed"),
+            ("/notes_raw/class_1/lecture_04.pdf", "unchanged"),
+        ]
+    )
+
+    rows = reporter._rows
+    assert "/notes_raw/class_1/lecture_02.pdf" not in rows
+    assert "/notes_raw/class_1/lecture_04.pdf" not in rows
+    assert rows["/notes_raw/class_1/lecture_01.pdf"]["status"] == "waiting"
+    assert rows["/notes_raw/class_1/lecture_03.pdf"]["status"] == "waiting"
+    assert reporter._hidden_count == 2
+
+
+def test_rich_reporter_on_discover_shows_up_to_date_rows_when_flag_unset():
+    """
+    Default (hide_up_to_date=False) is unaffected -- "unchanged" rows are
+    still seeded exactly as before, and nothing is tallied as hidden.
+    """
+    from src.reporting import RichReporter
+
+    reporter = RichReporter()
+    reporter.on_discover([("/notes_raw/class_1/lecture_02.pdf", "unchanged")])
+
+    assert "/notes_raw/class_1/lecture_02.pdf" in reporter._rows
+    assert reporter._hidden_count == 0
+
+
+def test_rich_reporter_render_caption_reflects_hidden_count():
+    """
+    _render()'s Table caption shows "(N) files already up to date" once
+    hide_up_to_date=True has hidden at least one row, and is None (no
+    caption at all) when nothing has been hidden.
+    """
+    from src.reporting import RichReporter
+
+    reporter = RichReporter(hide_up_to_date=True)
+    table = reporter._render().renderable.renderable
+    assert table.caption is None
+
+    reporter.on_discover(
+        [
+            ("/notes_raw/class_1/lecture_01.pdf", "new"),
+            ("/notes_raw/class_1/lecture_02.pdf", "unchanged"),
+        ]
+    )
+    table = reporter._render().renderable.renderable
+    assert table.caption == "(1) file already up to date"
+
+    reporter.on_discover([("/notes_raw/class_1/lecture_03.pdf", "unchanged")])
+    table = reporter._render().renderable.renderable
+    assert table.caption == "(2) files already up to date"
+
+
+def test_rich_reporter_render_no_caption_when_flag_unset():
+    from src.reporting import RichReporter
+
+    reporter = RichReporter()
+    reporter.on_discover([("/notes_raw/class_1/lecture_02.pdf", "unchanged")])
+
+    table = reporter._render().renderable.renderable
+    assert table.caption is None
+
+
 def test_rich_reporter_on_stage_updates_seeded_row():
     from src.reporting import RichReporter
 

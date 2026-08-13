@@ -100,6 +100,13 @@ Before running, set up configuration files from the examples here:
     A `print_summary` setting is also available to print out details after the
     run, including the LLM API call costs.
 
+    If you have many notes indexed, the live table (shown when running in an
+    interactive terminal with `rich` installed) can get noisy with files that
+    are already up to date. Setting `hide_up_to_date: true` under `cli:` hides
+    those rows and instead shows a `(N) files already up to date` summary
+    line. This has no effect on the plain, non-interactive output, which
+    already never prints anything for up-to-date files.
+
 ### Running the pipeline
 
 ```

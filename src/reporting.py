@@ -23,7 +23,10 @@ Reporter has five hook methods:
       those rows are effectively already "done". PlainReporter is a no-op
       here (matches its pre-#49 zero-output-change design); RichReporter
       seeds its internal table from this call (NEW/CHANGED/RETRY -> a
-      "waiting" row, UNCHANGED -> an already-settled "up to date" row).
+      "waiting" row, UNCHANGED -> an already-settled "up to date" row --
+      or, issue #53, no row at all plus a hidden-count tally when
+      constructed with hide_up_to_date=True, see RichReporter's own
+      docstring).
     - on_stage(source_path, stage): called for every real per-file progress
       line the pipeline already prints today (processing started, LLM/vault
       outcome, warnings, failures, dry-run "would ..." lines, etc.) --
@@ -360,7 +363,15 @@ class RichReporter:
     on_discover(items) seeds one row per (source_path, classification) --
     see _INITIAL_STATUS above for each classification's starting
     status/style (spinner always starts None -- "waiting"/"up to date"
-    are not in-progress stages). on_stage(source_path, stage) updates that
+    are not in-progress stages). Issue #53: when hide_up_to_date=True
+    (constructor param, defaults to False), an "unchanged" classification
+    is not added as a row at all -- instead it's tallied in
+    self._hidden_count, and _render() shows it as a Table caption
+    ("({N}) files already up to date") instead of a row, so the title's
+    "({N}) documents found" count also naturally reflects only the shown
+    rows. Has no effect on any other classification.
+
+    on_stage(source_path, stage) updates that
     row's status/style (via _STAGE_TEXT's canonical-token text, same dict
     PlainReporter uses, plus _style_for()'s heuristic) and spinner (via
     _SPINNER_STAGES.get(stage), None for anything not listed there -- so a
@@ -377,14 +388,16 @@ class RichReporter:
     finalizes cleanly (last frame stays visible) even if the run raises.
     """
 
-    def __init__(self, verbose: bool = False) -> None:
+    def __init__(self, verbose: bool = False, hide_up_to_date: bool = False) -> None:
         if not _RICH_AVAILABLE:
             raise ImportError(
                 "rich is not installed -- RichReporter requires the 'rich' "
                 "package (conda install -c conda-forge rich)"
             )
         self.verbose = verbose
+        self.hide_up_to_date = hide_up_to_date
         self._rows: dict[str, dict[str, str | None]] = {}
+        self._hidden_count = 0
         self._console = Console()
         self._live = Live(self._render(), console=self._console, refresh_per_second=8)
         # A blank line before the Live display starts, purely cosmetic
@@ -395,7 +408,12 @@ class RichReporter:
     def _render(self, subtitle: str | None = None) -> "Align":
         count = len(self._rows)
         title = f"({count}) document{'' if count == 1 else 's'} found"
-        table = Table(title=title, box=box.SIMPLE_HEAD)
+        caption = (
+            f"({self._hidden_count}) file{'' if self._hidden_count == 1 else 's'} already up to date"
+            if self._hidden_count
+            else None
+        )
+        table = Table(title=title, caption=caption, box=box.SIMPLE_HEAD)
         table.add_column("Course", style="cyan")
         table.add_column("File", style="magenta")
         table.add_column("Status")
@@ -420,6 +438,9 @@ class RichReporter:
 
     def on_discover(self, items: Sequence[tuple[str, str]]) -> None:
         for source_path, classification in items:
+            if self.hide_up_to_date and classification == "unchanged":
+                self._hidden_count += 1
+                continue
             status, style = _INITIAL_STATUS.get(classification, ("waiting", "dim"))
             self._rows[source_path] = {
                 "course": Path(source_path).parent.name,

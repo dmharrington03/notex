@@ -43,3 +43,9 @@ cli:
   # (plus its "Finished in X.XX s"/"Done in X.X s" completion message)
   # already covers most runs' needs.
   print_summary: false
+  # Whether RichReporter's live table hides rows for files that are
+  # already up to date (no processing needed this run), showing a
+  # "(N) files already up to date" caption instead. Off by default. Has
+  # no effect on PlainReporter (non-interactive/no-rich runs), which
+  # never prints anything for up-to-date files in the first place.
+  hide_up_to_date: false

@@ -51,6 +51,15 @@ Also covered here (Phase 7 follow-up — config.yaml cli: settings):
       missing — never raises ConfigError
     - print_summary gates src/main.py's main()'s full summary print (see
       tests/test_main.py for the main()-level wiring)
+
+Also covered here (issue #53 — config.yaml cli: hide_up_to_date):
+    - load_cli_config() reads hide_up_to_date from a config.yaml's cli:
+      section
+    - falls back to DEFAULT_HIDE_UP_TO_DATE (False) when the file is
+      missing, the cli: section is absent, or hide_up_to_date itself is
+      missing — never raises ConfigError
+    - hide_up_to_date gates RichReporter's live-table row filtering (see
+      tests/test_reporting.py for the RichReporter-level behavior)
 """
 
 from pathlib import Path
@@ -61,6 +70,7 @@ from src.config import (
     DEFAULT_CACHE_DIR,
     DEFAULT_DATE_FORMAT,
     DEFAULT_FIGURES_DARK_MODE_FLAG,
+    DEFAULT_HIDE_UP_TO_DATE,
     DEFAULT_IMAGE_LINK_SYNTAX,
     DEFAULT_LECTURE_PREFIX,
     DEFAULT_LLM_MODEL,
@@ -448,13 +458,21 @@ def test_default_print_summary_is_false():
     assert DEFAULT_PRINT_SUMMARY is False
 
 
+def test_default_hide_up_to_date_is_false():
+    """
+    DEFAULT_HIDE_UP_TO_DATE itself is False -- RichReporter shows every
+    discovered file's row unless config.yaml explicitly opts in.
+    """
+    assert DEFAULT_HIDE_UP_TO_DATE is False
+
+
 def test_loads_cli_config_from_yaml(tmp_path):
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("cli:\n  print_summary: true\n")
+    config_path.write_text("cli:\n  print_summary: true\n  hide_up_to_date: true\n")
 
     config = load_cli_config(config_path)
 
-    assert config == CLIConfig(print_summary=True)
+    assert config == CLIConfig(print_summary=True, hide_up_to_date=True)
 
 
 def test_cli_config_falls_back_to_defaults_when_file_missing(tmp_path):
@@ -462,7 +480,9 @@ def test_cli_config_falls_back_to_defaults_when_file_missing(tmp_path):
 
     config = load_cli_config(missing_path)
 
-    assert config == CLIConfig(print_summary=DEFAULT_PRINT_SUMMARY)
+    assert config == CLIConfig(
+        print_summary=DEFAULT_PRINT_SUMMARY, hide_up_to_date=DEFAULT_HIDE_UP_TO_DATE
+    )
 
 
 def test_cli_config_falls_back_to_defaults_when_cli_section_missing(tmp_path):
@@ -471,7 +491,9 @@ def test_cli_config_falls_back_to_defaults_when_cli_section_missing(tmp_path):
 
     config = load_cli_config(config_path)
 
-    assert config == CLIConfig(print_summary=DEFAULT_PRINT_SUMMARY)
+    assert config == CLIConfig(
+        print_summary=DEFAULT_PRINT_SUMMARY, hide_up_to_date=DEFAULT_HIDE_UP_TO_DATE
+    )
 
 
 def test_cli_config_falls_back_to_defaults_when_print_summary_key_missing(tmp_path):
@@ -480,17 +502,28 @@ def test_cli_config_falls_back_to_defaults_when_print_summary_key_missing(tmp_pa
 
     config = load_cli_config(config_path)
 
-    assert config == CLIConfig(print_summary=DEFAULT_PRINT_SUMMARY)
+    assert config == CLIConfig(
+        print_summary=DEFAULT_PRINT_SUMMARY, hide_up_to_date=DEFAULT_HIDE_UP_TO_DATE
+    )
+
+
+def test_cli_config_falls_back_to_defaults_when_hide_up_to_date_key_missing(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("cli:\n  print_summary: true\n")
+
+    config = load_cli_config(config_path)
+
+    assert config == CLIConfig(print_summary=True, hide_up_to_date=DEFAULT_HIDE_UP_TO_DATE)
 
 
 def test_cli_config_explicit_false_is_respected(tmp_path):
     """
-    An explicit `print_summary: false` in config.yaml behaves identically
-    to it being absent -- both resolve to CLIConfig(print_summary=False).
+    An explicit `print_summary: false`/`hide_up_to_date: false` in
+    config.yaml behaves identically to either being absent.
     """
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("cli:\n  print_summary: false\n")
+    config_path.write_text("cli:\n  print_summary: false\n  hide_up_to_date: false\n")
 
     config = load_cli_config(config_path)
 
-    assert config == CLIConfig(print_summary=False)
+    assert config == CLIConfig(print_summary=False, hide_up_to_date=False)

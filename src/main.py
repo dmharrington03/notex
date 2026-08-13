@@ -1302,7 +1302,7 @@ def _print_summary(summary: RunSummary, dry_run: bool = False) -> None:
     print(f"  {'Est. cost:':<21}${summary.total_cost_estimate:.4f}")
 
 
-def _select_reporter(verbose: bool) -> Reporter:
+def _select_reporter(verbose: bool, hide_up_to_date: bool = False) -> Reporter:
     """
     Issue #49: choose RichReporter when stdout is an interactive TTY and
     rich is importable, falling back to PlainReporter otherwise (piped/
@@ -1310,12 +1310,16 @@ def _select_reporter(verbose: bool) -> Reporter:
     in main(), not inside run() -- run()'s own reporter=None default stays
     a plain, dumb PlainReporter() for direct/test callers (see run()'s
     docstring); only the real CLI auto-selects.
+
+    hide_up_to_date (issue #53, from CLIConfig) is only meaningful to
+    RichReporter -- PlainReporter never prints anything for up-to-date
+    files in the first place, so it's not passed to it.
     """
     if sys.stdout.isatty():
         try:
             from src.reporting import RichReporter
 
-            return RichReporter(verbose=verbose)
+            return RichReporter(verbose=verbose, hide_up_to_date=hide_up_to_date)
         except ImportError:
             pass
     return PlainReporter(verbose=verbose)
@@ -1338,9 +1342,11 @@ def main(argv: list[str] | None = None) -> int:
     --dry-run additionally skips Mathpix too).
 
     --verbose/-v does not add a new run()/_process_file() param -- main()
-    builds a reporter via _select_reporter(args.verbose) (issue #49; a
-    RichReporter or PlainReporter, both constructed with
-    verbose=args.verbose) and passes it as run()'s existing reporter= param
+    builds a reporter via _select_reporter(args.verbose, hide_up_to_date=...)
+    (issue #49; a RichReporter or PlainReporter, both constructed with
+    verbose=args.verbose -- RichReporter additionally gets config.yaml's
+    cli: hide_up_to_date flag, issue #53) and passes it as run()'s existing
+    reporter= param
     (issue #47), since --verbose only ever changes what the reporter itself
     chooses to print, not any pipeline logic. The run() call is wrapped in
     `with reporter:` so a RichReporter's Live display starts/stops cleanly,
@@ -1400,7 +1406,7 @@ def main(argv: list[str] | None = None) -> int:
     start_time = datetime.now()
 
     conn = init_db(paths_config.state_db)
-    reporter = _select_reporter(args.verbose)
+    reporter = _select_reporter(args.verbose, hide_up_to_date=cli_config.hide_up_to_date)
     with reporter:
         summary = run(
             paths_config,

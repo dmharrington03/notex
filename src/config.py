@@ -82,6 +82,13 @@ DEFAULT_LECTURE_PREFIX = "Lecture"
 # full breakdown is an opt-in extra, not something every run needs.
 DEFAULT_PRINT_SUMMARY = False
 
+# Issue #53 — cli: section default. Controls whether RichReporter hides
+# already-up-to-date (UNCHANGED) rows from its live table -- off by
+# default, matching today's behavior of showing every discovered file.
+# Has no effect on PlainReporter, which never prints anything for
+# up-to-date files in the first place.
+DEFAULT_HIDE_UP_TO_DATE = False
+
 
 class ConfigError(Exception):
     """Raised when required configuration is missing or invalid."""
@@ -138,6 +145,7 @@ class NamingConfig:
 @dataclass(frozen=True)
 class CLIConfig:
     print_summary: bool
+    hide_up_to_date: bool
 
 
 def load_mathpix_credentials(env_file: str | None = None) -> MathpixCredentials:
@@ -416,7 +424,7 @@ def load_naming_config(config_path: str | Path | None = None) -> NamingConfig:
 
 def load_cli_config(config_path: str | Path | None = None) -> CLIConfig:
     """
-    Load the cli: print_summary setting from config.yaml.
+    Load the cli: print_summary/hide_up_to_date settings from config.yaml.
 
     Args:
         config_path: optional explicit path to config.yaml. If not given,
@@ -424,25 +432,31 @@ def load_cli_config(config_path: str | Path | None = None) -> CLIConfig:
             working directory), matching the project convention of running
             the CLI from the repo root.
 
-    config.yaml (and the cli: section/key within it) is fully optional
+    config.yaml (and the cli: section/keys within it) is fully optional
     here, same fallback pattern as load_naming_config()/load_output_config():
-    if the file doesn't exist, the cli: section is absent, or print_summary
-    itself is missing, DEFAULT_PRINT_SUMMARY (False) is used instead. Never
-    raises ConfigError.
+    if the file doesn't exist, the cli: section is absent, or a given key
+    is missing, its DEFAULT_* constant is used instead. Never raises
+    ConfigError.
 
     print_summary gates src/main.py's main()'s call to _print_summary() --
     the full processed/skipped/errors/tokens/cost breakdown printed after a
     run. See CLIConfig's docstring/DEFAULT_PRINT_SUMMARY's comment for why
     it defaults to off.
+
+    hide_up_to_date (issue #53) gates whether RichReporter hides
+    already-up-to-date rows from its live table -- see
+    DEFAULT_HIDE_UP_TO_DATE's comment.
     """
     path = Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
 
     print_summary: bool = DEFAULT_PRINT_SUMMARY
+    hide_up_to_date: bool = DEFAULT_HIDE_UP_TO_DATE
 
     if path.is_file():
         with path.open("r") as fh:
             data: dict[str, Any] = yaml.safe_load(fh) or {}
         cli_section = data.get("cli") or {}
         print_summary = cli_section.get("print_summary", print_summary)
+        hide_up_to_date = cli_section.get("hide_up_to_date", hide_up_to_date)
 
-    return CLIConfig(print_summary=print_summary)
+    return CLIConfig(print_summary=print_summary, hide_up_to_date=hide_up_to_date)

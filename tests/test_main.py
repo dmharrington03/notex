@@ -2508,7 +2508,7 @@ def test_main_returns_zero_and_prints_summary_even_with_errors(monkeypatch, tmp_
     # A later follow-up gated _print_summary() behind config.yaml's cli:
     # print_summary flag, off by default -- explicitly enable it here so
     # this test can still exercise/assert on the printed summary text.
-    monkeypatch.setattr(main_module, "load_cli_config", lambda: CLIConfig(print_summary=True))
+    monkeypatch.setattr(main_module, "load_cli_config", lambda: CLIConfig(print_summary=True, hide_up_to_date=False))
     monkeypatch.setattr(
         main_module,
         "run",
@@ -2809,7 +2809,7 @@ def _setup_main_end_to_end(monkeypatch, tmp_path):
     monkeypatch.setattr(main_module, "load_llm_config", _make_llm_config)
     monkeypatch.setattr(main_module, "load_output_config", _make_output_config)
     monkeypatch.setattr(main_module, "load_naming_config", _make_naming_config)
-    monkeypatch.setattr(main_module, "load_cli_config", lambda: CLIConfig(print_summary=True))
+    monkeypatch.setattr(main_module, "load_cli_config", lambda: CLIConfig(print_summary=True, hide_up_to_date=False))
 
     conn = init_db(paths_config.state_db)
     course_dir = paths_config.input_root / "class_1"
@@ -2942,7 +2942,7 @@ def test_main_explicit_print_summary_false_omits_summary(monkeypatch, tmp_path, 
 
     paths_config = _make_paths_config(tmp_path)
     monkeypatch.setattr(main_module, "load_paths_config", lambda: paths_config)
-    monkeypatch.setattr(main_module, "load_cli_config", lambda: CLIConfig(print_summary=False))
+    monkeypatch.setattr(main_module, "load_cli_config", lambda: CLIConfig(print_summary=False, hide_up_to_date=False))
     monkeypatch.setattr(
         main_module,
         "run",
@@ -3018,6 +3018,24 @@ def test_select_reporter_returns_rich_when_tty_and_rich_available(monkeypatch):
 
     assert isinstance(reporter, RichReporter)
     assert reporter.verbose is True
+
+
+def test_select_reporter_passes_hide_up_to_date_to_rich_reporter(monkeypatch):
+    """
+    Issue #53: _select_reporter()'s hide_up_to_date param (sourced from
+    CLIConfig.hide_up_to_date) reaches the constructed RichReporter.
+    """
+    import sys
+
+    import src.main as main_module
+    from src.reporting import RichReporter
+
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    reporter = main_module._select_reporter(verbose=False, hide_up_to_date=True)
+
+    assert isinstance(reporter, RichReporter)
+    assert reporter.hide_up_to_date is True
 
 
 def test_select_reporter_falls_back_to_plain_when_rich_unavailable(monkeypatch):

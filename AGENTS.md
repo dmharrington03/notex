@@ -186,6 +186,11 @@ key is missing:
 - `cli` — `print_summary` (default `false`): whether `main()` prints the
   full processed/skipped/errors/tokens/cost breakdown at the end of a run,
   on top of the always-on `Reporter`/`on_done()` progress output.
+  `hide_up_to_date` (default `false`, issue #53): whether `RichReporter`
+  omits already-up-to-date (`unchanged`) rows from its live table,
+  replacing them with a `(N) files already up to date` caption instead.
+  `RichReporter`-only — `PlainReporter` already never prints anything for
+  up-to-date files, so the flag has no effect there.
 
 Mathpix/LLM credentials live in `.env` (gitignored — see `.env.example`),
 loaded by `load_mathpix_credentials()`.
