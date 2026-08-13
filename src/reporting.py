@@ -338,7 +338,7 @@ class RichReporter:
     per-row mutable field rendered in its own column. The table is wrapped
     in a centered, titled Panel ("NoTeX") -- a formatting pass on top of
     #49's original bare Table, with the Table's own title showing a live
-    "{N} documents found" count (derived from len(self._rows), so it's
+    "{N} new documents found" count (derived from len(self._rows), so it's
     always accurate rather than a fixed string) and the Panel's subtitle
     left blank until on_done() sets it to "Done in {runtime_secs:.1f} s".
 
@@ -368,7 +368,7 @@ class RichReporter:
     is not added as a row at all -- instead it's tallied in
     self._hidden_count, and _render() shows it as a Table caption
     ("({N}) files already up to date") instead of a row, so the title's
-    "({N}) documents found" count also naturally reflects only the shown
+    "({N}) new documents found" count also naturally reflects only the shown
     rows. Has no effect on any other classification.
 
     on_stage(source_path, stage) updates that
@@ -407,7 +407,7 @@ class RichReporter:
 
     def _render(self, subtitle: str | None = None) -> "Align":
         count = len(self._rows)
-        title = f"({count}) document{'' if count == 1 else 's'} found"
+        title = f"({count}) new document{'' if count == 1 else 's'} found"
         caption = (
             f"({self._hidden_count}) file{'' if self._hidden_count == 1 else 's'} already up to date"
             if self._hidden_count

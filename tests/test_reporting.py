@@ -571,26 +571,26 @@ def test_rich_reporter_on_done_does_not_change_row_state():
 
 def test_rich_reporter_render_title_reflects_row_count():
     """
-    The Table's title shows a live "{N} documents found" count derived from
-    len(self._rows) -- not a hardcoded string -- so it stays accurate as
-    files are discovered.
+    The Table's title shows a live "{N} new documents found" count derived
+    from len(self._rows) -- not a hardcoded string -- so it stays accurate
+    as files are discovered.
     """
     from src.reporting import RichReporter
 
     reporter = RichReporter()
     rendered = reporter._render()
     table = rendered.renderable.renderable
-    assert table.title == "(0) documents found"
+    assert table.title == "(0) new documents found"
 
     reporter.on_discover([("/x/a.pdf", "new")])
     rendered = reporter._render()
     table = rendered.renderable.renderable
-    assert table.title == "(1) document found"
+    assert table.title == "(1) new document found"
 
     reporter.on_discover([("/x/b.pdf", "new")])
     rendered = reporter._render()
     table = rendered.renderable.renderable
-    assert table.title == "(2) documents found"
+    assert table.title == "(2) new documents found"
 
 
 def test_rich_reporter_render_subtitle_reflects_on_done():
