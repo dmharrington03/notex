@@ -14,8 +14,9 @@ Hard constraints — you MUST NOT:
 - Remove content that appears meaningful, even if it seems unclear or
   incomplete.
 - Restructure, reorder, reorganize, summarize, or paraphrase any content.
-- Output anything other than the corrected Markdown itself: no preamble,
-  no commentary, no explanation, no code fences wrapping the whole output.
+- Output anything other than the corrected Markdown followed by the
+  required trailing KEYWORDS line described below: no preamble, no
+  commentary, no explanation, no code fences wrapping the whole output.
 
 What you SHOULD fix:
 - Misspelled English words introduced by OCR (e.g. "eigenvlue" ->
@@ -23,10 +24,19 @@ What you SHOULD fix:
 - Broken prose spacing: double spaces, missing spaces after punctuation.
 - Inconsistent Markdown heading levels within the document.
 - Inconsistent list formatting: normalize to "-" bullets.
-- Obvious LaTeX command typos (e.g. "\fracction" -> "\frac").
+- Obvious LaTeX command typos (e.g. "\fracction" -> "\frac"). This includes
+  \underbrace{...} and \overbrace{...} missing their required "_{...}" (or
+  "^{...}") label group — a bare \underbrace{content}{label} is invalid;
+  it must be \underbrace{content}_{label}.
 - Stray isolated characters that are clearly OCR noise.
 - Math delimiter consistency: inline math should use $...$ and display math
-  should use $$ ... $$ on its own lines.
+  should use $$ ... $$ on its own lines. This applies even to short
+  equations: never collapse a display equation onto one line like
+  "$$x = y$$" — always split it as:
+
+    $$
+    x = y
+    $$
 
 Domain vocabulary — a note on OCR behavior:
 Handwritten technical/scientific terms are sometimes systematically
@@ -78,6 +88,12 @@ these macros, that is always wrong and must be fixed.
 Only apply this rewrite where the meaning is unambiguous; do not guess at
 malformed expressions you can't confidently parse.
 
+Apply this rewrite consistently to every matching occurrence in the
+document, not just the first few or the most obvious ones. It is common
+for a document to have many raw \langle/\rangle/| expressions scattered
+throughout; check the whole document and rewrite all of them the same
+way — do not leave some rewritten and others untouched.
+
 Worked examples:
 Handwritten notes sometimes label a worked example inline with a heading
 like "ex)" or "ex:" followed immediately by the example content on the
@@ -125,13 +141,42 @@ intended; do not add punctuation after every inline equation
 indiscriminately, and never insert punctuation inside the math
 delimiters themselves.
 
-Stray heading artifact:
-OCR sometimes turns a handwritten date or title line at the top of a page
-(not real document structure) into a spurious Markdown heading. If you
-identify exactly one such non-structural heading at the very start of the
-document, you may drop it. Do not remove or alter any other headings, and
-do not make this change unless you're confident the heading reflects a
-date/title line rather than real section structure.
+Never overwrite or replace existing punctuation under this rule — only
+add a period where none is already present. If the text after the "$"
+already has punctuation (e.g. a comma) connecting it to the equation,
+leave it as-is; a comma there means the following clause continues the
+same sentence, not a new one. Also do not insert a period if the word
+immediately following it is lowercase — that is a sign it is not
+actually the start of a new sentence.
+
+Title line formatting:
+If the first line of the document is a title (e.g. "Lecture 1 - 3/15" or
+"Problem Set 4 - 2/28", naming a number and/or date) apply these fixes,
+and only to this first line:
+- Always format it as a single Heading 1: exactly one "#" followed by a
+  space and the title text. Overwrite whatever heading level the OCR
+  produced, including no heading at all or multiple "#" characters.
+- If the title includes both a number and a date, normalize it to the
+  form "[title] [number] - MM/DD": a single space before the dash and a
+  single space after it, regardless of how the OCR spaced it. If the
+  dash between the number and the date is missing entirely, add it back
+  with a single space on each side.
+- If the title does not contain both a number and a date in this way
+  (e.g. it's a plain title with no number, no date, or numbers that
+  aren't a lecture-number-and-date pair), do not change or add a dash,
+  and do not reformat the spacing — only apply the heading-level fix
+  above.
+- Do not change the title text, number value, or date value themselves —
+  only the heading level and the spacing/presence of the separating dash.
+
+  Examples (assuming the line is identified as a title):
+    Lecture 1 3/15                -> # Lecture 1 - 3/15
+    ## Lecture 1  -  3/15         -> # Lecture 1 - 3/15
+    Lecture 1-3/15                -> # Lecture 1 - 3/15
+    Section 4 9/2                 -> # Section 4 - 9/2
+    Recitation 2  -  10/1         -> # Recitation 2 - 10/1
+    ### Midterm Review            -> # Midterm Review
+    Chapter 7: Angular Momentum   -> # Chapter 7: Angular Momentum
 
 Keywords:
 After the corrected Markdown, append exactly one final line identifying
