@@ -225,6 +225,7 @@ processed them -- this avoids double-counting across runs.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 from dataclasses import dataclass, replace
@@ -380,6 +381,7 @@ def _write_to_vault(
     force_overwrite: bool,
     reporter: Reporter,
     image_link_syntax: str = "markdown",
+    keywords: tuple[str, ...] = (),
 ) -> tuple[int, int]:
     """
     Write this file's final vault Markdown note (src/vault.py's
@@ -409,6 +411,10 @@ def _write_to_vault(
         image_link_syntax: forwarded to write_lecture_note()'s
             image_link_syntax param (issue #54) -- the caller resolves
             this from OutputConfig.image_link_syntax.
+        keywords: forwarded to write_lecture_note()'s keywords param (issue
+            #56) -- the caller resolves this from
+            LLMResult.llm_keywords; empty if the LLM stage was skipped or
+            failed.
         tags: forwarded to write_lecture_note()'s tags param -- the caller
             resolves this via src/postprocess.py's resolve_tags(course_label,
             output_config) (issue #37); empty if this course has no
@@ -485,6 +491,7 @@ def _write_to_vault(
             processed_at,
             dark_mode=dark_mode,
             tags=list(tags),
+            keywords=list(keywords),
             date_format=date_format,
             lecture_prefix=lecture_prefix,
             previous_content_hash=previous_content_hash,
@@ -741,6 +748,7 @@ def _process_file(
                 llm_prompt_version=None,
                 llm_status=None,
                 llm_validation_result=None,
+                llm_keywords=None,
                 llm_processed_at=None,
                 output_path=None,
                 llm_input_tokens=None,
@@ -804,6 +812,7 @@ def _process_file(
             llm_prompt_version=llm_result.llm_prompt_version,
             llm_status=llm_result.llm_status,
             llm_validation_result=llm_result.llm_validation_result,
+            llm_keywords=json.dumps(llm_result.llm_keywords),
             llm_processed_at=llm_result.processed_at,
             output_path=str(llm_result.output_path),
             llm_input_tokens=llm_result.llm_input_tokens,
@@ -826,6 +835,7 @@ def _process_file(
             force_vault_overwrite,
             reporter,
             image_link_syntax=output_config.image_link_syntax,
+            keywords=tuple(llm_result.llm_keywords),
         )
         errors += vault_errors
         return _FileOutcome(
@@ -872,6 +882,9 @@ def _process_file(
                 force_vault_overwrite,
                 reporter,
                 image_link_syntax=output_config.image_link_syntax,
+                keywords=tuple(json.loads(entry.llm_keywords))
+                if entry.llm_keywords
+                else (),
             )
             return _FileOutcome(
                 skipped=1,
@@ -916,6 +929,7 @@ def _process_file(
         llm_prompt_version=llm_result.llm_prompt_version,
         llm_status=llm_result.llm_status,
         llm_validation_result=llm_result.llm_validation_result,
+        llm_keywords=json.dumps(llm_result.llm_keywords),
         llm_processed_at=llm_result.processed_at,
         output_path=str(llm_result.output_path),
         llm_input_tokens=llm_result.llm_input_tokens,
@@ -937,6 +951,7 @@ def _process_file(
         naming_config.lecture_prefix,
         force_vault_overwrite,
         reporter,
+        keywords=tuple(llm_result.llm_keywords),
         image_link_syntax=output_config.image_link_syntax,
     )
     errors += vault_errors

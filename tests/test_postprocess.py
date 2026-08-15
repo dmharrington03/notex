@@ -109,6 +109,7 @@ def test_build_frontmatter_full_round_trip():
     assert data["date"] == "2024-01-15"
     assert data["lecture_number"] == 2
     assert data["tags"] == []
+    assert data["keywords"] == []
     assert data["source_pdf"] == "/abs/notes_raw/class_1/lecture_02.pdf"
     assert data["processed"] == processed_at.astimezone().strftime("%Y-%m-%d")
 
@@ -142,6 +143,39 @@ def test_build_frontmatter_custom_tags():
     body = result[len("---\n") : -len("---\n")]
     data = yaml.safe_load(body)
     assert data["tags"] == ["lecture-notes", "quantum-mechanics"]
+
+
+def test_build_frontmatter_omitted_keywords_defaults_to_no_keywords():
+    result = build_frontmatter(
+        course_name="class 1",
+        lecture_number=1,
+        topic=None,
+        source_pdf_path="/abs/notes_raw/class_1/lecture_01.pdf",
+        source_mtime=datetime(2024, 1, 1).timestamp(),
+        processed_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+
+    body = result[len("---\n") : -len("---\n")]
+    data = yaml.safe_load(body)
+    assert data["keywords"] == []
+
+
+def test_build_frontmatter_custom_keywords():
+    result = build_frontmatter(
+        course_name="class 1",
+        lecture_number=1,
+        topic=None,
+        source_pdf_path="/abs/notes_raw/class_1/lecture_01.pdf",
+        source_mtime=datetime(2024, 1, 1).timestamp(),
+        processed_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        keywords=["radiation", "helium atom"],
+    )
+
+    body = result[len("---\n") : -len("---\n")]
+    data = yaml.safe_load(body)
+    assert data["keywords"] == ["radiation", "helium atom"]
+    # keywords and tags are independent fields.
+    assert data["tags"] == []
 
 
 def test_build_frontmatter_custom_date_format():

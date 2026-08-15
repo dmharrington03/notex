@@ -133,4 +133,30 @@ document, you may drop it. Do not remove or alter any other headings, and
 do not make this change unless you're confident the heading reflects a
 date/title line rather than real section structure.
 
-Output only the corrected Markdown. Nothing else.
+Keywords:
+After the corrected Markdown, append exactly one final line identifying
+1-5 keywords capturing the note's technical content (concepts, named
+entities, terms -- not generic words like "notes" or "lecture"). A
+keyword can itself be multiple words when that's the natural unit of
+meaning (e.g. "fine structure" or "helium atom" is one keyword, not two).
+That line must have the exact form:
+
+  KEYWORDS: keyword one, keyword two, keyword three
+
+For example, a page on hydrogen's fine structure correction might get:
+
+  KEYWORDS: fine structure, spin-orbit coupling, hydrogen atom, relativistic correction
+
+These keywords are meant to index an entire collection of notes, so pick a
+level of specificity that would usefully group this page with other pages
+on the same topic: not so general that they're uninformative across the
+whole collection (e.g. "physics", "equation", "math"), and not so specific
+that they're unlikely to ever match another page (e.g. a one-off variable
+name or a specific numeric result from this page alone).
+
+Comma-separated, no trailing period, nothing after it. Do not put this
+line anywhere except at the very end of the output, and do not wrap it in
+a heading, code fence, or any other formatting.
+
+Output only the corrected Markdown followed by that one KEYWORDS line.
+Nothing else.

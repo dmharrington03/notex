@@ -47,6 +47,7 @@ from src.llm import (
     LLMError,
     LLMResult,
     ValidationResult,
+    _split_keywords_trailer,
     cleanup_pdf,
     load_prompt_text,
     needs_llm_reprocessing,
@@ -349,6 +350,65 @@ def test_validate_cleanup_heading_count_failure_does_not_gate_passed():
     assert result.checks["heading_count"] is False
 
 
+# --- _split_keywords_trailer() (issue #56) ---
+
+
+def test_split_keywords_trailer_splits_off_trailing_line():
+    content = "# Heading\n\nsome cleaned text\n\nKEYWORDS: radiation, helium atom"
+
+    markdown, keywords = _split_keywords_trailer(content)
+
+    assert markdown == "# Heading\n\nsome cleaned text"
+    assert keywords == ["radiation", "helium atom"]
+
+
+def test_split_keywords_trailer_strips_whitespace_per_item():
+    content = "body text\nKEYWORDS:  radiation ,  helium atom  ,eigenvalue"
+
+    markdown, keywords = _split_keywords_trailer(content)
+
+    assert markdown == "body text"
+    assert keywords == ["radiation", "helium atom", "eigenvalue"]
+
+
+def test_split_keywords_trailer_single_keyword_no_comma():
+    content = "body text\nKEYWORDS: radiation"
+
+    markdown, keywords = _split_keywords_trailer(content)
+
+    assert markdown == "body text"
+    assert keywords == ["radiation"]
+
+
+def test_split_keywords_trailer_returns_empty_list_when_missing():
+    content = "# Heading\n\nsome cleaned text with no trailer"
+
+    markdown, keywords = _split_keywords_trailer(content)
+
+    assert markdown == content
+    assert keywords == []
+
+
+def test_split_keywords_trailer_ignores_keywords_line_not_at_the_end():
+    # A "KEYWORDS:" line only counts as the trailer when it's the actual
+    # last line -- one buried mid-document is just body content.
+    content = "KEYWORDS: not, the, trailer\n\nmore text after it"
+
+    markdown, keywords = _split_keywords_trailer(content)
+
+    assert markdown == content
+    assert keywords == []
+
+
+def test_split_keywords_trailer_ignores_trailing_blank_lines_before_trailer():
+    content = "body text\n\nKEYWORDS: radiation, helium atom\n\n\n"
+
+    markdown, keywords = _split_keywords_trailer(content)
+
+    assert markdown == "body text"
+    assert keywords == ["radiation", "helium atom"]
+
+
 # --- cleanup_pdf() / needs_llm_reprocessing() (issue #17) ---
 
 
@@ -375,6 +435,7 @@ def _state_entry(**overrides) -> StateEntry:
         llm_prompt_version=None,
         llm_status=None,
         llm_validation_result=None,
+        llm_keywords=None,
         figure_count=0,
         page_count=None,
         output_path=None,
@@ -399,7 +460,9 @@ def test_cleanup_pdf_success_writes_llm_md_and_returns_success_result(tmp_path, 
 
     def fake_completion_fn(**kwargs):
         return _fake_response(
-            "# Real Heading\n\nsome cleaned text", prompt_tokens=200, completion_tokens=80
+            "# Real Heading\n\nsome cleaned text\n\nKEYWORDS: radiation, helium atom",
+            prompt_tokens=200,
+            completion_tokens=80,
         )
 
     monkeypatch.setattr("src.llm.litellm.completion_cost", lambda **kwargs: 0.0123)
@@ -415,6 +478,7 @@ def test_cleanup_pdf_success_writes_llm_md_and_returns_success_result(tmp_path, 
     assert result.llm_prompt_version == "cleanup_v1"
     assert result.output_path == dest_dir / "lecture_01.llm.md"
     assert result.output_path.read_text(encoding="utf-8") == "# Real Heading\n\nsome cleaned text"
+    assert result.llm_keywords == ["radiation", "helium atom"]
     assert json.loads(result.llm_validation_result) == {
         "length_ratio": True,
         "dollar_balance": True,
@@ -424,6 +488,33 @@ def test_cleanup_pdf_success_writes_llm_md_and_returns_success_result(tmp_path, 
     assert result.llm_input_tokens == 200
     assert result.llm_output_tokens == 80
     assert result.llm_cost_estimate == 0.0123
+
+
+def test_cleanup_pdf_success_with_no_keywords_trailer_keeps_full_content(
+    tmp_path, monkeypatch
+):
+    """When the model omits the KEYWORDS trailer, cleanup_pdf() must not
+    lose or mangle any content -- llm_keywords degrades to []."""
+    mathpix_path = tmp_path / "lecture_01.mathpix.md"
+    mathpix_path.write_text("some raw mathpix text", encoding="utf-8")
+    dest_dir = tmp_path / "out"
+
+    def fake_completion_fn(**kwargs):
+        return _fake_response("# Real Heading\n\nsome cleaned text with no trailer")
+
+    monkeypatch.setattr("src.llm.litellm.completion_cost", lambda **kwargs: 0.0123)
+
+    client = LLMClient(model="fake-model", completion_fn=fake_completion_fn)
+    llm_config = _llm_config()
+
+    result = cleanup_pdf(mathpix_path, dest_dir, "lecture_01", llm_config, client=client)
+
+    assert result.llm_status == "success"
+    assert result.llm_keywords == []
+    assert (
+        result.output_path.read_text(encoding="utf-8")
+        == "# Real Heading\n\nsome cleaned text with no trailer"
+    )
 
 
 def test_cleanup_pdf_on_status_called_once_on_success(tmp_path, monkeypatch):
@@ -524,6 +615,7 @@ def test_cleanup_pdf_falls_back_on_llm_error(tmp_path):
     assert result.llm_model is None
     assert result.llm_prompt_version is None
     assert result.llm_validation_result is None
+    assert result.llm_keywords == []
     assert result.output_path == mathpix_path
     # No completion was ever returned -- no usage to report.
     assert result.llm_input_tokens is None

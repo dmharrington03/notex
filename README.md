@@ -94,6 +94,14 @@ Before running, set up configuration files from the examples here:
     adds `@darkmode` to the alt text of figure embeddings which can separately
     be selected and styled in a markdown viewer.
 
+    Separately from tags, the LLM cleanup step also generates a `keywords`
+    frontmatter field for each note automatically — 1-5 keywords (which may
+    themselves be multi-word phrases, e.g. "fine structure") describing the
+    page's content, chosen at a level of specificity intended to make an
+    entire collection of notes searchable/indexable by topic. Unlike tags,
+    these are derived per-note from the actual content, not configured per
+    course.
+
     When saving, numbers are extracted from the PDF note filenames, and outputs
     are written as `{lecture_prefix} XX.md` according to the `naming` field.
 

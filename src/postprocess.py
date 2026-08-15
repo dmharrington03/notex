@@ -151,6 +151,7 @@ def build_frontmatter(
     source_mtime: float,
     processed_at: datetime,
     tags: tuple[str, ...] | list[str] = (),
+    keywords: tuple[str, ...] | list[str] = (),
     date_format: str = DATE_FORMAT,
     lecture_prefix: str = DEFAULT_LECTURE_PREFIX,
 ) -> str:
@@ -187,6 +188,13 @@ def build_frontmatter(
             note and OutputConfig's docstring); a course only gets tags via
             an explicit course_tags entry, resolved by resolve_tags() and
             passed in here explicitly.
+        keywords: the LLM cleanup stage's content-derived keywords (issue
+            #56; see src/llm.py's LLMResult.llm_keywords), rendered as a
+            "keywords" frontmatter field distinct from "tags" -- tags are
+            static/course-level (resolved by resolve_tags() above),
+            keywords are per-note and derived from the note's own content.
+            Defaults to `()` (no keywords), e.g. when the LLM cleanup
+            stage was skipped or failed.
         date_format: strftime format string used for both the "date" and
             "processed" fields. Defaults to DATE_FORMAT ("%Y-%m-%d") only
             for callers that don't pass this explicitly — real production
@@ -202,8 +210,8 @@ def build_frontmatter(
 
     Returns:
         A complete "---\\n...\\n---\\n" YAML frontmatter block with keys in
-        the order title/course/date/lecture_number/tags/source_pdf/processed,
-        matching docs/spec.md's Stage 5 frontmatter schema.
+        the order title/course/date/lecture_number/tags/keywords/source_pdf/
+        processed, matching docs/spec.md's Stage 5 frontmatter schema.
     """
     title = f"{lecture_prefix} {lecture_number:02d}"
     date = datetime.fromtimestamp(source_mtime).strftime(date_format)
@@ -216,6 +224,7 @@ def build_frontmatter(
         "date": date,
         "lecture_number": lecture_number,
         "tags": list(tags),
+        "keywords": list(keywords),
         "source_pdf": source_pdf,
         "processed": processed,
     }

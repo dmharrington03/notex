@@ -316,6 +316,53 @@ def test_custom_tags_round_trip_into_frontmatter(tmp_path):
     assert data["tags"] == ["lecture-notes", "quantum-mechanics"]
 
 
+def test_custom_keywords_round_trip_into_frontmatter(tmp_path):
+    source_pdf = tmp_path / "notes_raw" / "class_1" / "lecture_02.pdf"
+    source_pdf.parent.mkdir(parents=True)
+    source_pdf.write_bytes(b"fake-pdf")
+    content_path = _make_content_file(tmp_path, "Notes.\n")
+    cache_figures_dir = tmp_path / "_cache" / "class_1" / "figures"
+    vault_course_dir = tmp_path / "vault" / "class_1"
+
+    result = write_lecture_note(
+        source_pdf_path=source_pdf,
+        content_source_path=content_path,
+        course_cache_figures_dir=cache_figures_dir,
+        vault_course_dir=vault_course_dir,
+        source_mtime=datetime(2024, 1, 15).timestamp(),
+        processed_at=datetime(2024, 1, 16, tzinfo=timezone.utc),
+        keywords=["radiation", "helium atom"],
+    )
+
+    written = result.output_path.read_text(encoding="utf-8")
+    frontmatter_body = written.split("---\n")[1]
+    data = yaml.safe_load(frontmatter_body)
+    assert data["keywords"] == ["radiation", "helium atom"]
+
+
+def test_omitted_keywords_falls_back_to_no_keywords(tmp_path):
+    source_pdf = tmp_path / "notes_raw" / "class_1" / "lecture_02.pdf"
+    source_pdf.parent.mkdir(parents=True)
+    source_pdf.write_bytes(b"fake-pdf")
+    content_path = _make_content_file(tmp_path, "Notes.\n")
+    cache_figures_dir = tmp_path / "_cache" / "class_1" / "figures"
+    vault_course_dir = tmp_path / "vault" / "class_1"
+
+    result = write_lecture_note(
+        source_pdf_path=source_pdf,
+        content_source_path=content_path,
+        course_cache_figures_dir=cache_figures_dir,
+        vault_course_dir=vault_course_dir,
+        source_mtime=datetime(2024, 1, 15).timestamp(),
+        processed_at=datetime(2024, 1, 16, tzinfo=timezone.utc),
+    )
+
+    written = result.output_path.read_text(encoding="utf-8")
+    frontmatter_body = written.split("---\n")[1]
+    data = yaml.safe_load(frontmatter_body)
+    assert data["keywords"] == []
+
+
 def test_omitted_tags_falls_back_to_no_tags(tmp_path):
     source_pdf = tmp_path / "notes_raw" / "class_1" / "lecture_02.pdf"
     source_pdf.parent.mkdir(parents=True)

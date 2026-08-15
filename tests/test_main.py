@@ -274,6 +274,7 @@ def _install_fake_cleanup_pdf(
     cost_estimate: float = 0.001,
     content: str = "cleaned markdown",
     on_status_message: str | None = None,
+    keywords: list[str] | None = None,
 ):
     """
     Monkeypatch src.main.cleanup_pdf with a fake that never touches
@@ -299,6 +300,10 @@ def _install_fake_cleanup_pdf(
     on_status callback was passed in, regardless of status, mirroring how
     the real cleanup_pdf() can call on_status on either the success or
     failed-fallback path.
+
+    keywords (issue #56): the LLMResult.llm_keywords list returned on the
+    success path -- defaults to `[]` (no keywords), matching real
+    cleanup_pdf()'s failure-path behavior.
     """
     import src.main as main_module
 
@@ -332,6 +337,7 @@ def _install_fake_cleanup_pdf(
                 llm_input_tokens=input_tokens,
                 llm_output_tokens=output_tokens,
                 llm_cost_estimate=cost_estimate,
+                llm_keywords=keywords or [],
             )
         return LLMResult(
             llm_model=None,
@@ -457,6 +463,78 @@ def test_run_processes_new_file_and_records_success(client, tmp_path, monkeypatc
     vault_path = paths_config.vault_root / "class_1" / "Lecture 01.md"
     assert Path(entry.vault_path) == vault_path
     assert "cleaned markdown" in vault_path.read_text(encoding="utf-8")
+
+
+@respx.mock
+def test_run_threads_llm_keywords_into_state_db_and_vault_frontmatter(
+    client, tmp_path, monkeypatch
+):
+    """Issue #56: keywords returned alongside the cleaned Markdown flow
+    through to both state.db's llm_keywords column and the vault note's
+    "keywords" frontmatter field."""
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(
+        monkeypatch, status="success", keywords=["radiation", "helium atom"]
+    )
+
+    run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+    )
+
+    entry = get_entry(conn, str(pdf_path.resolve()))
+    assert json.loads(entry.llm_keywords) == ["radiation", "helium atom"]
+
+    vault_path = paths_config.vault_root / "class_1" / "Lecture 01.md"
+    written = vault_path.read_text(encoding="utf-8")
+    frontmatter_body = written.split("---\n")[1]
+    data = yaml.safe_load(frontmatter_body)
+    assert data["keywords"] == ["radiation", "helium atom"]
+
+
+@respx.mock
+def test_run_no_llm_writes_no_keywords(client, tmp_path, monkeypatch):
+    """Issue #56: --no-llm skips the LLM stage entirely, so no keywords are
+    recorded in state.db or written to the vault note's frontmatter."""
+    paths_config = _make_paths_config(tmp_path)
+    conn = init_db(paths_config.state_db)
+    course_dir = paths_config.input_root / "class_1"
+    course_dir.mkdir()
+    pdf_path = _write_pdf(course_dir / "lecture_01.pdf")
+
+    _mock_happy_path()
+    _install_fake_cleanup_pdf(
+        monkeypatch, status="success", keywords=["radiation", "helium atom"]
+    )
+
+    run(
+        paths_config,
+        conn,
+        client=client,
+        llm_config=_make_llm_config(),
+        output_config=_make_output_config(),
+        naming_config=_make_naming_config(),
+        no_llm=True,
+    )
+
+    entry = get_entry(conn, str(pdf_path.resolve()))
+    assert entry.llm_keywords is None
+
+    vault_path = paths_config.vault_root / "class_1" / "Lecture 01.md"
+    written = vault_path.read_text(encoding="utf-8")
+    frontmatter_body = written.split("---\n")[1]
+    data = yaml.safe_load(frontmatter_body)
+    assert data["keywords"] == []
 
 
 @respx.mock

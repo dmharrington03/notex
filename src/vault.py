@@ -97,6 +97,7 @@ def write_lecture_note(
     processed_at: datetime,
     dark_mode: bool = False,
     tags: list[str] | None = None,
+    keywords: list[str] | None = None,
     date_format: str = DATE_FORMAT,
     lecture_prefix: str = DEFAULT_LECTURE_PREFIX,
     previous_content_hash: str | None = None,
@@ -140,6 +141,13 @@ def write_lecture_note(
             only gets tags via an explicit output.course_tags entry,
             resolved by postprocess.resolve_tags() and passed in here by
             the caller (src/main.py, Phase 6 config wiring).
+        keywords: forwarded to postprocess.build_frontmatter() (issue #56).
+            None (the default) falls back to no keywords at all -- the
+            content-derived keywords the LLM cleanup call returns
+            alongside the cleaned Markdown (src/llm.py's
+            LLMResult.llm_keywords), passed in here by the caller
+            (src/main.py). Distinct from `tags` above: keywords are
+            per-note/content-derived, tags are static/course-level.
         date_format: forwarded verbatim to postprocess.build_frontmatter()'s
             same-named param (used for both the "date" and "processed"
             fields). Defaults to DATE_FORMAT ("%Y-%m-%d") only for callers
@@ -251,6 +259,7 @@ def write_lecture_note(
         source_mtime=source_mtime,
         processed_at=processed_at,
         tags=tags if tags is not None else (),
+        keywords=keywords if keywords is not None else (),
         date_format=date_format,
         lecture_prefix=lecture_prefix,
     )

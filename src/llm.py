@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -52,6 +52,10 @@ _RIGHT_DELIMITER_RE = re.compile(r"\\right(?![a-zA-Z])")
 
 # ATX-style Markdown heading, e.g. "## Heading" -- matched per line.
 _HEADING_RE = re.compile(r"^#{1,6}\s", re.MULTILINE)
+
+# Trailing "KEYWORDS: a, b, c" line appended by prompts/cleanup_v1.txt
+# (issue #56) after the cleaned Markdown body.
+_KEYWORDS_TRAILER_RE = re.compile(r"^KEYWORDS:\s*(.+)$")
 
 
 class LLMError(Exception):
@@ -207,6 +211,44 @@ def load_prompt_text(
     return path.read_text(encoding="utf-8")
 
 
+def _split_keywords_trailer(content: str) -> tuple[str, list[str]]:
+    """
+    Split a cleanup completion's trailing "KEYWORDS: a, b, c" line (issue
+    #56) off of `content`, returning the remaining Markdown body plus the
+    parsed keyword list.
+
+    Looks only at the last non-blank line of `content`. If it matches the
+    "KEYWORDS: ..." form, that line is removed (along with any trailing
+    blank lines before it) and its comma-separated items are split,
+    stripped, and returned with empty items dropped. If no such line is
+    found -- the model omitted it, or malformed it -- `content` is
+    returned unchanged with an empty keyword list; this never raises, so a
+    missing/malformed trailer degrades to "no keywords" rather than
+    failing the whole cleanup.
+
+    Args:
+        content: the raw completion content (cleaned Markdown, optionally
+            followed by the KEYWORDS trailer line).
+
+    Returns:
+        (markdown_without_trailer, keywords) -- keywords is `[]` when no
+        trailer line was found.
+    """
+    stripped = content.rstrip()
+    last_newline = stripped.rfind("\n")
+    last_line = stripped[last_newline + 1 :]
+
+    match = _KEYWORDS_TRAILER_RE.match(last_line)
+    if match is None:
+        return content, []
+
+    keywords = [item.strip() for item in match.group(1).split(",")]
+    keywords = [item for item in keywords if item]
+
+    markdown = stripped[:last_newline].rstrip() if last_newline != -1 else ""
+    return markdown, keywords
+
+
 @dataclass(frozen=True)
 class ValidationResult:
     """Result of validate_cleanup(): overall pass/fail plus a per-check
@@ -344,6 +386,13 @@ class LLMResult:
           callback surfaces a warning for this case, but the output is
           still accepted and written.
 
+    llm_keywords (issue #56): the content-derived keywords parsed off of
+    the completion's trailing "KEYWORDS: ..." line (see
+    _split_keywords_trailer()). Populated only on success -- `[]` on both
+    failure paths (LLMError, or a failed validate_cleanup() check), same
+    as llm_model/llm_prompt_version staying None in those cases, since no
+    keywords were actually accepted onto disk.
+
     llm_input_tokens / llm_output_tokens / llm_cost_estimate (issue #21):
     populated from the CompletionResult whenever the completion call
     actually happened and returned -- i.e. on success AND on the
@@ -362,6 +411,7 @@ class LLMResult:
     llm_input_tokens: int | None = None
     llm_output_tokens: int | None = None
     llm_cost_estimate: float | None = None
+    llm_keywords: list[str] = field(default_factory=list)
 
 
 def cleanup_pdf(
@@ -458,7 +508,7 @@ def cleanup_pdf(
             processed_at=datetime.now(timezone.utc),
         )
 
-    cleaned_markdown = completion_result.content
+    cleaned_markdown, keywords = _split_keywords_trailer(completion_result.content)
 
     validation_result = validate_cleanup(
         raw_markdown,
@@ -510,6 +560,7 @@ def cleanup_pdf(
         llm_input_tokens=completion_result.input_tokens,
         llm_output_tokens=completion_result.output_tokens,
         llm_cost_estimate=completion_result.cost,
+        llm_keywords=keywords,
     )
 
 

@@ -118,13 +118,20 @@ Data flows through the following stages, each backed by its own module:
    `llm_status="failed"` and leaves `llm_model`/`llm_prompt_version` `None`.
    `needs_llm_reprocessing()` decides whether an `UNCHANGED` file still
    needs an LLM pass (ignores prompt version — only genuine content change
-   or an explicit rerun flag triggers reprocessing).
+   or an explicit rerun flag triggers reprocessing). The same completion
+   also returns 1-5 content-derived keywords (issue #56): the prompt asks
+   for a trailing `KEYWORDS: a, b, c` line after the cleaned Markdown,
+   which `_split_keywords_trailer()` parses off before validation runs;
+   populated only on success (`[]` on any fallback path, same as
+   `llm_model`/`llm_prompt_version` staying `None`).
 4. **Figures + postprocessing** (`src/figures.py`, `src/postprocess.py`) —
    copies cached figures into the vault, rewrites each Markdown image
    reference's alt text to a numbered caption (`Figure N`, optionally with an
    `@darkmode` suffix — image paths themselves are left untouched, no
    wikilink conversion), parses `lecture_NN...` filenames, and builds YAML
-   frontmatter.
+   frontmatter, including a `keywords` field (issue #56) fed by the LLM
+   cleanup stage's keywords above — distinct from `tags` below: `keywords`
+   is per-note/content-derived, `tags` is static/course-level from config.
 5. **Vault write** (`src/vault.py`) — `write_lecture_note()` assembles the
    final `vault/{course}/Lecture NN.md` and writes it, normally
    unconditionally overwriting. It also implements **manual-edit conflict
@@ -154,8 +161,9 @@ Data flows through the following stages, each backed by its own module:
 writes the columns it's given, so one stage's update never clobbers
 another's). Tracked per file: source hash/mtime/size; Mathpix status/pdf id/
 figure & page counts; LLM model/prompt version/status/validation result/
-token counts/cost estimate; the resolved vault output path, vault status,
-vault content hash, and per-stage timestamps.
+keywords (JSON-encoded list, issue #56)/token counts/cost estimate; the
+resolved vault output path, vault status, vault content hash, and
+per-stage timestamps.
 
 ## Configuration
 
@@ -221,8 +229,8 @@ reference where it disagrees with this file.
 - `--force-vault-overwrite` — bypass manual-edit conflict detection for
   the whole run (a blunt, whole-run instrument — no per-file targeting).
 - `--no-llm` — skip the LLM stage entirely; vault note is written from raw
-  Mathpix Markdown, and `llm_status` stays unset so a later normal run
-  picks the file up automatically.
+  Mathpix Markdown with no `keywords` frontmatter, and `llm_status` stays
+  unset so a later normal run picks the file up automatically.
 - `--verbose`/`-v` — print additional per-stage detail (Mathpix poll
   counts, LLM token/cost, figure-copy actions, vault-write confirmations).
 

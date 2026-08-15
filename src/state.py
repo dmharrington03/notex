@@ -30,7 +30,11 @@ one more, `vault_content_hash` (SHA-256 hex digest of the exact content
 last *successfully* written to the vault file -- used to detect manual
 edits to a vault note before overwriting it; `vault_status` also gained a
 third value, `"conflict"`, for when a manual edit is detected and the
-write is skipped). No schema-migration logic is provided for these (or any
+write is skipped). Issue #56 added one more, `llm_keywords` (a JSON-encoded
+list of content-derived keywords the LLM cleanup call returns alongside
+the cleaned Markdown -- see src/llm.py's cleanup_pdf(); NULL/empty on both
+LLM failure paths, same as llm_model/llm_prompt_version). No
+schema-migration logic is provided for these (or any
 other column) -- `init_db()` only ever runs `CREATE TABLE IF NOT EXISTS`,
 so an existing local `state.db` predating a column addition must be
 deleted and left to rebuild rather than migrated in place (cheap given
@@ -64,6 +68,7 @@ _VALUE_COLUMNS = (
     "llm_prompt_version",
     "llm_status",
     "llm_validation_result",
+    "llm_keywords",
     "figure_count",
     "page_count",
     "output_path",
@@ -92,6 +97,7 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     llm_prompt_version     TEXT,
     llm_status             TEXT,
     llm_validation_result  TEXT,
+    llm_keywords           TEXT,
     figure_count           INTEGER,
     page_count             INTEGER,
     output_path            TEXT,
@@ -120,6 +126,7 @@ class StateEntry:
     llm_prompt_version: str | None
     llm_status: str | None
     llm_validation_result: str | None
+    llm_keywords: str | None
     figure_count: int | None
     page_count: int | None
     output_path: str | None
